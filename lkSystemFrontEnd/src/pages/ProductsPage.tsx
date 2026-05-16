@@ -74,7 +74,7 @@ import {
   useSyncSelectedProductsFromWooCommerce,
 } from '@/hooks/queries';
 import type {
-  Product, ProductListItem, ProductStatus, ProductType, PackItem,
+  Product, ProductListItem, ProductStatus, ProductType, PackItem, PackItemDetail,
 } from '@/types';
 
 const POSCameraScanner = lazy(async () => {
@@ -400,21 +400,55 @@ function ResponsiveSheet({
 // ─── PackBuilder — searchable product picker with images + barcode ────────────
 
 function PackBuilder({
-  form, setForm, allProducts, onScanRequest,
+  form, setForm, initialDetails, onScanRequest,
 }: {
   form: FormData;
   setForm: React.Dispatch<React.SetStateAction<FormData>>;
   /**
-   * Used only to render the **names** of products already in the pack — the
-   * picker itself searches the backend, so it doesn't depend on this array
-   * being complete. With the iterating ``getAllProducts`` upstream this is
-   * complete in practice, but the picker no longer cares.
+   * Pre-resolved metadata for items already saved on the product being
+   * edited. The backend returns this on the detail endpoint as
+   * ``pack_items_detail`` (name, image, barcode). We use it to render the
+   * "already in pack" rows without ever guessing from a partial product
+   * list. New items added in this session enrich the same lookup with the
+   * full ``ProductListItem`` we picked from the search results.
    */
-  allProducts: ProductListItem[];
+  initialDetails?: PackItemDetail[] | null;
   onScanRequest: () => void;
 }) {
   const [packSearch, setPackSearch] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
+
+  // Local lookup: ``product_id`` → display data. Seeded from the backend's
+  // ``pack_items_detail`` for existing items, then grown as the user adds
+  // products via the picker. This is the single source of truth for what
+  // gets rendered in each "already in pack" row — no more ``allProducts``
+  // lookups that could be stale or missing.
+  const [productMeta, setProductMeta] = useState<Record<number, {
+    name: string;
+    image_url: string;
+    barcode: string;
+    sales_price?: string | number;
+  }>>({});
+
+  // Hydrate from initialDetails when the form changes (e.g. switching from
+  // edit dialog "Product A" to "Product B"). The id-anchored update means
+  // re-renders that don't actually change the set are no-ops.
+  useEffect(() => {
+    if (!initialDetails || initialDetails.length === 0) return;
+    setProductMeta(prev => {
+      const next = { ...prev };
+      for (const d of initialDetails) {
+        if (!next[d.product_id]) {
+          next[d.product_id] = {
+            name: d.product_name,
+            image_url: d.product_image,
+            barcode: d.product_barcode,
+          };
+        }
+      }
+      return next;
+    });
+  }, [initialDetails]);
   // Server-side search: debounce the input so we don't slam the API while
   // the user is typing, then call the paginated products endpoint. Backend
   // ``SearchFilter`` already covers name + barcode (icontains), so the
@@ -467,6 +501,17 @@ function PackBuilder({
       ...f,
       pack_items: [...f.pack_items, { product_id: p.id, quantity: 1 }],
     }));
+    // Cache name / image / barcode at the moment of selection so the
+    // already-in-pack row can render full info without another fetch.
+    setProductMeta(prev => ({
+      ...prev,
+      [p.id]: {
+        name: p.name,
+        image_url: p.image_url ?? '',
+        barcode: p.barcode ?? '',
+        sales_price: p.sales_price,
+      },
+    }));
     setPackSearch('');
     setPickerOpen(false);
   }, [setForm]);
@@ -514,16 +559,16 @@ function PackBuilder({
       ) : (
         <div className="space-y-1.5">
           {form.pack_items.map(item => {
-            const p = allProducts.find(ap => ap.id === item.product_id);
-            const img = p ? getMediaUrl(p.image_url) : null;
+            const meta = productMeta[item.product_id];
+            const img = meta?.image_url ? getMediaUrl(meta.image_url) : null;
             return (
               <div key={item.product_id} className="flex items-center gap-2.5 rounded-md border bg-background p-2 transition-colors hover:bg-muted/30">
                 <div className="size-9 rounded-md overflow-hidden bg-muted flex items-center justify-center border flex-shrink-0">
                   {img ? <img src={img} alt="" className="size-full object-cover" loading="lazy" /> : <Package className="size-3.5 text-muted-foreground" />}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium truncate">{p?.name ?? `#${item.product_id}`}</p>
-                  {p?.barcode && <p className="text-[11px] text-muted-foreground font-mono truncate">{p.barcode}</p>}
+                  <p className="text-sm font-medium truncate">{meta?.name ?? `#${item.product_id}`}</p>
+                  {meta?.barcode && <p className="text-[11px] text-muted-foreground font-mono truncate">{meta.barcode}</p>}
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
                   <Button type="button" variant="ghost" size="icon" className="size-6"
@@ -1278,7 +1323,15 @@ export default function ProductsPage() {
       </div>
 
       {form.is_pack && (
-        <PackBuilder form={form} setForm={setForm} allProducts={allProducts} onScanRequest={() => setPackScanOpen(true)} />
+        <PackBuilder
+          form={form}
+          setForm={setForm}
+          // Pre-resolved name / image / barcode for items already saved on
+          // this product. ``selected`` is populated when editing; for the
+          // "new product" form there's no initial detail to hydrate.
+          initialDetails={(selected as Product | null)?.pack_items_detail ?? null}
+          onScanRequest={() => setPackScanOpen(true)}
+        />
       )}
     </div>
   );
@@ -1741,30 +1794,38 @@ export default function ProductsPage() {
               )}
             </div>
 
-            {/* Pack Contents */}
-            {selected.is_pack && selected.pack_items && selected.pack_items.length > 0 && (
+            {/* Pack Contents — read straight from the backend's enriched
+                ``pack_items_detail`` so names / images / barcodes are
+                always present, even for products the cached list doesn't
+                hold. Falls back to ``pack_items`` only when the server
+                hasn't provided the detail (e.g. older payloads). */}
+            {selected.is_pack && (((selected as Product).pack_items_detail?.length ?? selected.pack_items?.length ?? 0) > 0) && (
               <>
                 <Separator />
                 <div className="space-y-2.5">
                   <div className="flex items-center gap-2">
                     <Package className="size-4 text-muted-foreground" />
                     <span className="text-sm font-medium">Pack Contents</span>
-                    <Badge variant="secondary" className="text-xs">{selected.pack_items.length}</Badge>
+                    <Badge variant="secondary" className="text-xs">
+                      {(selected as Product).pack_items_detail?.length ?? selected.pack_items?.length ?? 0}
+                    </Badge>
                   </div>
                   <div className="rounded-lg border divide-y">
-                    {selected.pack_items.map((item, idx) => {
-                      const child = allProducts.find(ap => ap.id === item.product_id);
-                      const img = child ? getMediaUrl(child.image_url) : null;
+                    {((selected as Product).pack_items_detail ?? []).map((item: PackItemDetail, idx: number) => {
+                      const img = item.product_image ? getMediaUrl(item.product_image) : null;
+                      // Look up the sales_price from the cached list (best-effort
+                      // — it's optional in the row display, no fallback noise).
+                      const cached = allProducts.find(ap => ap.id === item.product_id);
                       return (
-                        <div key={idx} className="flex items-center gap-3 p-2.5">
+                        <div key={`${item.product_id}-${idx}`} className="flex items-center gap-3 p-2.5">
                           <div className="size-9 rounded-md bg-muted flex items-center justify-center border flex-shrink-0 overflow-hidden">
                             {img ? <img src={img} alt="" className="size-full object-cover" loading="lazy" /> : <Package className="size-3.5 text-muted-foreground" />}
                           </div>
                           <div className="min-w-0 flex-1">
-                            <p className="text-sm font-medium truncate">{child?.name ?? `Product #${item.product_id}`}</p>
+                            <p className="text-sm font-medium truncate">{item.product_name || `Product #${item.product_id}`}</p>
                             <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                              {child?.barcode && <span className="font-mono">{child.barcode}</span>}
-                              {child?.sales_price && <span className="tabular-nums">{fmtPrice(child.sales_price)}</span>}
+                              {item.product_barcode && <span className="font-mono">{item.product_barcode}</span>}
+                              {cached?.sales_price && <span className="tabular-nums">{fmtPrice(cached.sales_price)}</span>}
                             </div>
                           </div>
                           <Badge variant="outline" className="shrink-0 tabular-nums font-medium">×{item.quantity}</Badge>
