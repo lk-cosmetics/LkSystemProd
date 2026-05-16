@@ -87,15 +87,19 @@ function PromotionProductPickerImpl({ brandId, selected, onChange }: Props) {
     let cancelled = false;
     setIsSearching(true);
     setSearchError(null);
+    // Typeahead: deliberately capped to the first page so the dropdown
+    // doesn't render hundreds of rows for an empty / very broad query.
+    // ``getAllProducts`` now iterates pagination, so we use the explicit
+    // single-page variant here.
     productService
-      .getAllProducts({
+      .getProductsPaginated({
         brand: brandId,
         search: debouncedQuery || undefined,
         page_size: 30,
       })
-      .then(rows => {
+      .then(page => {
         if (cancelled) return;
-        setResults(rows.filter(p => p.product_type === 'resell'));
+        setResults(page.results.filter(p => p.product_type === 'resell'));
       })
       .catch(() => {
         if (cancelled) return;
