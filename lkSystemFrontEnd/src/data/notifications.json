@@ -1,0 +1,92 @@
+[
+  {
+    "id": 1,
+    "type": "user",
+    "title": "New user registered",
+    "message": "John Doe just signed up for an account",
+    "time": "5 minutes ago",
+    "read": false,
+    "date": "2025-12-09T10:00:00.000Z"
+  },
+  {
+    "id": 2,
+    "type": "user",
+    "title": "User profile updated",
+    "message": "Jane Smith updated their profile information",
+    "time": "1 hour ago",
+    "read": false,
+    "date": "2025-12-09T09:05:00.000Z"
+  },
+  {
+    "id": 3,
+    "type": "system",
+    "title": "System maintenance",
+    "message": "Scheduled maintenance completed successfully",
+    "time": "2 hours ago",
+    "read": true,
+    "date": "2025-12-09T08:05:00.000Z"
+  },
+  {
+    "id": 4,
+    "type": "alert",
+    "title": "Security alert",
+    "message": "Multiple failed login attempts detected from IP 192.168.1.100",
+    "time": "3 hours ago",
+    "read": false,
+    "date": "2025-12-09T07:05:00.000Z"
+  },
+  {
+    "id": 5,
+    "type": "info",
+    "title": "Database backup",
+    "message": "Daily database backup completed successfully at 2:00 AM",
+    "time": "5 hours ago",
+    "read": true,
+    "date": "2025-12-09T05:05:00.000Z"
+  },
+  {
+    "id": 6,
+    "type": "user",
+    "title": "User deleted",
+    "message": "Admin removed user account: Mike Johnson (ID: 1043)",
+    "time": "1 day ago",
+    "read": true,
+    "date": "2025-12-08T10:05:00.000Z"
+  },
+  {
+    "id": 7,
+    "type": "system",
+    "title": "System update",
+    "message": "New features have been deployed to production",
+    "time": "2 days ago",
+    "read": true,
+    "date": "2025-12-07T10:05:00.000Z"
+  },
+  {
+    "id": 8,
+    "type": "alert",
+    "title": "High CPU usage",
+    "message": "Server CPU usage exceeded 90% threshold",
+    "time": "3 days ago",
+    "read": true,
+    "date": "2025-12-06T10:05:00.000Z"
+  },
+  {
+    "id": 9,
+    "type": "user",
+    "title": "New role assigned",
+    "message": "Sarah Williams has been assigned Admin role",
+    "time": "4 days ago",
+    "read": true,
+    "date": "2025-12-05T10:05:00.000Z"
+  },
+  {
+    "id": 10,
+    "type": "info",
+    "title": "Monthly report ready",
+    "message": "Your monthly analytics report is now available for download",
+    "time": "5 days ago",
+    "read": true,
+    "date": "2025-12-04T10:05:00.000Z"
+  }
+]

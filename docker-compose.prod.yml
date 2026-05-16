@@ -1,0 +1,153 @@
+name: lksystem-prod
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: lksystem_prod_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - app_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: lksystem_prod_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app_net
+
+  backend:
+    build:
+      context: ./LkSystemBackEnd
+      dockerfile: Dockerfile
+    container_name: lksystem_prod_backend
+    restart: unless-stopped
+    env_file:
+      - ${LKSYSTEM_ENV_FILE:-./deploy/lksystem.env}
+    environment:
+      DEBUG: "False"
+      ALLOWED_HOSTS: ${DOMAIN},localhost,127.0.0.1
+      FRONTEND_URL: https://${DOMAIN}
+      CORS_ALLOW_ALL_ORIGINS: "False"
+      CORS_ALLOWED_ORIGINS: https://${DOMAIN}
+      CSRF_TRUSTED_ORIGINS: https://${DOMAIN}
+      SECURE_SSL_REDIRECT: "False"
+      SESSION_COOKIE_SECURE: "True"
+      CSRF_COOKIE_SECURE: "True"
+      SECURE_HSTS_SECONDS: "31536000"
+      SECURE_HSTS_INCLUDE_SUBDOMAINS: "True"
+      SECURE_HSTS_PRELOAD: "False"
+      X_FRAME_OPTIONS: "SAMEORIGIN"
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    volumes:
+      - static_volume:/app/staticfiles
+      - media_volume:/app/mediafiles
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/').read()"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - app_net
+
+  celery-worker:
+    build:
+      context: ./LkSystemBackEnd
+      dockerfile: Dockerfile
+    container_name: lksystem_prod_celery_worker
+    restart: unless-stopped
+    env_file:
+      - ${LKSYSTEM_ENV_FILE:-./deploy/lksystem.env}
+    environment:
+      DEBUG: "False"
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      RUN_STARTUP_TASKS: "False"
+    command: ["celery", "-A", "core", "worker", "-l", "info", "-Q", "orders,delivery,default", "--concurrency=2"]
+    volumes:
+      - media_volume:/app/mediafiles
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    networks:
+      - app_net
+
+  frontend:
+    build:
+      context: ./lkSystemFrontEnd
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ""
+    container_name: lksystem_prod_frontend
+    restart: unless-stopped
+    environment:
+      BACKEND_UPSTREAM: backend:8000
+      PUBLIC_DOMAIN: ${DOMAIN}
+      HTTPS_PORT_SUFFIX: ""
+      SSL_CERTIFICATE: /etc/letsencrypt/live/${DOMAIN}/fullchain.pem
+      SSL_CERTIFICATE_KEY: /etc/letsencrypt/live/${DOMAIN}/privkey.pem
+      ENABLE_SELF_SIGNED_SSL: "false"
+      NGINX_ENVSUBST_FILTER: "BACKEND_UPSTREAM|PUBLIC_DOMAIN|HTTPS_PORT_SUFFIX|SSL_CERTIFICATE|SSL_CERTIFICATE_KEY"
+    volumes:
+      - media_volume:/usr/share/nginx/html/media:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/health || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - app_net
+
+volumes:
+  postgres_data:
+  redis_data:
+  static_volume:
+  media_volume:
+
+networks:
+  app_net:
+    driver: bridge

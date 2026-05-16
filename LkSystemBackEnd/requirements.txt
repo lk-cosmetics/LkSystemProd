@@ -1,0 +1,46 @@
+# Django Core
+Django>=5.0,<6.0
+djangorestframework>=3.14,<4.0
+
+# Database
+psycopg2-binary>=2.9,<3.0
+
+# Caching & Sessions
+django-redis>=5.4,<6.0
+
+# Security & CORS
+django-cors-headers>=4.3,<5.0
+
+# JWT Authentication
+djangorestframework-simplejwt>=5.3,<6.0
+
+# API Documentation
+drf-spectacular>=0.27,<1.0
+
+# Image Processing
+Pillow>=10.0,<11.0
+
+# Configuration
+python-decouple>=3.8,<4.0
+
+# Static Files (Production)
+whitenoise>=6.6,<7.0
+
+# Production Server
+gunicorn>=21.0,<23.0
+
+# WooCommerce Integration
+WooCommerce>=3.0,<4.0
+
+# Development & Testing (optional - can be moved to requirements-dev.txt)
+django-extensions>=3.2,<4.0
+django-filter>=23.0,<25.0
+
+# WebSocket support (Real-time updates)
+channels>=4.0,<5.0
+channels-redis>=4.1,<5.0
+daphne>=4.0,<5.0
+
+# Background tasks (optional — app degrades gracefully without Celery)
+celery>=5.3,<6.0
+redis>=5.0,<6.0

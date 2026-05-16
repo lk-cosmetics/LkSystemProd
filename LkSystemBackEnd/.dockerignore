@@ -1,0 +1,35 @@
+# VCS and editor history
+.git
+.gitignore
+.history
+.claude
+
+# Python cache / virtual environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Local environment and logs
+.env
+*.log
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local runtime artifacts
+mediafiles/
+staticfiles/
+
+# Docs and local notes
+docs/
+*.md
+
+# OS files
+.DS_Store
+Thumbs.db

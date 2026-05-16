@@ -1,0 +1,469 @@
+/* ═══════════════════════════════════════════════════════════════════
+   POS Print Styles
+   Applied only when window.print() is called.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ─────────────────────────────────────────────────────────────
+   POS Receipt — 80 mm thermal (HPRT TP80BE & compatible)
+   Printable width ≈ 72 mm / 576 dots.
+   Pure black & white, monospaced, no shadows / gradients.
+   ───────────────────────────────────────────────────────────── */
+
+.pos-receipt {
+  /* Match TP80BE printable area exactly: 72 mm wide, no outer padding so the
+     whole element fits inside the driver's custom 72 mm paper. */
+  width: 72mm;
+  box-sizing: border-box;
+  padding: 1mm 2mm;
+  margin: 0 auto;
+  background: #fff;
+  color: #000;
+  font-family: 'Consolas', 'Menlo', 'Liberation Mono', 'Courier New', monospace;
+  font-size: 9pt;
+  line-height: 1.32;
+  -webkit-font-smoothing: none;
+  page-break-after: avoid;
+  break-after: avoid;
+}
+
+.pos-receipt * { margin: 0; padding: 0; box-sizing: border-box; }
+.pos-receipt h1, .pos-receipt h2 { font-weight: 700; }
+
+/* ── Header ────────────────────────────────────────────────── */
+.pos-receipt .r-header { text-align: center; padding: 0 0 1mm; }
+.pos-receipt .r-logo {
+  display: block;
+  margin: 0 auto 1mm;
+  max-width: 32mm;
+  max-height: 13mm;
+  width: auto;
+  height: auto;
+  filter: grayscale(100%) contrast(1000%);
+  image-rendering: pixelated;
+}
+.pos-receipt .r-title {
+  font-size: 14pt;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.pos-receipt .r-subtitle {
+  color: #333;
+  font-size: 8pt;
+  letter-spacing: 1px;
+  margin-top: 0.6mm;
+  text-transform: uppercase;
+}
+.pos-receipt .r-store {
+  font-size: 8pt;
+  margin-top: 0.4mm;
+}
+
+/* ── Rules ─────────────────────────────────────────────────── */
+.pos-receipt .r-rule {
+  border: 0;
+  border-top: 1px dashed #000;
+  margin: 1.4mm 0;
+}
+.pos-receipt .r-rule--solid { border-top: 1px solid #000; }
+.pos-receipt .r-rule--heavy { border-top: 1px solid #000; }
+
+.pos-receipt .r-ticket-title {
+  text-align: center;
+  padding: 0.6mm 0;
+}
+.pos-receipt .r-ticket-title strong {
+  display: block;
+  font-size: 9pt;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+}
+.pos-receipt .r-ticket-title span {
+  display: block;
+  margin-top: 0.4mm;
+  font-size: 8.5pt;
+}
+
+/* ── Meta block (label : value rows) ───────────────────────── */
+.pos-receipt .r-meta { font-size: 8.5pt; }
+.pos-receipt .r-meta > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 2mm;
+  padding: 0.2mm 0;
+}
+.pos-receipt .r-meta > div > span:first-child {
+  font-weight: 700;
+  flex-shrink: 0;
+  min-width: 16mm;
+}
+.pos-receipt .r-meta > div > span:first-child::after {
+  content: ' :';
+}
+.pos-receipt .r-meta > div > span:last-child {
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* ── Items — compact grid (Article / Qté / Total) ──────────── */
+.pos-receipt .r-items {
+  font-size: 8.8pt;
+  width: 100%;
+}
+.pos-receipt .r-items-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 22mm;
+  gap: 1mm;
+  align-items: start;
+}
+.pos-receipt .r-items-head {
+  font-weight: 600;
+  border-bottom: 1px solid #000;
+  padding-bottom: 0.6mm;
+  margin-bottom: 0.6mm;
+}
+.pos-receipt .r-item {
+  display: block;
+  padding: 0.9mm 0;
+}
+.pos-receipt .r-item + .r-item {
+  border-top: 0;
+}
+.pos-receipt .r-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.pos-receipt .r-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  hyphens: auto;
+}
+.pos-receipt .r-line-detail {
+  display: flex;
+  justify-content: space-between;
+  gap: 2mm;
+  padding-left: 3mm;
+  font-size: 8.7pt;
+}
+
+/* ── Generic amount cell (used in totals/payment rows) ─────── */
+.pos-receipt .r-amount {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ── Totals / payment rows ─────────────────────────────────── */
+.pos-receipt .r-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 2mm;
+  font-size: 8.8pt;
+  padding: 0.25mm 0;
+}
+
+/* TOTAL — boxed, bold, larger */
+.pos-receipt .r-grand {
+  display: block;
+  border-top: 1px solid #000;
+  border-bottom: 1px solid #000;
+  padding: 1.4mm 0;
+  margin-top: 1.4mm;
+  text-align: center;
+  font-size: 17pt;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+.pos-receipt .r-grand > span:first-child {
+  display: block;
+  font-size: 9.5pt;
+  letter-spacing: 2px;
+}
+.pos-receipt .r-grand .r-amount {
+  display: block;
+  text-align: center;
+}
+.pos-receipt .r-grand .r-currency {
+  font-size: 9pt;
+  font-weight: 700;
+  margin-left: 1mm;
+  letter-spacing: 0.5px;
+}
+
+/* ── Payment ───────────────────────────────────────────────── */
+.pos-receipt .r-pay { margin-top: 0.6mm; }
+.pos-receipt .r-pay-change {
+  font-weight: 700;
+  font-size: 9.5pt;
+}
+
+/* ── QR code block ─────────────────────────────────────────── */
+.pos-receipt .r-qr {
+  text-align: center;
+  margin: 2mm 0 0.8mm;
+}
+.pos-receipt .r-qr svg {
+  display: block;
+  margin: 0 auto;
+  width: 22mm;
+  height: 22mm;
+}
+.pos-receipt .r-qr figcaption {
+  margin-top: 1mm;
+  color: #444;
+  font-size: 7.8pt;
+}
+
+/* ── Thank-you ─────────────────────────────────────────────── */
+.pos-receipt .r-thanks {
+  text-align: center;
+  margin-top: 1mm;
+  padding-bottom: 0.6mm;
+  font-size: 8.8pt;
+}
+.pos-receipt .r-thanks p + p { margin-top: 0.5mm; }
+.pos-receipt .r-policy {
+  color: #444;
+  font-size: 8pt;
+  line-height: 1.35;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Print-only rules
+   ═══════════════════════════════════════════════════════════════════ */
+
+@media print {
+  /* Collapse the React app shell so the page height = receipt height.
+     Without this, #root keeps a min-height:100vh from the screen layout,
+     which Chrome interprets as a full A4 page and adds a blank sheet. */
+  html, body,
+  #root, #root > *,
+  body > div {
+    margin: 0 !important;
+    padding: 0 !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+
+  /* Hide everything on screen */
+  body * { visibility: hidden !important; }
+
+  /* Show only the print target and its children */
+  .pos-receipt,
+  .pos-receipt *,
+  .pos-invoice,
+  .pos-invoice * { visibility: visible !important; }
+
+  /* Position print target at top-left */
+  .pos-receipt,
+  .pos-invoice {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    background: white !important;
+    color: black !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Lock to the TP80BE printable area: 72 mm with 2 mm horizontal pad. */
+  .pos-receipt {
+    width: 72mm !important;
+    padding: 1mm 2mm !important;
+  }
+
+  /* ── Invoice (A4) ─────────────────────────────────────────────── */
+  .pos-invoice {
+    width: 100% !important;
+    padding: 0 !important;
+    font-family: Arial, Helvetica, sans-serif !important;
+    font-size: 11pt !important;
+    line-height: 1.4 !important;
+  }
+  .pos-invoice table { page-break-inside: avoid; }
+
+  /* No shadows on print */
+  .pos-receipt *,
+  .pos-invoice * { box-shadow: none !important; }
+}
+
+/* Named pages: only one of the two root elements is mounted at a time
+   (gated by `printMode` in POSPage), so the matching @page rule wins.
+   `size: 80mm auto` removes browser margins and gives an infinite roll. */
+.pos-receipt { page: receipt; }
+.pos-invoice { page: invoice; }
+
+/* ─────────────────────────────────────────────────────────────
+   POS Invoice — clean A4 document
+   ───────────────────────────────────────────────────────────── */
+
+.pos-invoice {
+  width: 190mm;
+  margin: 0 auto;
+  padding: 0;
+  background: #fff;
+  color: #111;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 10pt;
+  line-height: 1.45;
+}
+
+.pos-invoice * { box-sizing: border-box; }
+
+.pos-invoice .invoice-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18mm;
+  border-bottom: 2px solid #111;
+  padding-bottom: 8mm;
+  margin-bottom: 8mm;
+}
+
+.pos-invoice .invoice-brand {
+  display: flex;
+  align-items: flex-start;
+  gap: 5mm;
+  min-width: 0;
+}
+
+.pos-invoice .invoice-logo {
+  max-width: 28mm;
+  max-height: 18mm;
+  object-fit: contain;
+}
+
+.pos-invoice h1 {
+  margin: 0 0 2mm;
+  font-size: 18pt;
+  line-height: 1.1;
+  text-transform: uppercase;
+}
+
+.pos-invoice p {
+  margin: 0.8mm 0;
+}
+
+.pos-invoice .invoice-title {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.pos-invoice .invoice-title span {
+  display: block;
+  font-size: 20pt;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.pos-invoice .invoice-title strong,
+.pos-invoice .invoice-title small {
+  display: block;
+}
+
+.pos-invoice .invoice-info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6mm;
+  margin-bottom: 8mm;
+}
+
+.pos-invoice .invoice-info-grid > div {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 4mm;
+}
+
+.pos-invoice h2 {
+  margin: 0 0 2.5mm;
+  font-size: 10pt;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.pos-invoice .strong {
+  font-weight: 700;
+}
+
+.pos-invoice .muted {
+  color: #666;
+}
+
+.pos-invoice .invoice-info-grid p {
+  display: flex;
+  justify-content: space-between;
+  gap: 4mm;
+}
+
+.pos-invoice .invoice-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 7mm;
+}
+
+.pos-invoice .invoice-table th {
+  background: #111;
+  color: #fff;
+  padding: 3mm 2.5mm;
+  text-align: left;
+  font-weight: 700;
+}
+
+.pos-invoice .invoice-table td {
+  border-bottom: 1px solid #e2e2e2;
+  padding: 3mm 2.5mm;
+  vertical-align: top;
+}
+
+.pos-invoice .invoice-table th:nth-child(3),
+.pos-invoice .invoice-table td:nth-child(3) {
+  text-align: center;
+  width: 18mm;
+}
+
+.pos-invoice .invoice-table th:nth-child(4),
+.pos-invoice .invoice-table td:nth-child(4) {
+  text-align: right;
+  width: 30mm;
+  white-space: nowrap;
+}
+
+.pos-invoice .invoice-summary {
+  margin-left: auto;
+  width: 72mm;
+}
+
+.pos-invoice .invoice-summary > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 6mm;
+  padding: 1.8mm 0;
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.pos-invoice .invoice-summary .invoice-total {
+  margin-top: 2mm;
+  border-top: 2px solid #111;
+  border-bottom: 2px solid #111;
+  font-size: 14pt;
+  font-weight: 800;
+}
+
+.pos-invoice .invoice-footer {
+  margin-top: 14mm;
+  padding-top: 4mm;
+  border-top: 1px solid #ddd;
+  text-align: center;
+  color: #666;
+  font-size: 9pt;
+}
+
+@page receipt { size: 72mm auto; margin: 0; }
+@page invoice { size: A4; margin: 10mm; }

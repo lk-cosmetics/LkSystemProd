@@ -1,0 +1,91 @@
+# ─── Secrets ───────────────────────────────────────────────────────────────
+# Never commit real env files. Only the *.example templates are tracked.
+.env
+.env.*
+!.env.example
+!*.env.example
+deploy/lksystem.env
+
+# ─── Python / Django ───────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+.tox/
+.nox/
+
+# Django runtime artefacts — never committed; produced inside the container.
+LkSystemBackEnd/db.sqlite3
+LkSystemBackEnd/db.sqlite3-journal
+LkSystemBackEnd/staticfiles/
+LkSystemBackEnd/mediafiles/
+LkSystemBackEnd/media/
+LkSystemBackEnd/local_settings.py
+
+# Virtual envs anywhere in the tree.
+venv/
+.venv/
+env/
+ENV/
+
+# ─── Node / Vite ───────────────────────────────────────────────────────────
+node_modules/
+**/node_modules/
+dist/
+dist-ssr/
+build/
+.vite/
+*.tsbuildinfo
+.eslintcache
+
+# ─── Bridges (PyInstaller artefacts) ───────────────────────────────────────
+# The source stays tracked; built binaries are produced per-machine.
+print-bridge/build/
+print-bridge/dist/
+print-bridge/*.spec
+customer-display-bridge/build/
+customer-display-bridge/dist/
+customer-display-bridge/*.spec
+
+# Local config copies of the bridge JSONs (templates are tracked as *.example).
+print-bridge/config.json
+customer-display-bridge/config.json
+
+# Pre-packaged bridge installers — distributed via GitHub Releases or a
+# share drive, never the repo itself (each is ~90 MB).
+print-bridge.zip
+customer-display-bridge.zip
+*.zip
+
+# ─── Logs / Temp / OS / IDE ────────────────────────────────────────────────
+*.log
+logs/
+*.tmp
+*.bak
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.iml
+.history/
+
+# ─── Docker / Local infra notes ────────────────────────────────────────────
+docker-build-*.log
+.docker/
+.cache/
+
+# ─── Claude / plan files (workspace-local) ─────────────────────────────────
+.claude/

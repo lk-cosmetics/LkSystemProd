@@ -1,0 +1,159 @@
+name: CI
+
+# Runs on every push to ``dev`` and on every pull request targeting ``main``.
+# Goal: catch broken builds before they merge — the production-deploy workflow
+# (``deploy.yml``) reuses the same Dockerfiles, so a passing CI here is a
+# strong signal that the VPS rebuild will succeed.
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref — saves minutes during rapid pushes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── Backend ──────────────────────────────────────────────────────────────
+  backend:
+    name: Django checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: LkSystemBackEnd
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: lksystem_test
+          POSTGRES_USER: lksystem_test
+          POSTGRES_PASSWORD: lksystem_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U lksystem_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DEBUG: 'False'
+      SECRET_KEY: ci-only-not-a-real-secret
+      ALLOWED_HOSTS: localhost,127.0.0.1
+      POSTGRES_DB: lksystem_test
+      POSTGRES_USER: lksystem_test
+      POSTGRES_PASSWORD: lksystem_test
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: '5432'
+      REDIS_URL: redis://localhost:6379/0
+      CELERY_BROKER_URL: redis://localhost:6379/1
+      CELERY_RESULT_BACKEND: redis://localhost:6379/1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: LkSystemBackEnd/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Django system check
+        run: python manage.py check --deploy --fail-level WARNING
+
+      - name: Django migrations dry-run
+        # ``makemigrations --check`` fails if any model change is missing a
+        # migration — protects ``main`` from "I forgot to run makemigrations".
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Apply migrations against the CI database
+        run: python manage.py migrate --no-input
+
+  # ─── Frontend ─────────────────────────────────────────────────────────────
+  frontend:
+    name: Vite build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lkSystemFrontEnd
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: lkSystemFrontEnd/package-lock.json
+
+      - name: Install dependencies (clean)
+        run: npm ci --no-audit --no-fund
+
+      - name: Type-check & build
+        # The ``build`` script is ``tsc -b && vite build`` — a type error
+        # anywhere in the codebase fails the job.
+        env:
+          # The bundle is built with an empty base URL so it uses same-origin
+          # requests behind the Nginx reverse proxy in production.
+          VITE_API_BASE_URL: ''
+        run: npm run build
+
+      - name: Upload dist artifact (kept 7 days)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: lkSystemFrontEnd/dist
+          retention-days: 7
+
+  # ─── Docker build sanity ──────────────────────────────────────────────────
+  # Verifies both production Dockerfiles still build (no ``RUN`` regressions,
+  # no ``COPY`` to missing paths). Cheaper than running the full prod compose.
+  docker:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: LkSystemBackEnd
+          file: LkSystemBackEnd/Dockerfile
+          push: false
+          load: false
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: lkSystemFrontEnd
+          file: lkSystemFrontEnd/Dockerfile
+          push: false
+          load: false
+          build-args: |
+            VITE_API_BASE_URL=
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend

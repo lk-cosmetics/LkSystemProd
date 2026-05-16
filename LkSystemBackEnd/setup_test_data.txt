@@ -1,0 +1,84 @@
+from apps.company.models import Company
+from apps.brands.models import Brand
+from apps.sales_channels.models import SalesChannel
+from apps.products.models import Product
+from apps.inventory.models import Store, StoreInventory
+from decimal import Decimal
+
+# Create Company
+company, _ = Company.objects.get_or_create(
+    name='Test Company',
+    defaults={
+        'legal_name': 'Test Company LLC',
+        'abbreviation': 'TEST',
+        'email': 'test@testcompany.com',
+        'phone': '+216 71 123 456',
+        'city': 'Tunis',
+    }
+)
+print(f'✓ Company: {company.name}')
+
+# Create Brand
+brand, _ = Brand.objects.get_or_create(
+    company=company,
+    name='Test Brand',
+)
+print(f'✓ Brand: {brand.name}')
+
+# Create Sales Channel  
+sales_channel, _ = SalesChannel.objects.get_or_create(
+    brand=brand,
+    name='Test POS',
+    defaults={
+        'channel_type': SalesChannel.ChannelType.POS,
+        'is_active': True,
+    }
+)
+print(f'✓ Sales Channel: {sales_channel.name}')
+
+# Create Products
+products_data = [
+    {'name': 'Dell Laptop', 'barcode': 'DEL-001', 'price': Decimal('999.99')},
+    {'name': 'iPhone 15', 'barcode': 'APP-001', 'price': Decimal('899.99')},
+    {'name': 'Samsung Galaxy', 'barcode': 'SAM-001', 'price': Decimal('799.99')},
+]
+
+for prod in products_data:
+    product, created = Product.objects.get_or_create(
+        sales_channel=sales_channel,
+        barcode=prod['barcode'],
+        defaults={
+            'name': prod['name'],
+            'wc_product_id': 0,
+            'slug': prod['name'].lower().replace(' ', '-'),
+            'sales_price': prod['price'],
+            'purchase_price': prod['price'] * Decimal('0.6'),
+            'manage_stock': True,
+        }
+    )
+    if created:
+        print(f'  ✓ Product: {product.name}')
+
+# Create Stores
+for store_code, store_name in [('WH-001', 'Main Warehouse'), ('STR-TUN', 'Retail Tunis')]:
+    store, created = Store.objects.get_or_create(
+        company=company,
+        code=store_code,
+        defaults={
+            'name': store_name,
+            'store_type': Store.StoreType.WAREHOUSE,
+            'is_active': True,
+        }
+    )
+    if created:
+        print(f'✓ Store: {store.name}')
+        
+        # Create Inventory
+        for product in Product.objects.filter(sales_channel=sales_channel):
+            StoreInventory.objects.get_or_create(
+                store=store,
+                product=product,
+                defaults={'quantity': 100, 'minimum_quantity': 10}
+            )
+
+print('\n✅ Test data ready!')

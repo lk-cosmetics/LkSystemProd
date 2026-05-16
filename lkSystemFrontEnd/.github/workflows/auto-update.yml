@@ -1,0 +1,89 @@
+name: 🔄 Auto Dependency Updater
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # every sunday at 12:00 AM UTC (adjust as needed)
+  workflow_dispatch: # allow manual trigger from Actions tab
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-dependencies:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20 # or your project's version
+
+      - name: 📦 Upgrade dependencies (Fail-Safe)
+        run: |
+          set -e  # Exit on any error
+
+          echo "🔍 Backing up original package.json..."
+          cp package.json package.json.backup
+
+          echo "📋 Installing npm-check-updates..."
+          npm install -g npm-check-updates
+
+          echo "🔄 Upgrading dependencies..."
+          ncu -u
+
+          echo "🧪 Testing npm install after upgrades..."
+          if npm install; then
+            echo "✅ npm install succeeded after upgrades"
+          else
+            echo "❌ npm install failed after upgrades - reverting changes"
+            cp package.json.backup package.json
+            echo "🧹 Cleaning up backup..."
+            rm -f package.json.backup
+            exit 1
+          fi
+
+          echo "🔒 Running npm audit fix..."
+          if npm audit fix; then
+            echo "✅ npm audit fix completed"
+          else
+            echo "⚠️ npm audit fix had issues, but continuing..."
+          fi
+
+          echo "🧪 Final verification with npm install..."
+          if npm install; then
+            echo "✅ Final npm install verification passed"
+          else
+            echo "❌ Final verification failed - reverting changes"
+            cp package.json.backup package.json
+            npm install
+            echo "⚠️ Skipping commit due to dependency conflict"
+            echo "🧹 Cleaning up backup..."
+            rm -f package.json.backup
+            exit 0
+          fi
+
+          echo "🧹 Cleaning up backup..."
+          rm -f package.json.backup
+
+      - name: 🧠 Commit and Push changes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "📝 Changes detected, committing..."
+            git add .
+            git commit -m "chore: 🔄 auto-dependency upgrade"
+            git push origin ${{ github.ref_name }}
+            echo "✅ Successfully pushed dependency updates"
+          else
+            echo "✅ No changes to commit"
+          fi

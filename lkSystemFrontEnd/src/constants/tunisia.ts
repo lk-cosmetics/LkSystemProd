@@ -1,0 +1,31 @@
+export const TUNISIA_GOVERNORATES = [
+  'Nabeul',
+  'Gafsa',
+  'Sfax',
+  'Tunis',
+  'Bizerte',
+  'Jendouba',
+  'Tozeur',
+  'Tataouine',
+  'Kef',
+  'Sidi Bouzid',
+  'Manouba',
+  'Beja',
+  'Gabès',
+  'Zaghouan',
+  'Ariana',
+  'Kairouan',
+  'Monastir',
+  'Mahdia',
+  'Siliana',
+  'Ben Arous',
+  'Medenine',
+  'Kasserine',
+  'Sousse',
+  'Kebili',
+] as const;
+
+export const TUNISIA_GOVERNORATE_OPTIONS = TUNISIA_GOVERNORATES.map(name => ({
+  label: name,
+  value: name,
+}));

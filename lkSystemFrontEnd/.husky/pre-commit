@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "Skipping pre-commit checks (dev mode)."
+exit 0

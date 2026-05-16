@@ -1,0 +1,153 @@
+name: lksystem
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: lksystem_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lksystem
+      POSTGRES_USER: lksystem_user
+      POSTGRES_PASSWORD: lksystem_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lksystem_user -d lksystem"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - app_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: lksystem_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app_net
+
+  backend:
+    build:
+      context: ./LkSystemBackEnd
+      dockerfile: Dockerfile
+    container_name: lksystem_backend
+    restart: unless-stopped
+    env_file:
+      - ./LkSystemBackEnd/.env
+    environment:
+      DEBUG: "True"
+      ALLOWED_HOSTS: "*"
+      CSRF_TRUSTED_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173,https://localhost:5173,https://127.0.0.1:5173,http://192.168.1.194:5180,https://192.168.1.194:5173,http://192.168.1.194:5173"
+      CORS_ALLOW_ALL_ORIGINS: "True"
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    volumes:
+      - static_volume:/app/staticfiles
+      - media_volume:/app/mediafiles
+    ports:
+      - "0.0.0.0:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/').read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    networks:
+      - app_net
+
+  celery-worker:
+    build:
+      context: ./LkSystemBackEnd
+      dockerfile: Dockerfile
+    container_name: lksystem_celery_worker
+    restart: unless-stopped
+    env_file:
+      - ./LkSystemBackEnd/.env
+    environment:
+      DEBUG: "True"
+      ALLOWED_HOSTS: "*"
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      RUN_STARTUP_TASKS: "False"
+    command: ["celery", "-A", "core", "worker", "-l", "info", "-Q", "orders,delivery,default", "--concurrency=2"]
+    volumes:
+      - media_volume:/app/mediafiles
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    networks:
+      - app_net
+
+  frontend:
+    build:
+      context: ./lkSystemFrontEnd
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ""
+    container_name: lksystem_frontend
+    restart: unless-stopped
+    environment:
+      BACKEND_UPSTREAM: backend:8000
+      PUBLIC_DOMAIN: "_"
+      HTTPS_PORT_SUFFIX: ":5173"
+      SSL_CERTIFICATE: "/etc/nginx/ssl/selfsigned.crt"
+      SSL_CERTIFICATE_KEY: "/etc/nginx/ssl/selfsigned.key"
+      ENABLE_SELF_SIGNED_SSL: "true"
+      # Only substitute these env vars in nginx template — prevents clobbering
+      # Nginx's own variables like $host, $scheme, $http_host, etc.
+      NGINX_ENVSUBST_FILTER: "BACKEND_UPSTREAM|PUBLIC_DOMAIN|HTTPS_PORT_SUFFIX|SSL_CERTIFICATE|SSL_CERTIFICATE_KEY"
+    volumes:
+      - media_volume:/usr/share/nginx/html/media
+      - ssl_certs:/etc/nginx/ssl
+    ports:
+      - "0.0.0.0:5173:443"
+      - "0.0.0.0:5180:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - app_net
+
+volumes:
+  postgres_data:
+  redis_data:
+  static_volume:
+  media_volume:
+  ssl_certs:
+
+networks:
+  app_net:
+    driver: bridge
