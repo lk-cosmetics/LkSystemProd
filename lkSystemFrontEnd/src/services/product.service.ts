@@ -87,12 +87,56 @@ const normalizePaginatedResponse = <T>(
 };
 
 class ProductService {
+  /**
+   * Return **every** matching product, following DRF pagination across pages.
+   *
+   * Before: this returned only ``results`` from the first response, which
+   * meant any caller that didn't pass an explicit large ``page_size`` was
+   * silently capped at the backend default (``PAGE_SIZE=20``). The Pack
+   * builder, Manufacturing page, and Inventory page all relied on a complete
+   * list and were silently missing anything past row #20.
+   *
+   * Now: we fetch the first page, then keep requesting subsequent pages
+   * (incrementing ``page``) until ``next`` is null. A safety cap prevents
+   * runaway loops if the backend ever misbehaves. Internal batch size is
+   * generous (200) so a typical catalogue (~150 products) finishes in one
+   * round-trip while leaving headroom for growth.
+   *
+   * Callers that explicitly want a single capped page (e.g. typeahead
+   * dropdowns that show "top N matches") should use
+   * :meth:`getProductsPaginated` instead.
+   */
   async getAllProducts(params?: ProductQueryParams): Promise<ProductListItem[]> {
-    const response = await apiClient.get<PaginatedResponse<ProductListItem> | ProductListItem[]>(
-      PRODUCT_ENDPOINT,
-      { params: normalizeProductQueryParams(params) },
-    );
-    return normalizePaginatedResponse(response.data).results;
+    const BATCH_SIZE = 200;
+    const MAX_PAGES = 100;   // 100 × 200 = 20,000 hard ceiling
+
+    // If the caller asked for a specific page, honour that — single page only.
+    if (params?.page !== undefined) {
+      const response = await apiClient.get<PaginatedResponse<ProductListItem> | ProductListItem[]>(
+        PRODUCT_ENDPOINT,
+        { params: normalizeProductQueryParams(params) },
+      );
+      return normalizePaginatedResponse(response.data).results;
+    }
+
+    const baseParams: ProductQueryParams = {
+      ...(params ?? {}),
+      page_size: BATCH_SIZE,
+    };
+
+    const collected: ProductListItem[] = [];
+    let page = 1;
+    while (page <= MAX_PAGES) {
+      const response = await apiClient.get<PaginatedResponse<ProductListItem> | ProductListItem[]>(
+        PRODUCT_ENDPOINT,
+        { params: normalizeProductQueryParams({ ...baseParams, page }) },
+      );
+      const normalized = normalizePaginatedResponse(response.data);
+      collected.push(...normalized.results);
+      if (!normalized.next || normalized.results.length < BATCH_SIZE) break;
+      page += 1;
+    }
+    return collected;
   }
 
   async getProductsPaginated(params?: ProductQueryParams): Promise<PaginatedResponse<ProductListItem>> {
