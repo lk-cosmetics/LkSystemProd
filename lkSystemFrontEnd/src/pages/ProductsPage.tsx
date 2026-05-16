@@ -51,6 +51,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
 import { Separator } from '@/components/ui/separator';
 import { useIsMobile } from '@/hooks/use-mobile';
+import { useDebounce } from '@/hooks/useDebounce';
 import { useAuthStore } from '@/store/authStore';
 import { hasRole } from '@/hooks/useAuth';
 import { getMediaUrl } from '@/utils/helpers';
@@ -403,27 +404,63 @@ function PackBuilder({
 }: {
   form: FormData;
   setForm: React.Dispatch<React.SetStateAction<FormData>>;
+  /**
+   * Used only to render the **names** of products already in the pack — the
+   * picker itself searches the backend, so it doesn't depend on this array
+   * being complete. With the iterating ``getAllProducts`` upstream this is
+   * complete in practice, but the picker no longer cares.
+   */
   allProducts: ProductListItem[];
   onScanRequest: () => void;
 }) {
   const [packSearch, setPackSearch] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Server-side search: debounce the input so we don't slam the API while
+  // the user is typing, then call the paginated products endpoint. Backend
+  // ``SearchFilter`` already covers name + barcode (icontains), so the
+  // search box matches by either field.
+  const debouncedSearch = useDebounce(packSearch, 250);
+  const [results, setResults] = useState<ProductListItem[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!pickerOpen) return;
+    let cancelled = false;
+    setIsSearching(true);
+    setSearchError(null);
+    productService
+      .getProductsPaginated({
+        search: debouncedSearch.trim() || undefined,
+        page_size: 50,
+      })
+      .then(page => {
+        if (!cancelled) setResults(page.results);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSearchError('Could not load products.');
+          setResults([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsSearching(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pickerOpen, debouncedSearch]);
 
   const usedIds = useMemo(
     () => new Set(form.pack_items.map(pi => pi.product_id)),
     [form.pack_items],
   );
 
-  const filteredProducts = useMemo(() => {
-    const q = packSearch.toLowerCase().trim();
-    return allProducts.filter(p => {
-      if (p.is_deleted || p.id === form.id || usedIds.has(p.id)) return false;
-      if (!q) return true;
-      return p.name.toLowerCase().includes(q)
-        || (p.barcode && p.barcode.toLowerCase().includes(q))
-        || (p.brand_name && p.brand_name.toLowerCase().includes(q));
-    });
-  }, [allProducts, packSearch, form.id, usedIds]);
+  const filteredProducts = useMemo(
+    () =>
+      results.filter(p => !p.is_deleted && p.id !== form.id && !usedIds.has(p.id)),
+    [results, form.id, usedIds],
+  );
 
   const addProduct = useCallback((p: ProductListItem) => {
     setForm(f => ({
@@ -530,13 +567,21 @@ function PackBuilder({
               />
             </div>
           </div>
-          <div className="max-h-[200px] overflow-y-auto">
-            {filteredProducts.length === 0 ? (
+          <div className="max-h-[260px] overflow-y-auto">
+            {isSearching && results.length === 0 ? (
+              <p className="text-xs text-muted-foreground text-center py-4">
+                Searching…
+              </p>
+            ) : searchError ? (
+              <p className="text-xs text-destructive text-center py-4">
+                {searchError}
+              </p>
+            ) : filteredProducts.length === 0 ? (
               <p className="text-xs text-muted-foreground text-center py-4">
                 {packSearch ? 'No matching products found' : 'No available products'}
               </p>
             ) : (
-              filteredProducts.slice(0, 30).map(p => {
+              filteredProducts.slice(0, 50).map(p => {
                 const img = getMediaUrl(p.image_url);
                 return (
                   <button
@@ -817,10 +862,30 @@ export default function ProductsPage() {
 
   // ── Barcode: add pack item by barcode ──
 
-  const handlePackScanBarcode = useCallback((code: string) => {
-    const found = allProducts.find(p => p.barcode?.toLowerCase() === code.toLowerCase() && !p.is_deleted);
+  const handlePackScanBarcode = useCallback(async (code: string) => {
+    // Server-side lookup — relying on a pre-loaded ``allProducts`` array
+    // meant any product past the first page (default page_size=20) was
+    // invisible to the scan. Hit the backend with the barcode, then exact-
+    // match in the (small) candidate set so a partial-match SearchFilter
+    // can't smuggle in the wrong product.
+    const trimmed = code.trim();
+    if (!trimmed) return;
+    let found: ProductListItem | undefined;
+    try {
+      const page = await productService.getProductsPaginated({
+        search: trimmed,
+        page_size: 10,
+      });
+      found = page.results.find(
+        p => !p.is_deleted && (p.barcode || '').toLowerCase() === trimmed.toLowerCase(),
+      );
+    } catch {
+      setPackScanFeedback('Network error while looking up barcode');
+      setPackScanFeedbackType('error');
+      return;
+    }
     if (!found) {
-      setPackScanFeedback(`Barcode "${code}" not found`);
+      setPackScanFeedback(`Barcode "${trimmed}" not found`);
       setPackScanFeedbackType('error');
       return;
     }
@@ -829,12 +894,12 @@ export default function ProductsPage() {
       setPackScanFeedbackType('error');
       return;
     }
-    const existing = form.pack_items.find(pi => pi.product_id === found.id);
+    const existing = form.pack_items.find(pi => pi.product_id === found!.id);
     if (existing) {
       setForm(f => ({
         ...f,
         pack_items: f.pack_items.map(pi =>
-          pi.product_id === found.id ? { ...pi, quantity: pi.quantity + 1 } : pi
+          pi.product_id === found!.id ? { ...pi, quantity: pi.quantity + 1 } : pi
         ),
       }));
       setPackScanFeedback(`+1 ${found.name} (qty: ${existing.quantity + 1})`);
@@ -842,12 +907,12 @@ export default function ProductsPage() {
     } else {
       setForm(f => ({
         ...f,
-        pack_items: [...f.pack_items, { product_id: found.id, quantity: 1 }],
+        pack_items: [...f.pack_items, { product_id: found!.id, quantity: 1 }],
       }));
       setPackScanFeedback(`Added: ${found.name}`);
       setPackScanFeedbackType('success');
     }
-  }, [allProducts, form.id, form.pack_items]);
+  }, [form.id, form.pack_items]);
 
   // ── Hardware barcode scanner (keyboard interception) ──
 
