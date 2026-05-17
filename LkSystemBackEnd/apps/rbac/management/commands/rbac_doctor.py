@@ -92,7 +92,30 @@ class Command(BaseCommand):
                     )
 
         h(line)
-        if rows and len(scoped_perms) == 0:
+        # Detect the "scope mismatch" failure mode: the UserRole carries the
+        # right role + perms but its scope columns are narrower than the
+        # role's natural scope, so the resolver never matches it.
+        narrowed_rows = [
+            ur for ur in rows
+            if ur.role.permissions.exists()
+            and (
+                (ur.role.scope_type == 'company' and (ur.brand_id or ur.sales_channel_id))
+                or (ur.role.scope_type == 'platform' and (ur.company_id or ur.brand_id or ur.sales_channel_id))
+            )
+        ]
+        if narrowed_rows:
+            for ur in narrowed_rows:
+                h(self.style.ERROR(
+                    f'Diagnosis: {ur.role.name!r} is {ur.role.scope_type}-scoped but the '
+                    f'UserRow has brand={ur.brand_id} / channel={ur.sales_channel_id} set, '
+                    f'which narrows it below the role\'s natural scope. The permission '
+                    f'resolver therefore returns 0 perms at company scope.'
+                ))
+            broken_role_name = narrowed_rows[0].role.name
+            h(self.style.WARNING(
+                f'Fix: python manage.py assign_role_to_user {user.matricule} {broken_role_name} --remove-other-roles'
+            ))
+        elif rows and len(scoped_perms) == 0:
             h(self.style.WARNING(
                 'Diagnosis: this user has a UserRole, but the role itself carries no '
                 'permissions in this scope. Either the role was hand-crafted via the UI '

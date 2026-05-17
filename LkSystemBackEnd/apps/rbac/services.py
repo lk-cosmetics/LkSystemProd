@@ -14,6 +14,61 @@ from django.db.models import Q
 
 from .models import AppPermission, UserRole
 
+
+def scope_kwargs_for_role(role, *, company=None, brands=None, sales_channel=None):
+    """
+    Produce the scope kwargs for a ``UserRole`` row so its ``company`` /
+    ``brand`` / ``sales_channel`` columns line up with ``role.scope_type``.
+
+    The permission resolver in ``PermissionService.get_user_permissions``
+    matches assignments at scope X with these rules:
+
+        * platform-level assignment   (all-null)            → always matches
+        * company-level assignment    (company set, rest null) → matches when
+                                                                asked about
+                                                                that company
+        * brand-level assignment      (brand set)             → matches when
+                                                                asked about
+                                                                that brand
+        * channel-level assignment    (sales_channel set)     → matches when
+                                                                asked about
+                                                                that channel
+
+    The naive thing — "if the invitee has a single allowed brand, attach
+    ``brand=that_brand``" — silently narrows a CEO's scope below the role's
+    natural one, so the perms never resolve at company scope. This helper
+    centralises the right answer:
+
+        ``scope_type='platform'``  → all-null
+        ``scope_type='company'``   → company only
+        ``scope_type='brand'``     → company + single-brand
+        ``scope_type='channel'``   → company + single-brand + channel
+    """
+    scope = (role.scope_type or '').lower()
+    if scope == 'platform':
+        return {'company': None, 'brand': None, 'sales_channel': None}
+
+    if scope == 'company':
+        return {'company': company, 'brand': None, 'sales_channel': None}
+
+    # For brand-/channel-scoped roles a single allowed brand narrows the
+    # assignment; multiple brands → leave brand null so the role applies
+    # across every brand the user has permission to touch.
+    single_brand = brands[0] if brands and len(brands) == 1 else None
+
+    if scope == 'brand':
+        return {'company': company, 'brand': single_brand, 'sales_channel': None}
+
+    if scope == 'channel':
+        return {
+            'company': company,
+            'brand': single_brand,
+            'sales_channel': sales_channel,
+        }
+
+    # Unknown scope type — fall back to company scope (safe default).
+    return {'company': company, 'brand': None, 'sales_channel': None}
+
 if TYPE_CHECKING:
     from apps.brands.models import Brand
     from apps.company.models import Company
