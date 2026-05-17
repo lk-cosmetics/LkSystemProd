@@ -81,6 +81,7 @@ import {
 } from '@/services/inventory.service';
 import { salesChannelService } from '@/services/salesChannel.service';
 import { productService } from '@/services/product.service';
+import { useDebounce } from '@/hooks/useDebounce';
 import type {
   SalesChannelInventory,
   InventoryMovement,
@@ -829,6 +830,13 @@ export default function InventoryPage() {
   const [addProductSearch, setAddProductSearch] = useState('');
   const [addScanOpen, setAddScanOpen] = useState(false);
   const [addScanFeedback, setAddScanFeedback] = useState('');
+  // Server-side picker results for the Add-Stock dialog. Filtering a
+  // client-side ``products`` array missed anything past the first page;
+  // hitting the paginated search endpoint always reflects what the user's
+  // role can actually see.
+  const [addPickerResults, setAddPickerResults] = useState<ProductListItem[]>([]);
+  const [addPickerLoading, setAddPickerLoading] = useState(false);
+  const debouncedAddSearch = useDebounce(addProductSearch, 250);
 
   // Adjust Stock
   const [adjustDialog, setAdjustDialog] = useState(false);
@@ -985,18 +993,39 @@ export default function InventoryPage() {
     );
   }, [addForm.product, addForm.sales_channel, inventories]);
 
-  const filteredAddProducts = useMemo(() => {
-    const q = addProductSearch.trim().toLowerCase();
-    const rows = q
-      ? products.filter(
-          p =>
-            p.name.toLowerCase().includes(q) ||
-            (p.barcode || '').toLowerCase().includes(q) ||
-            (p.brand_name || '').toLowerCase().includes(q)
-        )
-      : products;
-    return rows.slice(0, 40);
-  }, [addProductSearch, products]);
+  // Server-side debounced search. Fires every time the dialog is open and
+  // the search input settles. Empty query returns the top-50 of the user's
+  // scope so the picker is never blank. ``selectProductForAdd`` writes the
+  // selected product's name to ``addProductSearch`` — that re-fires this
+  // effect with the name-as-query, which is harmless (still finds it) and
+  // keeps the list relevant if the user types more.
+  useEffect(() => {
+    if (!addDialog) return;
+    let cancelled = false;
+    setAddPickerLoading(true);
+    productService
+      .getProductsPaginated({
+        search: debouncedAddSearch.trim() || undefined,
+        page_size: 50,
+      })
+      .then(page => {
+        if (!cancelled) setAddPickerResults(page.results);
+      })
+      .catch(() => {
+        if (!cancelled) setAddPickerResults([]);
+      })
+      .finally(() => {
+        if (!cancelled) setAddPickerLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [addDialog, debouncedAddSearch]);
+
+  const filteredAddProducts = useMemo(
+    () => addPickerResults.slice(0, 50),
+    [addPickerResults],
+  );
 
   const transferSourceInventory = useMemo(() => {
     if (!transferForm.source_channel) return [];
@@ -1126,20 +1155,27 @@ export default function InventoryPage() {
     const clean = barcode.trim();
     if (!clean) return null;
 
+    // The server is the source of truth. The local ``products`` array can
+    // be partial (pagination, role scoping, deleted-since-load), so we
+    // always hit ``search_barcode/`` first and fall back to the local
+    // cache only if the API is unreachable — that way an outdated cache
+    // can never silently shadow the right answer.
+    try {
+      const remoteProduct = await productService.searchByBarcode(clean);
+      if (remoteProduct) {
+        setProducts(prev =>
+          prev.some(p => p.id === remoteProduct.id) ? prev : [remoteProduct, ...prev]
+        );
+        return remoteProduct;
+      }
+    } catch {
+      // fall through to the local cache as a last resort
+    }
+
     const localProduct = products.find(
       p => (p.barcode || '').toLowerCase() === clean.toLowerCase()
     );
-    if (localProduct) return localProduct;
-
-    const remoteProduct = await productService.searchByBarcode(clean);
-    if (remoteProduct) {
-      setProducts(prev =>
-        prev.some(p => p.id === remoteProduct.id) ? prev : [remoteProduct, ...prev]
-      );
-      return remoteProduct;
-    }
-
-    return null;
+    return localProduct ?? null;
   };
 
   const openProductInventoryLookup = async (barcode: string) => {
@@ -2472,7 +2508,11 @@ export default function InventoryPage() {
               )}
 
               <div className="max-h-56 overflow-y-auto rounded-md border bg-background">
-                {filteredAddProducts.length === 0 ? (
+                {addPickerLoading && filteredAddProducts.length === 0 ? (
+                  <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+                    Searching…
+                  </div>
+                ) : filteredAddProducts.length === 0 ? (
                   <div className="px-3 py-6 text-center text-sm text-muted-foreground">
                     No product found. Try another name or scan the barcode.
                   </div>
