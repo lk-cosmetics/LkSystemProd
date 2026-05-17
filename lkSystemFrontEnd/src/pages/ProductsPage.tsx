@@ -17,6 +17,7 @@ import {
   Plus, RefreshCw, Globe, Loader2, Check,
   ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
   RotateCcw, ScanBarcode, ExternalLink, X, Filter, Warehouse, Boxes,
+  Upload, Download, FileText, AlertTriangle, EyeOff, FileWarning, FileCheck2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -66,6 +67,8 @@ import {
   useBulkDeleteProducts,
   useBulkHardDeleteProducts,
   useBulkRestoreProducts,
+  useBulkChangeProductStatus,
+  useImportProductsCSV,
   useCreateProduct,
   usePartialUpdateProduct,
   useRestoreProduct,
@@ -743,6 +746,8 @@ export default function ProductsPage() {
   // ── Mutations ──
   const deleteMut = useDeleteProduct();
   const hardDeleteMut = useHardDeleteProduct();
+  const bulkStatusMut = useBulkChangeProductStatus();
+  const importMut = useImportProductsCSV();
   const bulkDeleteMut = useBulkDeleteProducts();
   const bulkHardDeleteMut = useBulkHardDeleteProducts();
   const bulkRestoreMut = useBulkRestoreProducts();
@@ -788,6 +793,17 @@ export default function ProductsPage() {
   const [selIds, setSelIds] = useState<number[]>([]);
   const [bulkActionOpen, setBulkActionOpen] = useState(false);
   const [bulkActionType, setBulkActionType] = useState<'soft-delete' | 'hard-delete' | 'restore' | null>(null);
+
+  // CSV import / export
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importResult, setImportResult] = useState<{
+    created: number;
+    updated: number;
+    skipped: number;
+    errors: { row: number; message: string }[];
+  } | null>(null);
+  const [exportingCSV, setExportingCSV] = useState(false);
   const selMode = selIds.length > 0;
   const selSet = useMemo(() => new Set(selIds), [selIds]);
   const selectedProducts = useMemo(
@@ -1121,6 +1137,99 @@ export default function ProductsPage() {
     setBulkActionOpen(true);
   }, []);
 
+  /**
+   * Apply ``status`` to every selected product (active rows only — the
+   * backend silently skips no-op rows so passing the full set is safe,
+   * but we filter here for clearer feedback in the toast).
+   */
+  const handleBulkChangeStatus = useCallback(
+    async (next: 'publish' | 'draft' | 'pending' | 'private') => {
+      const targets = selectedActiveIds;
+      if (targets.length === 0) return;
+      try {
+        const r = await bulkStatusMut.mutateAsync({ ids: targets, status: next });
+        setToast({
+          type: 'success',
+          msg: `Updated ${r.updated} product${r.updated === 1 ? '' : 's'} to "${next}"`,
+        });
+        setSelIds([]);
+      } catch {
+        setToast({ type: 'error', msg: 'Failed to change status' });
+      }
+    },
+    [selectedActiveIds, bulkStatusMut],
+  );
+
+  /**
+   * Hit ``/products/export-csv/`` with the same filters the page is
+   * currently showing, then trigger the browser download. The backend
+   * streams via iterator() so the export is memory-bounded server-side.
+   */
+  const handleExportCSV = useCallback(async () => {
+    if (exportingCSV) return;
+    setExportingCSV(true);
+    try {
+      const blob = await productService.exportCSV({
+        search: debSearch || undefined,
+        brand: brandF || undefined,
+        status: statusF || undefined,
+        product_type: typeF || undefined,
+        show_deleted: showDeleted || onlyDeleted || undefined,
+        only_deleted: onlyDeleted || undefined,
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      a.download = `products-${ts}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setToast({ type: 'success', msg: 'CSV downloaded' });
+    } catch {
+      setToast({ type: 'error', msg: 'Export failed' });
+    } finally {
+      setExportingCSV(false);
+    }
+  }, [exportingCSV, debSearch, brandF, statusF, typeF, showDeleted, onlyDeleted]);
+
+  /**
+   * Upload the selected CSV and surface the per-row outcome. ``importMut``
+   * invalidates the products cache on success, so the list refreshes
+   * automatically once the user closes the dialog.
+   */
+  const handleImportCSV = useCallback(async () => {
+    if (!importFile || importMut.isPending) return;
+    try {
+      const r = await importMut.mutateAsync(importFile);
+      setImportResult(r);
+      if (r.errors.length === 0) {
+        setToast({
+          type: 'success',
+          msg: `Imported: ${r.created} new, ${r.updated} updated`,
+        });
+      } else {
+        setToast({
+          type: 'success',
+          msg: `Imported with ${r.errors.length} issue${r.errors.length === 1 ? '' : 's'}`,
+        });
+      }
+    } catch {
+      setImportResult({ created: 0, updated: 0, skipped: 0, errors: [{ row: 0, message: 'Network error' }] });
+      setToast({ type: 'error', msg: 'Import failed' });
+    }
+  }, [importFile, importMut]);
+
+  /** Tiny visual for status items in the bulk dropdown. */
+  const statusIcon = useCallback((s: 'publish' | 'draft' | 'pending' | 'private') => {
+    const cls = 'size-4';
+    if (s === 'publish') return <Check className={`${cls} text-emerald-600`} />;
+    if (s === 'draft') return <FileText className={`${cls} text-muted-foreground`} />;
+    if (s === 'pending') return <AlertTriangle className={`${cls} text-amber-600`} />;
+    return <EyeOff className={`${cls} text-muted-foreground`} />;
+  }, []);
+
   const confirmBulkAction = async () => {
     if (!bulkActionType) {
       setBulkActionOpen(false);
@@ -1379,6 +1488,25 @@ export default function ProductsPage() {
               <Globe className="size-4" />{!isMobile && ' Sync'}
             </Button>
           )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleExportCSV}
+            disabled={exportingCSV}
+            className="gap-1.5"
+            title="Download the current filtered list as CSV"
+          >
+            <Download className="size-4" />{!isMobile && (exportingCSV ? ' Exporting…' : ' Export')}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => { setImportFile(null); setImportResult(null); setImportOpen(true); }}
+            className="gap-1.5"
+            title="Upsert products from a CSV (matched by barcode)"
+          >
+            <Upload className="size-4" />{!isMobile && ' Import'}
+          </Button>
           <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isLoading} className="gap-1.5">
             <RefreshCw className={`size-4 ${isLoading ? 'animate-spin' : ''}`} />
           </Button>
@@ -1503,7 +1631,26 @@ export default function ProductsPage() {
                 <Trash2 className="size-3" /> Group Actions
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-52">
+            <DropdownMenuContent align="end" className="w-56">
+              {hasSelectedActive && (
+                <>
+                  <DropdownMenuLabel className="text-[11px] font-medium uppercase text-muted-foreground">
+                    Change status
+                  </DropdownMenuLabel>
+                  {(['publish', 'draft', 'pending', 'private'] as const).map(s => (
+                    <DropdownMenuItem
+                      key={s}
+                      className="gap-2"
+                      onClick={() => handleBulkChangeStatus(s)}
+                      disabled={bulkStatusMut.isPending}
+                    >
+                      {statusIcon(s)}
+                      <span className="capitalize">{s}</span>
+                    </DropdownMenuItem>
+                  ))}
+                  <DropdownMenuSeparator />
+                </>
+              )}
               {hasSelectedActive && (
                 <DropdownMenuItem
                   className="gap-2 text-destructive focus:text-destructive"
@@ -1983,6 +2130,109 @@ export default function ProductsPage() {
       )}
 
       {/* WC Sync */}
+      {/* CSV Import */}
+      <ResponsiveSheet
+        open={importOpen}
+        onOpenChange={open => {
+          setImportOpen(open);
+          if (!open) { setImportFile(null); setImportResult(null); }
+        }}
+        title="Import products from CSV"
+        description="Upsert products by barcode. Existing rows are updated, new rows are created."
+        className="sm:max-w-lg"
+        footer={<>
+          <Button variant="outline" onClick={() => setImportOpen(false)} className="flex-1 sm:flex-none">
+            {importResult ? 'Close' : 'Cancel'}
+          </Button>
+          {!importResult && (
+            <Button
+              onClick={handleImportCSV}
+              disabled={!importFile || importMut.isPending}
+              className="flex-1 sm:flex-none gap-1.5"
+            >
+              {importMut.isPending && <Loader2 className="size-4 animate-spin" />}
+              Upload
+            </Button>
+          )}
+        </>}
+      >
+        <div className="space-y-4 py-2 text-sm">
+          {/* Schema hint — the columns the backend recognises. */}
+          <div className="rounded-md border bg-muted/30 p-3 text-xs">
+            <p className="font-medium text-foreground">CSV format</p>
+            <p className="mt-1 text-muted-foreground">
+              UTF-8, header row required. <span className="font-medium text-foreground">barcode</span> is the
+              match key. Other recognised columns:
+            </p>
+            <p className="mt-1.5 font-mono text-[11px] text-muted-foreground break-all">
+              name, product_type, status, purchase_price, sales_price, brand_id, product_link, image_url
+            </p>
+            <p className="mt-1.5 text-muted-foreground">
+              Tip: use <span className="font-medium text-foreground">Export</span> first to see the exact format the backend writes.
+            </p>
+          </div>
+
+          {/* File picker — keep simple, native input gives drag/drop on macOS+Win. */}
+          {!importResult && (
+            <div className="space-y-2">
+              <Label className="text-sm">CSV file</Label>
+              <Input
+                type="file"
+                accept=".csv,text/csv"
+                onChange={e => setImportFile(e.target.files?.[0] ?? null)}
+                disabled={importMut.isPending}
+              />
+              {importFile && (
+                <p className="text-xs text-muted-foreground">
+                  {importFile.name} · {(importFile.size / 1024).toFixed(1)} KB
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Result panel — shown after the upload completes. */}
+          {importResult && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-3 gap-2">
+                <div className="rounded-md border bg-emerald-500/10 p-3 text-center">
+                  <FileCheck2 className="mx-auto size-4 text-emerald-600" />
+                  <p className="mt-1 text-xs font-medium text-emerald-700">Created</p>
+                  <p className="text-lg font-semibold text-emerald-700 tabular-nums">{importResult.created}</p>
+                </div>
+                <div className="rounded-md border bg-sky-500/10 p-3 text-center">
+                  <RefreshCw className="mx-auto size-4 text-sky-600" />
+                  <p className="mt-1 text-xs font-medium text-sky-700">Updated</p>
+                  <p className="text-lg font-semibold text-sky-700 tabular-nums">{importResult.updated}</p>
+                </div>
+                <div className="rounded-md border bg-amber-500/10 p-3 text-center">
+                  <FileWarning className="mx-auto size-4 text-amber-600" />
+                  <p className="mt-1 text-xs font-medium text-amber-700">Skipped</p>
+                  <p className="text-lg font-semibold text-amber-700 tabular-nums">{importResult.skipped}</p>
+                </div>
+              </div>
+
+              {importResult.errors.length > 0 && (
+                <div className="space-y-1.5">
+                  <p className="text-xs font-medium text-muted-foreground">
+                    Per-row issues ({importResult.errors.length})
+                  </p>
+                  <div className="max-h-48 overflow-y-auto rounded-md border divide-y text-xs">
+                    {importResult.errors.map((e, idx) => (
+                      <div key={idx} className="flex items-start gap-2 p-2">
+                        <Badge variant="secondary" className="shrink-0 tabular-nums">
+                          row {e.row}
+                        </Badge>
+                        <span className="text-muted-foreground">{e.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </ResponsiveSheet>
+
       <ResponsiveSheet open={syncOpen} onOpenChange={setSyncOpen} title="WooCommerce Sync" description="Select a sales channel to sync products from." className="sm:max-w-md"
         footer={<>
           <Button variant="outline" onClick={doPreview} disabled={!syncCh || previewMut.isPending} className="flex-1 sm:flex-none gap-1.5">
