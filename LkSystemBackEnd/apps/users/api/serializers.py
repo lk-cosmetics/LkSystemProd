@@ -13,6 +13,7 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from ..models import Profile, PasswordResetToken, Invitation
+from apps.rbac.models import Role
 
 User = get_user_model()
 
@@ -281,7 +282,23 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True
     )
-    
+
+    # RBAC role to attach to this user. Without it, the freshly-created user
+    # has zero permissions (no UserRole row) and every screen errors as
+    # "Dashboard is unreachable" / "Failed to load roles" until an admin
+    # remembers to assign a role through a second endpoint. Making this
+    # part of the create payload closes that footgun.
+    role_id = serializers.PrimaryKeyRelatedField(
+        write_only=True,
+        required=False,
+        allow_null=True,
+        queryset=Role.objects.all(),
+        help_text=(
+            'RBAC role to assign to the new user. Optional but strongly '
+            'recommended — a user without a role has no permissions.'
+        ),
+    )
+
     class Meta:
         model = User
         fields = [
@@ -298,6 +315,8 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
             'phone',
             'birth_date',
             'gender',
+            # RBAC
+            'role_id',
         ]
         read_only_fields = ['matricule']  # Auto-generated on creation
         extra_kwargs = {
@@ -376,7 +395,7 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
     
     @transaction.atomic
     def create(self, validated_data):
-        """Create User and Profile atomically."""
+        """Create User + Profile + RBAC role assignment atomically."""
         # Extract profile fields
         profile_data = {
             'cin_number': validated_data.pop('cin_number', None),
@@ -384,29 +403,51 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
             'birth_date': validated_data.pop('birth_date', None),
             'gender': validated_data.pop('gender', None),
         }
-        
+
         # Remove password_confirm
         validated_data.pop('password_confirm')
-        
+
         # Extract M2M field
         allowed_brands = validated_data.pop('allowed_brands', [])
-        
+        # Extract optional RBAC role — assigned at company scope below.
+        role = validated_data.pop('role_id', None)
+
         # Generate matricule if not provided
         if not validated_data.get('matricule'):
             company = validated_data.get('current_company')
             validated_data['matricule'] = self.generate_matricule(company)
-        
+
         # Extract password
         password = validated_data.pop('password')
-        
+
         # Create user
         user = User.objects.create(**validated_data)
         user.set_password(password)
         user.save()
-        
+
         # Set allowed brands (M2M)
         if allowed_brands:
             user.allowed_brands.set(allowed_brands)
+
+        # Assign the RBAC role with proper tenant scoping. We always scope
+        # the UserRole to the user's ``current_company`` so the assignment
+        # follows the multi-tenant boundary — even when an admin from a
+        # different tenant creates the user. ``brand`` is left null unless
+        # the user has exactly one allowed brand (in which case we scope
+        # there for narrower role like Manager / Stock Keeper).
+        if role is not None:
+            from apps.rbac.models import UserRole
+            request = self.context.get('request')
+            assigner = request.user if request and request.user.is_authenticated else None
+            single_brand = allowed_brands[0] if len(allowed_brands) == 1 else None
+            UserRole.objects.create(
+                user=user,
+                role=role,
+                company=user.current_company,
+                brand=single_brand,
+                sales_channel=None,
+                assigned_by=assigner,
+            )
         
         # Update profile (signal auto-creates it, so we update instead of create)
         # Filter out None values to let model defaults apply
