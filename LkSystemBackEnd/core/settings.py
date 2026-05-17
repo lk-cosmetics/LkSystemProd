@@ -301,7 +301,10 @@ REST_FRAMEWORK = {
         'rest_framework.filters.SearchFilter',
         'rest_framework.filters.OrderingFilter',
     ],
-    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    # Custom paginator that honours ``?page_size=`` (capped at 500). The
+    # default ``PageNumberPagination`` ignores the param, which broke every
+    # "fetch all rows" client helper (it always got the configured 20).
+    'DEFAULT_PAGINATION_CLASS': 'core.pagination.StandardPagination',
     'PAGE_SIZE': 20,
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',

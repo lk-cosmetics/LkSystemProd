@@ -133,7 +133,12 @@ class ProductService {
       );
       const normalized = normalizePaginatedResponse(response.data);
       collected.push(...normalized.results);
-      if (!normalized.next || normalized.results.length < BATCH_SIZE) break;
+      // Stop only when the API confirms there is no next page. We used to
+      // also break when the page came back smaller than ``BATCH_SIZE``, but
+      // that's unsafe — DRF's default paginator silently ignores
+      // ``?page_size=`` and returns its configured size, which made the
+      // loop short-circuit after page 1 and lose everything past row 20.
+      if (!normalized.next) break;
       page += 1;
     }
     return collected;
