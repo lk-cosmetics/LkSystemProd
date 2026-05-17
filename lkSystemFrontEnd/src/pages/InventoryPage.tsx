@@ -794,6 +794,10 @@ export default function InventoryPage() {
   // ── Page UI ─────────────────────────────────────────────────────────────
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Inventory-tab pagination. Client-side over the (now-complete) list — the
+  // summary cards still see every row, only the table is sliced.
+  const [inventoryPage, setInventoryPage] = useState(1);
+  const [inventoryPageSize, setInventoryPageSize] = useState(25);
   const [activeTab, setActiveTab] = useState<InventoryTab>('inventory');
   const [actionLoading, setActionLoading] = useState(false);
 
@@ -957,6 +961,28 @@ export default function InventoryPage() {
         stockFilter
       ),
     [inventories, searchQuery, channelFilter, stockFilter]
+  );
+
+  // Visible slice for the inventory table. Reset to page 1 whenever the
+  // filter narrows below the current page's start — otherwise the user
+  // would land on a blank "page 7 of 2".
+  const inventoryTotalPages = Math.max(
+    1,
+    Math.ceil(filteredInventories.length / inventoryPageSize),
+  );
+  const safeInventoryPage = Math.min(inventoryPage, inventoryTotalPages);
+  useEffect(() => {
+    if (safeInventoryPage !== inventoryPage) setInventoryPage(safeInventoryPage);
+  }, [safeInventoryPage, inventoryPage]);
+  useEffect(() => {
+    setInventoryPage(1);
+  }, [searchQuery, channelFilter, stockFilter, inventoryPageSize]);
+  const paginatedInventories = useMemo(
+    () => {
+      const start = (safeInventoryPage - 1) * inventoryPageSize;
+      return filteredInventories.slice(start, start + inventoryPageSize);
+    },
+    [filteredInventories, safeInventoryPage, inventoryPageSize],
   );
 
   const filteredMovements = useMemo(
@@ -1841,7 +1867,7 @@ export default function InventoryPage() {
                     </TableCell>
                   </TableRow>
                 ) : (
-                  filteredInventories.map(inv => (
+                  paginatedInventories.map(inv => (
                     <TableRow key={inv.id} className="group">
                       <TableCell>
                         <div className="flex flex-col">
@@ -1925,6 +1951,66 @@ export default function InventoryPage() {
                 )}
               </TableBody>
             </Table>
+
+            {/* Pagination footer — only when there's at least one row in the
+                filtered set, otherwise the empty-state already explains it. */}
+            {filteredInventories.length > 0 && (
+              <div className="flex flex-col gap-3 border-t px-3 py-3 text-xs sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-muted-foreground tabular-nums">
+                  Showing{' '}
+                  <span className="font-medium text-foreground">
+                    {(safeInventoryPage - 1) * inventoryPageSize + 1}
+                    –
+                    {Math.min(safeInventoryPage * inventoryPageSize, filteredInventories.length)}
+                  </span>{' '}
+                  of{' '}
+                  <span className="font-medium text-foreground">{filteredInventories.length}</span>{' '}
+                  rows
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-1.5">
+                    <Label className="text-xs text-muted-foreground">Rows per page</Label>
+                    <Select
+                      value={String(inventoryPageSize)}
+                      onValueChange={v => setInventoryPageSize(Number(v))}
+                    >
+                      <SelectTrigger className="h-8 w-[70px]">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {[10, 25, 50, 100, 200].map(n => (
+                          <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 px-2"
+                      disabled={safeInventoryPage <= 1}
+                      onClick={() => setInventoryPage(p => Math.max(1, p - 1))}
+                    >
+                      ‹ Prev
+                    </Button>
+                    <span className="px-2 tabular-nums text-muted-foreground">
+                      Page <span className="font-medium text-foreground">{safeInventoryPage}</span> /{' '}
+                      {inventoryTotalPages}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 px-2"
+                      disabled={safeInventoryPage >= inventoryTotalPages}
+                      onClick={() => setInventoryPage(p => Math.min(inventoryTotalPages, p + 1))}
+                    >
+                      Next ›
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
           </Card>
         </TabsContent>
 

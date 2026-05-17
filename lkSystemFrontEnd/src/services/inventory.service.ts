@@ -35,6 +35,45 @@ const unwrapList = <T>(data: PaginatedResponse<T> | T[]): T[] => {
   return data.results;
 };
 
+/**
+ * Fetch every page of a paginated list endpoint and return the union.
+ *
+ * The Django REST defaults to ``PAGE_SIZE=20`` for these resources, so a
+ * caller that just wants "all inventory rows" used to silently lose
+ * everything past row 20 — which is why the InventoryPage summary cards
+ * and stock table only ever showed the first batch.
+ *
+ * Strategy:
+ *   - Ask for ``BATCH_SIZE`` rows at a time (200 — much larger than the
+ *     backend default so a typical catalogue lands in a single round-trip).
+ *   - Walk ``next`` until exhausted, capped at ``MAX_PAGES`` so a runaway
+ *     loop can never hammer the server (20 000 rows is plenty for an
+ *     ERP inventory; pagination becomes the right answer past that).
+ */
+const fetchAllPaginated = async <T>(
+  endpoint: string,
+  params?: Record<string, unknown>,
+): Promise<T[]> => {
+  const BATCH_SIZE = 200;
+  const MAX_PAGES = 100;
+  const collected: T[] = [];
+  let page = 1;
+  while (page <= MAX_PAGES) {
+    const response = await apiClient.get<PaginatedResponse<T> | T[]>(endpoint, {
+      params: { ...(params ?? {}), page, page_size: BATCH_SIZE },
+    });
+    const rows = unwrapList(response.data);
+    collected.push(...rows);
+    // Stop when the API tells us we're done OR the current page wasn't full.
+    // Arrays-only endpoints surface via the ``unwrapList`` array branch — they
+    // never have a ``next`` cursor, so the length check is what ends the loop.
+    if (Array.isArray(response.data)) break;
+    if (!response.data.next || rows.length < BATCH_SIZE) break;
+    page += 1;
+  }
+  return collected;
+};
+
 class StoreInventoryService {
   /**
    * Get all sales channel inventories
@@ -45,10 +84,10 @@ class StoreInventoryService {
     product?: number;
     search?: string;
   }): Promise<SalesChannelInventory[]> {
-    const response = await apiClient.get<
-      PaginatedResponse<SalesChannelInventory> | SalesChannelInventory[]
-    >(STORE_INVENTORY_ENDPOINT, { params });
-    return unwrapList(response.data);
+    return fetchAllPaginated<SalesChannelInventory>(
+      STORE_INVENTORY_ENDPOINT,
+      params,
+    );
   }
 
   /**
@@ -177,10 +216,7 @@ class InventoryMovementService {
     end_date?: string;
     search?: string;
   }): Promise<InventoryMovement[]> {
-    const response = await apiClient.get<
-      PaginatedResponse<InventoryMovement> | InventoryMovement[]
-    >(MOVEMENT_ENDPOINT, { params });
-    return unwrapList(response.data);
+    return fetchAllPaginated<InventoryMovement>(MOVEMENT_ENDPOINT, params);
   }
 
   /**
