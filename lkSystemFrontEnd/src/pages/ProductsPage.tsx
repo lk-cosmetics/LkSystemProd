@@ -1169,11 +1169,20 @@ export default function ProductsPage() {
     if (exportingCSV) return;
     setExportingCSV(true);
     try {
+      // The filter selects store strings ('all', a brand id like '3',
+      // 'publish', etc.). The service signature wants typed values, so
+      // narrow each field here rather than at the call boundary.
+      const brandId = brandF && brandF !== 'all' ? Number(brandF) : undefined;
+      const statusValue =
+        statusF && statusF !== 'all'
+          ? (statusF as 'publish' | 'draft' | 'pending' | 'private')
+          : undefined;
+      const typeValue = typeF && typeF !== 'all' ? typeF : undefined;
       const blob = await productService.exportCSV({
         search: debSearch || undefined,
-        brand: brandF || undefined,
-        status: statusF || undefined,
-        product_type: typeF || undefined,
+        brand: brandId,
+        status: statusValue,
+        product_type: typeValue,
         show_deleted: showDeleted || onlyDeleted || undefined,
         only_deleted: onlyDeleted || undefined,
       });
