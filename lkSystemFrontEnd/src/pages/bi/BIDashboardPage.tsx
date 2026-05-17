@@ -63,17 +63,39 @@ export function BIDashboardPage() {
   const companiesQuery = useCompaniesQuery();
   const companies = companiesQuery.data ?? [];
 
-  const effectiveCompanyId = isPlatformAdmin ? companyId : (companies[0]?.id ?? null);
+  /**
+   * Resolve the company this dashboard is scoped to.
+   *
+   * * Platform admin → whatever they picked in the company select.
+   * * Anyone else (CEO, manager…) → the company they're authenticated
+   *   against. The JWT token carries ``company_id`` directly, which is
+   *   the most authoritative source — that beats waiting on
+   *   ``/dashboard/companies/`` to resolve and beats the previous
+   *   ``companies[0]?.id`` heuristic (which silently returned ``null``
+   *   when the API hadn't responded yet and produced the
+   *   "no company assigned" empty state for CEOs).
+   */
+  const effectiveCompanyId = isPlatformAdmin
+    ? companyId
+    : (currentUser?.company_id ?? companies[0]?.id ?? null);
 
   const brandsQuery = useBrandsQuery(effectiveCompanyId, !!effectiveCompanyId);
   const brands = brandsQuery.data ?? [];
 
-  // CEOs land on their (single) company automatically.
+  // CEOs land on their (single) company automatically. Prefer the JWT
+  // company_id (authoritative, available pre-fetch) and fall back to the
+  // companies query for legacy tokens that may not carry the field.
   useEffect(() => {
-    if (!isPlatformAdmin && companies[0] && companyId !== companies[0].id) {
+    if (isPlatformAdmin) return;
+    const tokenCompanyId = currentUser?.company_id;
+    if (tokenCompanyId && companyId !== tokenCompanyId) {
+      setCompanyId(tokenCompanyId);
+      return;
+    }
+    if (companies[0] && companyId !== companies[0].id) {
       setCompanyId(companies[0].id);
     }
-  }, [isPlatformAdmin, companies, companyId]);
+  }, [isPlatformAdmin, companies, companyId, currentUser?.company_id]);
 
   // Reset brand selection whenever the company changes.
   useEffect(() => {

@@ -99,13 +99,58 @@ class RoleViewSet(viewsets.ModelViewSet):
             return [require_permission('delete_roles')()]
         return [require_permission('edit_roles')()]
 
+    def _force_company_for_non_platform(self, serializer):
+        """
+        A CEO (company-scoped) creating or updating a role must not be able
+        to write a platform-wide role or a role owned by a different company.
+        Pin ``company`` and ``scope_type`` for them.
+        """
+        user = self.request.user
+        if user.is_superuser:
+            return  # superuser may craft any role
+        if user.user_roles.filter(role__scope_type='platform').exists():
+            return  # platform admin may craft any role too
+
+        # Company-scoped user → lock to their tenant.
+        current_company_id = getattr(user, 'current_company_id', None)
+        if not current_company_id:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('You must belong to a company to manage roles.')
+
+        # Override whatever the client sent; the backend is the source of truth.
+        serializer.validated_data['company_id'] = current_company_id
+        # Mark it as company-scoped (the only scope a CEO is allowed to mint).
+        serializer.validated_data['scope_type'] = 'company'
+        # System roles are platform-managed.
+        serializer.validated_data['is_system'] = False
+
     def perform_create(self, serializer):
+        self._force_company_for_non_platform(serializer)
         serializer.save(created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        # Block CEOs from re-tagging an existing role to another company /
+        # promoting it to a platform role mid-life.
+        instance = serializer.instance
+        user = self.request.user
+        if instance.is_system and not user.is_superuser:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('System roles cannot be edited.')
+        self._force_company_for_non_platform(serializer)
+        serializer.save()
 
     def perform_destroy(self, instance):
         if instance.is_system:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('System roles cannot be deleted.')
+        # Defence-in-depth: don't let a CEO delete a role from another tenant
+        # even if it leaked into the queryset somehow.
+        user = self.request.user
+        if not user.is_superuser:
+            user_company_id = getattr(user, 'current_company_id', None)
+            if instance.company_id and instance.company_id != user_company_id:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied('You can only delete roles owned by your company.')
         instance.delete()
 
 

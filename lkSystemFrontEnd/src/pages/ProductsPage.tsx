@@ -18,6 +18,7 @@ import {
   ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
   RotateCcw, ScanBarcode, ExternalLink, X, Filter, Warehouse, Boxes,
   Upload, Download, FileText, AlertTriangle, EyeOff, FileWarning, FileCheck2,
+  HelpCircle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -794,6 +795,9 @@ export default function ProductsPage() {
   const [bulkActionOpen, setBulkActionOpen] = useState(false);
   const [bulkActionType, setBulkActionType] = useState<'soft-delete' | 'hard-delete' | 'restore' | null>(null);
 
+  // In-page help dialog. Triggered by the "?" button in the header.
+  const [helpOpen, setHelpOpen] = useState(false);
+
   // CSV import / export
   const [importOpen, setImportOpen] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
@@ -1475,6 +1479,16 @@ export default function ProductsPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-9 w-9 shrink-0"
+            onClick={() => setHelpOpen(true)}
+            aria-label="Page help"
+            title="How to use this page"
+          >
+            <HelpCircle className="size-4" />
+          </Button>
           <Button size="sm" onClick={handleAdd} className="gap-1.5">
             <Plus className="size-4" /> Add
           </Button>
@@ -2139,6 +2153,175 @@ export default function ProductsPage() {
       )}
 
       {/* WC Sync */}
+      {/* In-page help */}
+      <ResponsiveSheet
+        open={helpOpen}
+        onOpenChange={setHelpOpen}
+        title="Products page — quick guide"
+        description="Add, edit, scan, import, export and bulk-manage your catalogue."
+        className="sm:max-w-2xl"
+        footer={
+          <Button onClick={() => setHelpOpen(false)} className="flex-1 sm:flex-none">
+            Got it
+          </Button>
+        }
+      >
+        <div className="space-y-5 py-2 text-sm leading-relaxed">
+          {/* Header buttons */}
+          <section>
+            <h3 className="mb-2 flex items-center gap-2 font-medium">
+              <Package className="size-4 text-muted-foreground" />
+              Header toolbar
+            </h3>
+            <ul className="space-y-2 pl-1 text-muted-foreground">
+              <li>
+                <span className="font-medium text-foreground">+ Add</span> — open the
+                "New Product" dialog. Fill in name, prices, brand and (optionally)
+                a barcode. Toggle <em>Product Pack / Bundle</em> on to build a
+                pack from other products.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Scan</span> — open
+                the barcode scanner. If the code already exists, the matching
+                product opens. If it's new, you can create it on the spot.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Deleted</span> —
+                toggles a view of soft-deleted products. Combine with a row's
+                Restore action to bring it back.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Sync</span>{' '}
+                (Super Admin only) — pull or push products against a
+                WooCommerce sales channel.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Export</span> —
+                downloads the current filtered list as a CSV. The filename
+                includes a timestamp.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Import</span> —
+                upload a CSV; the backend upserts by barcode.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Refresh</span> —
+                re-fetches the list without changing your filters.
+              </li>
+            </ul>
+          </section>
+
+          {/* Search & filters */}
+          <section>
+            <h3 className="mb-2 flex items-center gap-2 font-medium">
+              <Search className="size-4 text-muted-foreground" />
+              Search & filter
+            </h3>
+            <ul className="space-y-2 pl-1 text-muted-foreground">
+              <li>
+                The search box matches on <span className="font-medium text-foreground">name</span> and{' '}
+                <span className="font-medium text-foreground">barcode</span>, case-insensitive.
+              </li>
+              <li>
+                The <span className="font-medium text-foreground">Filters</span> panel scopes by
+                brand, status (publish / draft / pending / private), product type, and
+                "packs only".
+              </li>
+              <li>
+                Active filters show a count badge. Click <em>Clear</em> in the panel to
+                reset every filter at once.
+              </li>
+            </ul>
+          </section>
+
+          {/* Row actions */}
+          <section>
+            <h3 className="mb-2 flex items-center gap-2 font-medium">
+              <MoreVertical className="size-4 text-muted-foreground" />
+              Row actions (per product)
+            </h3>
+            <ul className="space-y-2 pl-1 text-muted-foreground">
+              <li>
+                <span className="font-medium text-foreground">View</span> — read-only
+                detail with stock-by-channel, sales price, audit history, and pack
+                contents if it's a pack.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Edit</span> — change
+                name, prices, status, barcode, link, image, brand, categories. The
+                pack picker (server-side search and barcode scan) is here too.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Delete</span> — soft
+                delete (recoverable from the <em>Deleted</em> view).
+              </li>
+            </ul>
+          </section>
+
+          {/* Bulk actions */}
+          <section>
+            <h3 className="mb-2 flex items-center gap-2 font-medium">
+              <Check className="size-4 text-muted-foreground" />
+              Bulk actions (select with the row checkboxes)
+            </h3>
+            <ul className="space-y-2 pl-1 text-muted-foreground">
+              <li>
+                Tick the checkbox on each product you want to act on (or the
+                header checkbox to select the whole page).
+              </li>
+              <li>
+                A toolbar appears with <span className="font-medium text-foreground">Group Actions</span>:
+                <ul className="mt-1.5 list-disc space-y-1 pl-5">
+                  <li>
+                    <span className="font-medium text-foreground">Change status</span> →
+                    Publish / Draft / Pending / Private. Audited per product.
+                  </li>
+                  <li>
+                    <span className="font-medium text-foreground">Delete</span> — soft delete.
+                  </li>
+                  <li>
+                    On deleted rows: <span className="font-medium text-foreground">Restore</span>{' '}
+                    or <span className="font-medium text-foreground">Delete Permanently</span>.
+                  </li>
+                </ul>
+              </li>
+            </ul>
+          </section>
+
+          {/* CSV recipe */}
+          <section>
+            <h3 className="mb-2 flex items-center gap-2 font-medium">
+              <FileText className="size-4 text-muted-foreground" />
+              CSV import / export
+            </h3>
+            <ol className="list-decimal space-y-2 pl-5 text-muted-foreground">
+              <li>Click <span className="font-medium text-foreground">Export</span> to get the current list.</li>
+              <li>Open the CSV in Excel or Google Sheets. <strong>Save as CSV UTF-8</strong>.</li>
+              <li>Edit the columns you want to change — leave others blank to preserve the saved value.</li>
+              <li>Click <span className="font-medium text-foreground">Import</span>, pick the file, hit Upload.</li>
+              <li>The result panel shows Created / Updated / Skipped + per-row issues.</li>
+            </ol>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Match key is <span className="font-mono">barcode</span>. Recognised columns:{' '}
+              <span className="font-mono">
+                name, product_type, status, purchase_price, sales_price, brand_id, product_link, image_url
+              </span>
+              . Empty cells on update are ignored (no overwriting with blanks).
+            </p>
+          </section>
+
+          <section className="rounded-md border border-amber-300/50 bg-amber-50/60 p-3 dark:border-amber-500/30 dark:bg-amber-500/10">
+            <p className="flex items-start gap-2 text-xs">
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+              <span className="text-amber-900 dark:text-amber-200">
+                CSV import does <strong>not</strong> delete products and does <strong>not</strong>{' '}
+                recreate pack contents. Use the in-app dialogs for those.
+              </span>
+            </p>
+          </section>
+        </div>
+      </ResponsiveSheet>
+
       {/* CSV Import */}
       <ResponsiveSheet
         open={importOpen}
