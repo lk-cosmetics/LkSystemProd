@@ -5,7 +5,7 @@ LkSystem Company App - Views
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, BasePermission
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
@@ -17,6 +17,26 @@ from .serializers import (
     CompanyListSerializer,
     CompanyDetailSerializer,
 )
+
+
+class _IsPlatformAdmin(BasePermission):
+    """
+    Permission gate for tenant-wide operations.
+
+    True for Django superusers and for users who hold a platform-scoped
+    RBAC role (typically "Super Admin"). A CEO is company-scoped and is
+    deliberately excluded — they can manage their own company's data but
+    not create or destroy other tenants.
+    """
+    message = 'This action requires platform-admin privileges.'
+
+    def has_permission(self, request, view):
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+        return user.user_roles.filter(role__scope_type='platform').exists()
 
 
 @extend_schema_view(
@@ -122,13 +142,54 @@ class CompanyViewSet(viewsets.ModelViewSet):
         return CompanySerializer
     
     def get_queryset(self):
-        """Optimize queryset with prefetch for nested relations."""
+        """
+        Optimise + scope per role.
+
+        - Superuser / platform admin → every company (the only role allowed
+          to *create* new tenants and switch between them).
+        - Anyone else (CEO, Manager, …) → only their ``current_company``.
+
+        This lets us drop the SuperAdmin-only frontend guard and rely on
+        the backend to do the right thing — a CEO that hits ``/companies``
+        sees exactly their own tenant.
+        """
         queryset = super().get_queryset()
         if self.action == 'retrieve':
             queryset = queryset.prefetch_related('brands', 'brands__sales_channels')
         elif self.action == 'list':
             queryset = queryset.prefetch_related('brands')
-        return queryset
+
+        user = self.request.user
+        if not user.is_authenticated:
+            return queryset.none()
+        if user.is_superuser:
+            return queryset
+        # Platform-scoped role (e.g. Super Admin via RBAC) = no tenant lock.
+        if user.user_roles.filter(role__scope_type='platform').exists():
+            return queryset
+        current_company_id = getattr(user, 'current_company_id', None)
+        if not current_company_id:
+            return queryset.none()
+        return queryset.filter(pk=current_company_id)
+
+    def _is_platform_admin(self, user) -> bool:
+        """True when this user may operate across companies."""
+        if not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+        return user.user_roles.filter(role__scope_type='platform').exists()
+
+    def get_permissions(self):
+        """
+        Create / destroy a company are platform-admin-only — a CEO running
+        the system should never be able to spin up or delete other tenants.
+        Read + update of their own company is allowed (the queryset above
+        already restricts the rows they can touch).
+        """
+        if self.action in ('create', 'destroy'):
+            return [IsAuthenticated(), _IsPlatformAdmin()]
+        return [IsAuthenticated()]
     
     @extend_schema(
         tags=['Companies'],

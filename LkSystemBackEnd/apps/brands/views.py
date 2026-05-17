@@ -71,25 +71,44 @@ class BrandViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         """
-        Filter brands based on user's role and allowed brands.
-        - SuperAdmin/CEO: Sees all brands
-        - Manager/other users: Only sees their assigned brands
+        Scope brands per role.
+
+        * Superuser or platform-scoped RBAC role → every brand.
+        * Anyone else → the union of:
+            - explicit ``allowed_brands`` (legacy per-user override that
+              an admin may have set up), AND
+            - every brand belonging to the user's ``current_company`` —
+              this is what makes the CEO role work without an explicit
+              ``allowed_brands`` row per brand.
+        * Falls back to empty when the user has neither a current_company
+          nor any ``allowed_brands``.
         """
+        from django.db.models import Q
+
         user = self.request.user
         queryset = super().get_queryset().select_related('company')
         if self.action in ['retrieve', 'list']:
             queryset = queryset.prefetch_related('sales_channels')
-        
-        # SuperAdmin sees all
+
+        if not user.is_authenticated:
+            return queryset.none()
         if user.is_superuser:
             return queryset
-        
-        # Filter by user's allowed brands
+        if user.user_roles.filter(role__scope_type='platform').exists():
+            return queryset
+
+        scope_q = Q()
+        has_any_scope = False
         if user.allowed_brands.exists():
-            return queryset.filter(pk__in=user.allowed_brands.all())
-        
-        # No brands assigned - return empty
-        return queryset.none()
+            scope_q |= Q(pk__in=user.allowed_brands.values_list('id', flat=True))
+            has_any_scope = True
+        current_company_id = getattr(user, 'current_company_id', None)
+        if current_company_id:
+            scope_q |= Q(company_id=current_company_id)
+            has_any_scope = True
+        if not has_any_scope:
+            return queryset.none()
+        return queryset.filter(scope_q).distinct()
     
     @extend_schema(
         tags=['Brands'],

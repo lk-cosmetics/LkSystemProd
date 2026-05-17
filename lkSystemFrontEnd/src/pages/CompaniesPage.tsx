@@ -107,7 +107,15 @@ import { getMediaUrl } from '@/utils/helpers';
 
 export default function CompaniesPage() {
   const { user } = useAuthStore();
+  // Platform-wide actor: can create new tenants and act across companies.
   const isSuperAdmin = hasRole(user, 'SuperAdmin');
+  // CEO is company-scoped: backend already filters the queryset to their own
+  // tenant, so we just let them in and hide the platform-only buttons.
+  const isCEO = hasRole(user, 'CEO');
+  const canViewCompanies = isSuperAdmin || isCEO;
+  // Only platform admins may create or hard-delete tenants — even a CEO
+  // shouldn't be able to spin up or wipe another company.
+  const canManageTenants = isSuperAdmin;
 
   // React Query - Fetch data with caching
   const { data: companies = [], isLoading, error: fetchError, refetch } = useCompanies();
@@ -360,15 +368,18 @@ export default function CompaniesPage() {
     }
   };
 
-  // Access denied for non-SuperAdmin users
-  if (!isSuperAdmin) {
+  // Access denied for users that have neither a platform-admin role nor a
+  // CEO role on their account. The backend already filters the company
+  // queryset per role, so this is purely a UX shortcut to avoid showing a
+  // page with nothing on it.
+  if (!canViewCompanies) {
     return (
       <div className="flex flex-1 items-center justify-center p-4">
         <Card className="p-8 max-w-md text-center">
           <Ban className="size-16 mx-auto text-red-500 mb-4" />
           <h2 className="text-2xl font-bold mb-2">Access Denied</h2>
           <p className="text-l-text-2 dark:text-d-text-2">
-            You need SuperAdmin privileges to access this page.
+            You don't have permission to view companies. Contact your administrator.
           </p>
         </Card>
       </div>
@@ -577,14 +588,18 @@ export default function CompaniesPage() {
                           <Ban className="size-4 mr-2" />
                           {company.is_active ? 'Deactivate' : 'Activate'}
                         </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem 
-                          onClick={() => handleDelete(company)}
-                          className="text-red-600 dark:text-red-400"
-                        >
-                          <Trash2 className="size-4 mr-2" />
-                          Delete Company
-                        </DropdownMenuItem>
+                        {canManageTenants && (
+                          <>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              onClick={() => handleDelete(company)}
+                              className="text-red-600 dark:text-red-400"
+                            >
+                              <Trash2 className="size-4 mr-2" />
+                              Delete Company
+                            </DropdownMenuItem>
+                          </>
+                        )}
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </TableCell>
@@ -656,14 +671,16 @@ export default function CompaniesPage() {
                   <Ban className="size-4" />
                   {company.is_active ? 'Deactivate' : 'Activate'}
                 </Button>
-                <Button
-                  variant="destructive"
-                  onClick={() => handleDelete(company)}
-                  className="gap-2"
-                >
-                  <Trash2 className="size-4" />
-                  Delete
-                </Button>
+                {canManageTenants && (
+                  <Button
+                    variant="destructive"
+                    onClick={() => handleDelete(company)}
+                    className="gap-2"
+                  >
+                    <Trash2 className="size-4" />
+                    Delete
+                  </Button>
+                )}
               </div>
             </Card>
           ))

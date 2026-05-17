@@ -32,8 +32,15 @@ export function LoginForm({
     clearError();
 
     try {
-      await login({ matricule, password });
-      // Redirect to dashboard on successful login
+      // Trim + upper-case the matricule client-side so a copy-pasted value
+      // with surrounding whitespace still resolves the user. The backend
+      // does the same normalisation in ``LkSystemTokenObtainPairSerializer``,
+      // but doing it here too gives the user instant feedback in the input.
+      const cleanMatricule = matricule.trim().toUpperCase();
+      if (cleanMatricule !== matricule) {
+        setMatricule(cleanMatricule);
+      }
+      await login({ matricule: cleanMatricule, password });
       navigate('/dashboard');
     } catch (err) {
       // Error is already set in the store

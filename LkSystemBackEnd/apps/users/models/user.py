@@ -161,7 +161,13 @@ class User(AbstractUser):
         return self.allowed_brands.first()
     
     def save(self, *args, **kwargs):
-        """Ensure matricule is uppercase."""
+        """Normalise matricule: strip surrounding whitespace, force uppercase.
+
+        Without ``.strip()`` a trailing space on the input form survives the
+        ``upper()`` call and the regex validator on the field then rejects
+        it — or worse, the row saves with an invisible trailing space and
+        every subsequent login lookup fails silently.
+        """
         if self.matricule:
-            self.matricule = self.matricule.upper()
+            self.matricule = self.matricule.strip().upper()
         super().save(*args, **kwargs)

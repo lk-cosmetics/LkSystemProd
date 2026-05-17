@@ -73,7 +73,18 @@ class LkSystemTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
     
     def validate(self, attrs):
-        """Override to add extra response data including RBAC permissions."""
+        """Override to add extra response data including RBAC permissions.
+
+        Also normalises the matricule the client sent — trims surrounding
+        whitespace and forces uppercase so a copy-paste with a trailing
+        space (the most common login-fail report we get) still resolves
+        the right user.
+        """
+        username_field = self.username_field  # 'matricule' for this project
+        raw = attrs.get(username_field)
+        if isinstance(raw, str):
+            attrs[username_field] = raw.strip().upper()
+
         data = super().validate(attrs)
 
         user = self.user

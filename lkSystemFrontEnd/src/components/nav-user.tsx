@@ -37,7 +37,21 @@ export function NavUser({
 }) {
   const { isMobile } = useSidebar();
   const navigate = useNavigate();
-  const { logout } = useAuthStore();
+  const { logout, user: authUser } = useAuthStore();
+
+  // Pick the most descriptive role the user holds. SuperAdmin / CEO are the
+  // ones we want to call out explicitly; for everyone else we just take the
+  // first role in their list (or fall back to ``user.role``).
+  const roleLabel: string | null = (() => {
+    const roles = authUser?.roles ?? [];
+    if (roles.length === 0) return authUser?.role || null;
+    const ranked = ['Super Admin', 'SuperAdmin', 'CEO', 'Admin'];
+    for (const r of ranked) {
+      const match = roles.find(x => x?.replace(/[\s_]/g, '').toLowerCase() === r.replace(/\s/g, '').toLowerCase());
+      if (match) return match;
+    }
+    return roles[0] ?? null;
+  })();
 
   const handleLogout = () => {
     logout();
@@ -60,7 +74,14 @@ export function NavUser({
               <div className="grid flex-1 text-left text-sm leading-tight">
                 <span className="truncate font-medium">{user.name}</span>
                 <span className="text-muted-foreground truncate text-xs">
-                  {user.email}
+                  {roleLabel ? (
+                    <>
+                      <span className="font-medium text-foreground/80">{roleLabel}</span>
+                      <span className="opacity-60"> · {user.email}</span>
+                    </>
+                  ) : (
+                    user.email
+                  )}
                 </span>
               </div>
               <IconDotsVertical className="ml-auto size-4" />
@@ -83,6 +104,11 @@ export function NavUser({
                   <span className="text-muted-foreground truncate text-xs">
                     {user.email}
                   </span>
+                  {roleLabel ? (
+                    <span className="truncate text-[11px] font-medium uppercase tracking-wide text-primary">
+                      {roleLabel}
+                    </span>
+                  ) : null}
                 </div>
               </div>
             </DropdownMenuLabel>
