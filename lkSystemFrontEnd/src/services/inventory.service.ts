@@ -68,7 +68,12 @@ const fetchAllPaginated = async <T>(
     // Arrays-only endpoints surface via the ``unwrapList`` array branch — they
     // never have a ``next`` cursor, so the length check is what ends the loop.
     if (Array.isArray(response.data)) break;
-    if (!response.data.next || rows.length < BATCH_SIZE) break;
+    // Stop only when the API confirms there is no next page. Comparing
+    // ``rows.length`` to ``BATCH_SIZE`` is unsafe — older deployments of
+    // the DRF default paginator silently ignore ``?page_size=`` and
+    // return their configured size (20), which made this loop short-
+    // circuit after the very first page and lose every other row.
+    if (!response.data.next) break;
     page += 1;
   }
   return collected;
