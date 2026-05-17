@@ -21,6 +21,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from apps.rbac.models import Role, UserRole
+from apps.rbac.services import scope_kwargs_for_role
 
 User = get_user_model()
 
@@ -82,32 +83,67 @@ class Command(BaseCommand):
             UserRole.objects.filter(user=user).delete()
             self.stdout.write(self.style.WARNING(f'  Removed {removed} existing UserRole row(s).'))
 
-        # The UserRole is always scoped to the user's current_company so the
-        # multi-tenant boundary is respected. brand/channel narrow it further
-        # for brand-/channel-scoped roles.
+        # Build the scope columns from the role's own ``scope_type`` so
+        # the resulting row matches the permission resolver's expectations.
+        # ``--brand-id`` / ``--channel-id`` only apply when the role is
+        # brand- or channel-scoped; for a CEO (company-scoped) the brand
+        # is forced to NULL to avoid the very bug this command fixes.
+        brands_list = []
+        if brand_id is not None:
+            from apps.brands.models import Brand
+            brand = Brand.objects.filter(pk=brand_id).first()
+            if brand is None:
+                raise CommandError(f'No brand with id {brand_id}.')
+            brands_list = [brand]
+        sales_channel = None
+        if channel_id is not None:
+            from apps.sales_channels.models import SalesChannel
+            sales_channel = SalesChannel.objects.filter(pk=channel_id).first()
+            if sales_channel is None:
+                raise CommandError(f'No sales channel with id {channel_id}.')
+
+        scope = scope_kwargs_for_role(
+            role,
+            company=user.current_company,
+            brands=brands_list,
+            sales_channel=sales_channel,
+        )
+
+        # Warn if the caller's flags were narrower than the role's scope
+        # would allow — keeps the operator from being surprised silently.
+        if brand_id is not None and scope.get('brand') is None:
+            self.stdout.write(self.style.WARNING(
+                f'  Note: --brand-id ignored — {role.name!r} is {role.scope_type}-scoped, '
+                'brand columns must be NULL for the resolver to match.'
+            ))
+        if channel_id is not None and scope.get('sales_channel') is None:
+            self.stdout.write(self.style.WARNING(
+                f'  Note: --channel-id ignored — {role.name!r} is {role.scope_type}-scoped.'
+            ))
+
         existing = UserRole.objects.filter(
             user=user,
             role=role,
-            company=user.current_company,
-            brand_id=brand_id,
-            sales_channel_id=channel_id,
+            **scope,
         ).first()
         if existing:
             self.stdout.write(self.style.SUCCESS(
                 f'  Already assigned: {role.name!r} ({perm_count} perms) '
-                f'company={user.current_company_id} brand={brand_id} channel={channel_id}'
+                f'company={scope.get("company") and scope["company"].id} '
+                f'brand={scope.get("brand") and scope["brand"].id} '
+                f'channel={scope.get("sales_channel") and scope["sales_channel"].id}'
             ))
             return
 
         UserRole.objects.create(
             user=user,
             role=role,
-            company=user.current_company,
-            brand_id=brand_id,
-            sales_channel_id=channel_id,
             assigned_by=None,
+            **scope,
         )
         self.stdout.write(self.style.SUCCESS(
-            f'  Assigned {role.name!r} ({perm_count} perms) → {user.matricule} '
-            f'(company={user.current_company_id}, brand={brand_id}, channel={channel_id}).'
+            f'  Assigned {role.name!r} ({perm_count} perms, {role.scope_type}-scoped) → {user.matricule} '
+            f'(company={scope.get("company") and scope["company"].id}, '
+            f'brand={scope.get("brand") and scope["brand"].id}, '
+            f'channel={scope.get("sales_channel") and scope["sales_channel"].id}).'
         ))

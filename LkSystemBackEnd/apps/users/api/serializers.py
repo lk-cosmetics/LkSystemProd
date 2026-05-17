@@ -429,24 +429,28 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
         if allowed_brands:
             user.allowed_brands.set(allowed_brands)
 
-        # Assign the RBAC role with proper tenant scoping. We always scope
-        # the UserRole to the user's ``current_company`` so the assignment
-        # follows the multi-tenant boundary — even when an admin from a
-        # different tenant creates the user. ``brand`` is left null unless
-        # the user has exactly one allowed brand (in which case we scope
-        # there for narrower role like Manager / Stock Keeper).
+        # Assign the RBAC role at exactly the scope ``role.scope_type``
+        # asks for. Setting ``brand=allowed_brands[0]`` unconditionally
+        # would narrow a company-scoped role (CEO / Viewer) below its
+        # natural scope and the permission resolver would never match.
+        # ``scope_kwargs_for_role`` returns the right column triple.
         if role is not None:
             from apps.rbac.models import UserRole
+            from apps.rbac.services import scope_kwargs_for_role
+
             request = self.context.get('request')
             assigner = request.user if request and request.user.is_authenticated else None
-            single_brand = allowed_brands[0] if len(allowed_brands) == 1 else None
+            scope = scope_kwargs_for_role(
+                role,
+                company=user.current_company,
+                brands=allowed_brands,
+                sales_channel=None,
+            )
             UserRole.objects.create(
                 user=user,
                 role=role,
-                company=user.current_company,
-                brand=single_brand,
-                sales_channel=None,
                 assigned_by=assigner,
+                **scope,
             )
         
         # Update profile (signal auto-creates it, so we update instead of create)
@@ -1069,14 +1073,24 @@ class AcceptInvitationSerializer(serializers.Serializer):
         # Create profile stub
         Profile.objects.get_or_create(user=user)
 
-        # Assign RBAC role with scope
+        # Assign the RBAC role at exactly the scope the role's
+        # ``scope_type`` requires. The naive "single brand → narrow
+        # to that brand" produces broken CEO accounts: a CEO is a
+        # company-scoped role; narrowing to ``brand=X`` makes the
+        # permission resolver miss it at company scope and the user
+        # ends up with zero perms even though the role on file has 67.
+        from apps.rbac.services import scope_kwargs_for_role
+        scope = scope_kwargs_for_role(
+            invitation.role,
+            company=company,
+            brands=brands,
+            sales_channel=invitation.sales_channel,
+        )
         UserRole.objects.create(
             user=user,
             role=invitation.role,
-            company=company,
-            brand=brands[0] if len(brands) == 1 else None,
-            sales_channel=invitation.sales_channel,
             assigned_by=invitation.invited_by,
+            **scope,
         )
 
         invitation.mark_accepted(user)
