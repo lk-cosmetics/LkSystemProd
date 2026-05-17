@@ -3,13 +3,19 @@ LkSystem Products App - Views
 DRF ViewSets for Product management with soft delete.
 """
 
+import csv
+import io
+from decimal import Decimal, InvalidOperation
+
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.parsers import JSONParser
+from rest_framework.parsers import JSONParser, MultiPartParser
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
+from django.db import transaction
+from django.http import HttpResponse
 from django.utils import timezone
 
 from .models import Product, ProductAuditLog
@@ -429,6 +435,245 @@ class ProductViewSet(viewsets.ModelViewSet):
                 {'detail': f'Failed to fetch products from WooCommerce: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    # ─── Bulk operations ──────────────────────────────────────────────────
+
+    BULK_STATUS_CHOICES = ('publish', 'draft', 'pending', 'private')
+
+    @action(detail=False, methods=['post'], url_path='bulk-change-status')
+    def bulk_change_status(self, request):
+        """
+        Change ``status`` for several products in a single transaction.
+
+        Body: ``{"ids": [1, 2, 3], "status": "publish"}``.
+
+        Each affected row is audit-logged (UPDATE) with its before/after
+        ``status`` so the change is traceable per product.
+        """
+        ids = request.data.get('ids')
+        new_status = request.data.get('status')
+
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {'detail': 'Provide a non-empty list of product ids.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if new_status not in self.BULK_STATUS_CHOICES:
+            return Response(
+                {'detail': f'status must be one of {self.BULK_STATUS_CHOICES}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Scope to what the user is allowed to touch — same querysets as list.
+        qs = self.get_queryset().filter(pk__in=ids)
+        affected = []
+        with transaction.atomic():
+            for product in qs:
+                if product.status == new_status:
+                    continue
+                old_status = product.status
+                product.status = new_status
+                product.save(update_fields=['status', 'updated_at'])
+                ProductAuditLog.objects.create(
+                    product=product,
+                    user=request.user,
+                    action=ProductAuditLog.Action.UPDATE,
+                    changes={'status': [old_status, new_status]},
+                )
+                affected.append(product.id)
+
+        return Response({
+            'updated': len(affected),
+            'requested': len(ids),
+            'status': new_status,
+            'updated_ids': affected,
+        })
+
+    @action(detail=False, methods=['get'], url_path='export-csv')
+    def export_csv(self, request):
+        """
+        Stream the current (filtered) catalogue as a CSV file.
+
+        Respects every filter/search/ordering the list endpoint accepts,
+        so e.g. ``?brand=3&status=publish`` only exports those rows.
+        Used by the Products page "Export" button.
+        """
+        qs = self.filter_queryset(self.get_queryset()).select_related('brand')
+
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        ts = timezone.now().strftime('%Y%m%d-%H%M%S')
+        response['Content-Disposition'] = f'attachment; filename="products-{ts}.csv"'
+
+        writer = csv.writer(response)
+        writer.writerow([
+            'id', 'name', 'barcode', 'product_type', 'status',
+            'purchase_price', 'sales_price', 'brand_id', 'brand_name',
+            'wc_product_id', 'product_link', 'image_url',
+            'is_pack', 'created_at', 'updated_at',
+        ])
+        for p in qs.iterator(chunk_size=200):
+            writer.writerow([
+                p.id, p.name, p.barcode or '', p.product_type, p.status,
+                str(p.purchase_price or ''), str(p.sales_price or ''),
+                p.brand_id or '', p.brand.name if p.brand_id else '',
+                p.wc_product_id or '', p.product_link or '', p.image_url or '',
+                'true' if p.is_pack else 'false',
+                p.created_at.isoformat() if p.created_at else '',
+                p.updated_at.isoformat() if p.updated_at else '',
+            ])
+
+        return response
+
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='import-csv',
+        parser_classes=[MultiPartParser, JSONParser],
+    )
+    def import_csv(self, request):
+        """
+        Upsert products from an uploaded CSV.
+
+        Multipart payload: ``file=<your.csv>``. The file must have a header
+        row. Matching is by **barcode** (case-insensitive) — rows with an
+        existing barcode are updated, rows with a new barcode are created,
+        rows missing a barcode are skipped (counted as errors).
+
+        Recognised columns (case-insensitive): ``barcode``, ``name``,
+        ``product_type``, ``status``, ``purchase_price``, ``sales_price``,
+        ``brand_id``, ``product_link``, ``image_url``.
+
+        Returns ``{created, updated, skipped, errors: [{row, message}]}``.
+        """
+        upload = request.FILES.get('file')
+        if not upload:
+            return Response(
+                {'detail': 'Upload a CSV under the "file" field.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            decoded = upload.read().decode('utf-8-sig')
+        except UnicodeDecodeError:
+            return Response(
+                {'detail': 'File is not valid UTF-8. Save the CSV as UTF-8 and retry.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        reader = csv.DictReader(io.StringIO(decoded))
+        if not reader.fieldnames:
+            return Response(
+                {'detail': 'CSV is empty or has no header row.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Normalise headers so we accept "Barcode" / "BARCODE" / " barcode" alike.
+        field_map = {h.strip().lower(): h for h in reader.fieldnames if h}
+
+        def cell(row, key):
+            real = field_map.get(key)
+            return (row.get(real) or '').strip() if real else ''
+
+        created = 0
+        updated = 0
+        skipped = 0
+        errors = []
+
+        VALID_TYPES = {'resell', 'packaging', 'finished', 'component', 'raw_material'}
+        VALID_STATUS = set(self.BULK_STATUS_CHOICES)
+
+        def to_decimal(raw):
+            if raw in ('', None):
+                return None
+            try:
+                return Decimal(raw)
+            except (InvalidOperation, TypeError):
+                raise ValueError(f'Invalid price: {raw!r}')
+
+        with transaction.atomic():
+            for line_num, row in enumerate(reader, start=2):  # start=2 → header is line 1
+                barcode = cell(row, 'barcode')
+                if not barcode:
+                    skipped += 1
+                    errors.append({'row': line_num, 'message': 'missing barcode'})
+                    continue
+
+                try:
+                    payload = {
+                        'name': cell(row, 'name') or None,
+                        'product_type': (cell(row, 'product_type') or '').lower() or None,
+                        'status': (cell(row, 'status') or '').lower() or None,
+                        'purchase_price': to_decimal(cell(row, 'purchase_price')),
+                        'sales_price': to_decimal(cell(row, 'sales_price')),
+                        'product_link': cell(row, 'product_link') or None,
+                        'image_url': cell(row, 'image_url') or None,
+                    }
+                except ValueError as exc:
+                    skipped += 1
+                    errors.append({'row': line_num, 'message': str(exc)})
+                    continue
+
+                if payload['product_type'] and payload['product_type'] not in VALID_TYPES:
+                    skipped += 1
+                    errors.append({
+                        'row': line_num,
+                        'message': f"product_type must be one of {sorted(VALID_TYPES)}",
+                    })
+                    continue
+                if payload['status'] and payload['status'] not in VALID_STATUS:
+                    skipped += 1
+                    errors.append({
+                        'row': line_num,
+                        'message': f"status must be one of {sorted(VALID_STATUS)}",
+                    })
+                    continue
+
+                brand_id_raw = cell(row, 'brand_id')
+                brand_id = int(brand_id_raw) if brand_id_raw.isdigit() else None
+
+                # Strip None values so we don't overwrite saved fields with blanks.
+                clean = {k: v for k, v in payload.items() if v is not None}
+                if brand_id is not None:
+                    clean['brand_id'] = brand_id
+
+                existing = Product.all_objects.filter(barcode__iexact=barcode).first()
+                if existing:
+                    for k, v in clean.items():
+                        setattr(existing, k, v)
+                    existing.save()
+                    ProductAuditLog.objects.create(
+                        product=existing,
+                        user=request.user,
+                        action=ProductAuditLog.Action.UPDATE,
+                        changes={k: ['<via csv>', str(v)] for k, v in clean.items()},
+                    )
+                    updated += 1
+                else:
+                    if not clean.get('name'):
+                        skipped += 1
+                        errors.append({
+                            'row': line_num,
+                            'message': 'name is required to create a new product',
+                        })
+                        continue
+                    clean.setdefault('product_type', 'resell')
+                    clean.setdefault('status', 'publish')
+                    clean.setdefault('purchase_price', Decimal('0'))
+                    clean.setdefault('sales_price', Decimal('0'))
+                    new_p = Product.objects.create(barcode=barcode, **clean)
+                    ProductAuditLog.objects.create(
+                        product=new_p,
+                        user=request.user,
+                        action=ProductAuditLog.Action.CREATE,
+                    )
+                    created += 1
+
+        return Response({
+            'created': created,
+            'updated': updated,
+            'skipped': skipped,
+            'errors': errors,
+        })
 
     @action(detail=False, methods=['post'], url_path='sync-selected')
     def sync_selected(self, request):

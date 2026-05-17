@@ -225,6 +225,39 @@
     });
   }
 
+  /**
+   * Change ``status`` (publish / draft / pending / private) on many
+   * products at once. Invalidates every list+detail query so any open
+   * grid, picker, or BI panel sees the new values without a manual
+   * refetch.
+   */
+  export function useBulkChangeProductStatus() {
+    const queryClient = useQueryClient();
+    return useMutation({
+      mutationFn: (vars: {
+        ids: number[];
+        status: 'publish' | 'draft' | 'pending' | 'private';
+      }) => productService.bulkChangeStatus(vars.ids, vars.status),
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: productsKeys.all });
+      },
+    });
+  }
+
+  /**
+   * Upload a CSV and upsert products by barcode. Invalidates the
+   * products cache so every list re-fetches after the upload finishes.
+   */
+  export function useImportProductsCSV() {
+    const queryClient = useQueryClient();
+    return useMutation({
+      mutationFn: (file: File) => productService.importCSV(file),
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: productsKeys.all });
+      },
+    });
+  }
+
   export function useBulkRestoreProducts() {
     const queryClient = useQueryClient();
     return useMutation({

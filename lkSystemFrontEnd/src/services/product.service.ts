@@ -231,6 +231,63 @@ class ProductService {
     return response.data;
   }
 
+  // ── Bulk operations & CSV ─────────────────────────────────────────────
+
+  /**
+   * Apply a single ``status`` to many products in one round-trip.
+   * Backend audits every affected row.
+   */
+  async bulkChangeStatus(
+    ids: number[],
+    nextStatus: 'publish' | 'draft' | 'pending' | 'private',
+  ): Promise<{ updated: number; requested: number; status: string; updated_ids: number[] }> {
+    const response = await apiClient.post<{
+      updated: number;
+      requested: number;
+      status: string;
+      updated_ids: number[];
+    }>(`${PRODUCT_ENDPOINT}bulk-change-status/`, {
+      ids,
+      status: nextStatus,
+    });
+    return response.data;
+  }
+
+  /**
+   * Trigger a CSV download of the current filtered catalogue.
+   * Returns the Blob so the caller can save it under any filename.
+   */
+  async exportCSV(params?: ProductQueryParams): Promise<Blob> {
+    const response = await apiClient.get<Blob>(`${PRODUCT_ENDPOINT}export-csv/`, {
+      params: normalizeProductQueryParams(params),
+      responseType: 'blob',
+    });
+    return response.data;
+  }
+
+  /**
+   * Upsert products from a CSV file. The backend matches by barcode.
+   */
+  async importCSV(file: File): Promise<{
+    created: number;
+    updated: number;
+    skipped: number;
+    errors: { row: number; message: string }[];
+  }> {
+    const form = new FormData();
+    form.append('file', file);
+    const response = await apiClient.post<{
+      created: number;
+      updated: number;
+      skipped: number;
+      errors: { row: number; message: string }[];
+    }>(`${PRODUCT_ENDPOINT}import-csv/`, form, {
+      // Let axios infer the multipart boundary — don't force a content type.
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  }
+
   async getPOSCache(salesChannelId: number): Promise<POSProductCacheResponse> {
     const response = await apiClient.get<POSProductCacheResponse>(
       `${PRODUCT_ENDPOINT}pos-cache/`,
