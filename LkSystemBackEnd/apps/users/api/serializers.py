@@ -181,6 +181,13 @@ class UserListSerializer(serializers.ModelSerializer):
     role_name = serializers.SerializerMethodField()
     company_name = serializers.CharField(source='current_company.name', read_only=True)
     full_name = serializers.SerializerMethodField()
+    # Avatar lives on the related ``Profile`` (one-to-one). Surface it at
+    # the top level here so the UsersPage list + quick-view <Avatar>
+    # components don't have to drill through ``profile.avatar`` — that
+    # field never reached the list response before, which is why every
+    # row was falling back to the initials placeholder.
+    avatar = serializers.SerializerMethodField()
+    allowed_brand_names = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -196,6 +203,8 @@ class UserListSerializer(serializers.ModelSerializer):
             'company_name',
             'is_active',
             'date_joined',
+            'avatar',
+            'allowed_brand_names',
         ]
 
     def get_full_name(self, obj):
@@ -206,6 +215,21 @@ class UserListSerializer(serializers.ModelSerializer):
         names = PermissionService.get_user_role_names(obj)
         return names[0] if names else None
 
+    def get_avatar(self, obj):
+        """Return the profile avatar URL (absolute if the request is in
+        context), or ``None`` when the user hasn't uploaded one. Robust to
+        a missing Profile row — the M2M signal usually creates one, but
+        legacy accounts may not have it."""
+        profile = getattr(obj, 'profile', None)
+        if profile is None or not profile.avatar:
+            return None
+        request = self.context.get('request')
+        url = profile.avatar.url
+        return request.build_absolute_uri(url) if request else url
+
+    def get_allowed_brand_names(self, obj):
+        return list(obj.allowed_brands.values_list('name', flat=True))
+
 
 class UserDetailSerializer(serializers.ModelSerializer):
     """Detailed User serializer with profile and brands."""
@@ -215,7 +239,12 @@ class UserDetailSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
     profile = ProfileSerializer(read_only=True)
     allowed_brand_ids = serializers.SerializerMethodField()
+    allowed_brand_names = serializers.SerializerMethodField()
     can_switch_brands = serializers.SerializerMethodField()
+    # Top-level mirror of profile.avatar — saves the frontend from
+    # drilling through the nested profile object every time it wants to
+    # render an <Avatar> in the quick-view dialog.
+    avatar = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -231,14 +260,27 @@ class UserDetailSerializer(serializers.ModelSerializer):
             'company_name',
             'allowed_brands',
             'allowed_brand_ids',
+            'allowed_brand_names',
             'can_switch_brands',
             'is_active',
             'is_staff',
             'date_joined',
             'last_login',
             'profile',
+            'avatar',
         ]
         read_only_fields = ['id', 'matricule', 'date_joined', 'last_login']
+
+    def get_avatar(self, obj):
+        profile = getattr(obj, 'profile', None)
+        if profile is None or not profile.avatar:
+            return None
+        request = self.context.get('request')
+        url = profile.avatar.url
+        return request.build_absolute_uri(url) if request else url
+
+    def get_allowed_brand_names(self, obj):
+        return list(obj.allowed_brands.values_list('name', flat=True))
 
     def get_full_name(self, obj):
         return obj.get_full_name()
