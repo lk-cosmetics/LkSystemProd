@@ -33,27 +33,17 @@ from apps.inventory.serializers import (
 
 
 def _allowed_sales_channel_ids(user):
-    """Return channel ids visible to the user, or None for unrestricted users."""
-    if user.is_superuser:
-        return None
-    try:
-        from apps.rbac.services import PermissionService
-        scoped = set(
-            PermissionService.get_user_assignments(user)
-            .filter(sales_channel__isnull=False)
-            .values_list('sales_channel_id', flat=True)
-        )
-        if scoped:
-            return scoped
-    except Exception:
-        pass
-    if user.allowed_brands.exists():
-        return set(
-            SalesChannel.objects
-            .filter(brand__in=user.allowed_brands.all())
-            .values_list('id', flat=True)
-        )
-    return set()
+    """
+    Channel ids visible to ``user`` (or ``None`` for unrestricted reach).
+
+    Delegates to the shared RBAC helper so every viewset that scopes
+    on channels uses the same logic. The previous implementation only
+    looked at ``user.allowed_brands`` for non-channel-scoped roles,
+    which over-narrowed company-scoped roles (CEO) whose
+    ``allowed_brands`` typically holds a single seed brand.
+    """
+    from apps.rbac.services import visible_sales_channel_ids
+    return visible_sales_channel_ids(user)
 
 
 class SalesChannelInventoryViewSet(viewsets.ModelViewSet):

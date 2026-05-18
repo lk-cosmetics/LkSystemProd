@@ -87,36 +87,27 @@ class SalesChannelViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         """
-        Filter sales channels based on user's role and allowed brands.
-        - SuperAdmin/CEO: Sees all channels
-        - Manager/other users: Only sees channels for their assigned brands
-        - Channel-scoped roles (cashier) see only their assigned channel(s)
+        Scope channels per the user's RBAC reach. ``visible_sales_channel_ids``
+        returns the union of:
+          - explicit channel-level assignments (Cashier / Sales Rep),
+          - every channel of the brands the user can access — which in
+            turn includes ``allowed_brands`` AND every brand in the
+            user's ``current_company`` when the user is company-scoped.
+
+        Without this, a CEO with a single ``allowed_brands`` entry saw
+        only that one brand's channels even though the role grants
+        company-wide reach.
         """
         user = self.request.user
         queryset = super().get_queryset().select_related('brand', 'brand__company')
-        
-        # SuperAdmin sees all
-        if user.is_superuser:
-            return queryset
 
-        try:
-            from apps.rbac.services import PermissionService
-            scoped_channel_ids = set(
-                PermissionService.get_user_assignments(user)
-                .filter(sales_channel__isnull=False)
-                .values_list('sales_channel_id', flat=True)
-            )
-            if scoped_channel_ids:
-                return queryset.filter(id__in=scoped_channel_ids)
-        except Exception:
-            pass
-        
-        # Filter by user's allowed brands
-        if user.allowed_brands.exists():
-            return queryset.filter(brand__in=user.allowed_brands.all())
-        
-        # No brands assigned - return empty
-        return queryset.none()
+        from apps.rbac.services import visible_sales_channel_ids
+        channel_ids = visible_sales_channel_ids(user)
+        if channel_ids is None:
+            return queryset
+        if not channel_ids:
+            return queryset.none()
+        return queryset.filter(id__in=channel_ids)
     
     @extend_schema(
         tags=['Sales Channels'],
