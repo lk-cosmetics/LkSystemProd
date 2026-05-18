@@ -69,6 +69,75 @@ def scope_kwargs_for_role(role, *, company=None, brands=None, sales_channel=None
     # Unknown scope type — fall back to company scope (safe default).
     return {'company': company, 'brand': None, 'sales_channel': None}
 
+
+def visible_brand_ids(user):
+    """
+    Return the set of brand ids ``user`` is allowed to see, or ``None`` to
+    mean "no restriction" (superuser / platform-scoped role).
+
+    The previous implementation in several viewsets filtered solely on
+    ``user.allowed_brands`` — fine for Manager / Stock Keeper, but it
+    over-narrowed a CEO whose ``allowed_brands`` typically contains the
+    single brand they were invited under. The fix: a CEO (or any user
+    with a company-scoped RBAC role) gets every brand belonging to their
+    ``current_company`` in addition to whatever's in ``allowed_brands``.
+
+    Returns:
+        * ``None`` — the user can see everything (no filter).
+        * ``set[int]`` — restrict to these brand ids (may be empty,
+          meaning the user gets nothing).
+    """
+    if not user or not user.is_authenticated:
+        return set()
+    if user.is_superuser:
+        return None
+    if user.user_roles.filter(role__scope_type='platform').exists():
+        return None
+
+    ids = set(user.allowed_brands.values_list('id', flat=True))
+
+    # Company-scoped users (CEO, Viewer) see every brand of their company,
+    # not just the brand(s) marked on their allowed_brands M2M.
+    has_company_role = user.user_roles.filter(role__scope_type='company').exists()
+    if has_company_role and user.current_company_id:
+        from apps.brands.models import Brand
+        ids |= set(
+            Brand.objects.filter(company_id=user.current_company_id)
+            .values_list('id', flat=True)
+        )
+    return ids
+
+
+def visible_sales_channel_ids(user):
+    """
+    Return the set of sales-channel ids ``user`` may see, or ``None`` for
+    "no restriction". Derived from ``visible_brand_ids`` plus any
+    channel-level RBAC assignments the user happens to hold.
+    """
+    if not user or not user.is_authenticated:
+        return set()
+    if user.is_superuser:
+        return None
+    if user.user_roles.filter(role__scope_type='platform').exists():
+        return None
+
+    # Channel-level RBAC assignments grant direct access to those channels.
+    channel_ids = set(
+        user.user_roles.filter(sales_channel__isnull=False)
+        .values_list('sales_channel_id', flat=True)
+    )
+
+    brand_ids = visible_brand_ids(user)
+    if brand_ids is None:
+        return None  # company-wide / platform-wide reach
+    if brand_ids:
+        from apps.sales_channels.models import SalesChannel
+        channel_ids |= set(
+            SalesChannel.objects.filter(brand_id__in=brand_ids)
+            .values_list('id', flat=True)
+        )
+    return channel_ids
+
 if TYPE_CHECKING:
     from apps.brands.models import Brand
     from apps.company.models import Company

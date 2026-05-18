@@ -87,15 +87,18 @@ class ProductViewSet(viewsets.ModelViewSet):
 
         if user.is_superuser:
             return qs
-        scoped_channel_ids = _user_scoped_channel_ids(user)
-        if scoped_channel_ids is not None:
-            scoped_brand_ids = SalesChannel.objects.filter(
-                id__in=scoped_channel_ids,
-            ).values_list('brand_id', flat=True)
-            return qs.filter(brand_id__in=scoped_brand_ids)
-        if user.allowed_brands.exists():
-            return qs.filter(brand__in=user.allowed_brands.all())
-        return qs.none()
+        # ``visible_brand_ids`` returns the union of allowed_brands AND
+        # every brand of the user's current_company (when the user holds
+        # a company-scoped RBAC role like CEO). That fixes the previous
+        # over-narrowing where a CEO with a single allowed_brand only saw
+        # one brand's products instead of all the company's products.
+        from apps.rbac.services import visible_brand_ids
+        brand_ids = visible_brand_ids(user)
+        if brand_ids is None:
+            return qs
+        if not brand_ids:
+            return qs.none()
+        return qs.filter(brand_id__in=brand_ids)
 
     # ── Create / Update with audit ──────────────────────────────────────
 
@@ -267,18 +270,13 @@ class ProductViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # Use the shared scope helper so a CEO whose ``allowed_brands``
+        # holds a single brand still has access to every POS channel
+        # of every brand in their company.
         user = request.user
-        scoped_channel_ids = _user_scoped_channel_ids(user)
-        if scoped_channel_ids is not None and sales_channel.id not in scoped_channel_ids:
-            return Response(
-                {'detail': 'You do not have access to this sales channel.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        if (
-            scoped_channel_ids is None
-            and not user.is_superuser
-            and not user.allowed_brands.filter(pk=sales_channel.brand_id).exists()
-        ):
+        from apps.rbac.services import visible_sales_channel_ids
+        channel_ids = visible_sales_channel_ids(user)
+        if channel_ids is not None and sales_channel.id not in channel_ids:
             return Response(
                 {'detail': 'You do not have access to this sales channel.'},
                 status=status.HTTP_403_FORBIDDEN,

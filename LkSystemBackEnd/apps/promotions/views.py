@@ -155,42 +155,21 @@ class PromotionViewSet(viewsets.ModelViewSet):
         if not user.is_authenticated:
             return queryset.none()
 
-        # Admin / staff: full access
-        if user.is_superuser or user.is_staff:
+        # Single, shared scope resolver. ``visible_brand_ids`` returns
+        # None for superuser / platform admin (no filter), a (possibly
+        # empty) set of brand ids otherwise — including every brand of
+        # the user's ``current_company`` for company-scoped roles like
+        # CEO. The previous logic over-narrowed to ``allowed_brands``
+        # only and a CEO ended up with one brand's promotions.
+        from apps.rbac.services import visible_brand_ids
+        brand_ids = visible_brand_ids(user)
+        if brand_ids is None:
             return queryset
-
-        role = getattr(user, 'role', None)
-
-        # CEO: full access
-        if role and (role.name.upper() == 'SUPERADMIN' or getattr(role, 'is_ceo', False)):
-            return queryset
-
-        try:
-            from apps.rbac.services import PermissionService
-            scoped_brand_ids = set(
-                PermissionService.get_user_assignments(user)
-                .filter(sales_channel__isnull=False)
-                .values_list('sales_channel__brand_id', flat=True)
-            )
-            if scoped_brand_ids:
-                return queryset.filter(
-                    Q(brand_id__in=scoped_brand_ids) | Q(brand__isnull=True)
-                )
-        except Exception:
-            pass
-
-        # Everyone else: scope to their allowed brands
-        # brand__company traversal gives correct company isolation
-        allowed_brands = user.allowed_brands.all()
-        if allowed_brands.exists():
-            queryset = queryset.filter(
-                Q(brand__in=allowed_brands) | Q(brand__isnull=True)
-            )
-        else:
-            # No brands assigned → no promotions visible
+        if not brand_ids:
             return queryset.none()
-
-        return queryset
+        return queryset.filter(
+            Q(brand_id__in=brand_ids) | Q(brand__isnull=True)
+        )
 
     # ──────────────────────────────────────────────────────────────────────────
     # Channel Rule Actions

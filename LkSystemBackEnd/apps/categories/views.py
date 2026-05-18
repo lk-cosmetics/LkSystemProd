@@ -52,7 +52,11 @@ class CategoryViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         """
-        Filter categories based on user's allowed brands.
+        Scope categories to the brands the user can reach.
+
+        Uses the shared ``visible_brand_ids`` helper so a company-scoped
+        role (CEO) sees every category of every brand in their company,
+        not just the brand(s) on their ``allowed_brands`` M2M.
         """
         user = self.request.user
         queryset = Category.objects.select_related(
@@ -60,18 +64,14 @@ class CategoryViewSet(viewsets.ModelViewSet):
             'sales_channel__brand',
             'parent',
         ).prefetch_related('children')
-        
-        # Superadmin sees all
-        if user.is_superuser:
+
+        from apps.rbac.services import visible_brand_ids
+        brand_ids = visible_brand_ids(user)
+        if brand_ids is None:
             return queryset
-        
-        # Filter by user's allowed brands
-        if user.allowed_brands.exists():
-            return queryset.filter(
-                sales_channel__brand__in=user.allowed_brands.all()
-            )
-        
-        return queryset.none()
+        if not brand_ids:
+            return queryset.none()
+        return queryset.filter(sales_channel__brand_id__in=brand_ids)
     
     def perform_create(self, serializer):
         """Set created_by on category creation."""
