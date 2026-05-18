@@ -309,10 +309,13 @@ class InventoryMovementViewSet(viewsets.ModelViewSet):
 
 class BillOfMaterialsViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for normalized product BOMs.
+    Normalised product BOMs.
 
-    A BOM defines the component quantities required to produce one unit of a
-    finished product.
+    Scope: a BOM belongs to its ``finished_product.brand``. The viewset
+    filters to the brands the calling user can reach (CEO sees every
+    brand in their company; Manager sees their assigned brands; Stock
+    Keeper same). Permission gates by RBAC action codenames so a custom
+    role with just ``view_manufacturing`` is read-only.
     """
     queryset = BillOfMaterials.objects.select_related(
         'finished_product', 'finished_product__brand', 'created_by'
@@ -329,14 +332,41 @@ class BillOfMaterialsViewSet(viewsets.ModelViewSet):
             return BillOfMaterialsListSerializer
         return BillOfMaterialsDetailSerializer
 
+    def get_queryset(self):
+        from apps.rbac.services import visible_brand_ids
+        qs = super().get_queryset()
+        brand_ids = visible_brand_ids(self.request.user)
+        if brand_ids is None:
+            return qs
+        if not brand_ids:
+            return qs.none()
+        return qs.filter(finished_product__brand_id__in=brand_ids)
+
+    def get_permissions(self):
+        from apps.rbac.permissions import require_permission
+        if self.action in ('list', 'retrieve'):
+            return [IsAuthenticated(), require_permission('view_manufacturing')()]
+        if self.action == 'create':
+            return [IsAuthenticated(), require_permission('create_manufacturing')()]
+        if self.action in ('update', 'partial_update'):
+            return [IsAuthenticated(), require_permission('edit_manufacturing')()]
+        if self.action == 'destroy':
+            return [IsAuthenticated(), require_permission('delete_manufacturing')()]
+        return [IsAuthenticated()]
+
 
 class ProductionBatchViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for production batches.
-
-    send_to_factory deducts BOM components from warehouse stock and marks them
-    as in factory on the batch. receive_from_factory increases finished-product
+    Production batches: send-to-factory deducts BOM components from
+    warehouse stock; receive-from-factory increases finished-product
     stock and decreases the batch's in-factory balance.
+
+    Scope: filter by the channels the user can reach. Permission gates:
+    ``view_manufacturing`` for read, ``send_to_factory`` for create /
+    send, ``receive_from_factory`` for the receive action, plus
+    ``edit_manufacturing`` for arbitrary updates and ``delete_manufacturing``
+    for destroy / cancel. A role can hold any subset (e.g. Stock Keeper
+    has view + send + receive but no edit / delete).
     """
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     queryset = ProductionBatch.objects.select_related(
@@ -348,6 +378,30 @@ class ProductionBatchViewSet(viewsets.ModelViewSet):
     search_fields = ['batch_number', 'finished_product__name', 'notes']
     ordering_fields = ['created_at', 'updated_at', 'planned_quantity', 'received_quantity']
     ordering = ['-created_at']
+
+    def get_queryset(self):
+        from apps.rbac.services import visible_sales_channel_ids
+        qs = super().get_queryset()
+        channel_ids = visible_sales_channel_ids(self.request.user)
+        if channel_ids is None:
+            return qs
+        if not channel_ids:
+            return qs.none()
+        return qs.filter(sales_channel_id__in=channel_ids)
+
+    def get_permissions(self):
+        from apps.rbac.permissions import require_permission
+        if self.action in ('list', 'retrieve'):
+            return [IsAuthenticated(), require_permission('view_manufacturing')()]
+        if self.action == 'create':
+            return [IsAuthenticated(), require_permission('send_to_factory')()]
+        if self.action == 'receive':
+            return [IsAuthenticated(), require_permission('receive_from_factory')()]
+        if self.action in ('update', 'partial_update'):
+            return [IsAuthenticated(), require_permission('edit_manufacturing')()]
+        if self.action in ('destroy', 'cancel'):
+            return [IsAuthenticated(), require_permission('delete_manufacturing')()]
+        return [IsAuthenticated()]
 
     def get_serializer_class(self):
         if self.action == 'list':
