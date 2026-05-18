@@ -505,40 +505,146 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
 
 
 class UpdateUserSerializer(serializers.ModelSerializer):
-    """Serializer for updating user information."""
-    
+    """
+    Update an existing user.
+
+    ``current_company`` is editable by platform admins only — moving a
+    user between tenants is a high-impact action: it must also re-target
+    the user's RBAC assignments so the permission resolver keeps
+    matching at the new company scope. Non-platform admins get a
+    permission error if they try to write the field.
+    """
+
     class Meta:
         model = User
         fields = [
             'email',
             'first_name',
             'last_name',
+            'current_company',
             'allowed_brands',
             'is_active',
         ]
-    
-    def validate_allowed_brands(self, value):
-        """Ensure brands belong to user's company."""
-        user = self.instance
-        if not user or not user.current_company:
-            if value:
+
+    def _is_platform_admin(self):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+        return user.user_roles.filter(role__scope_type='platform').exists()
+
+    def validate_current_company(self, value):
+        """Only platform admins may change a user's tenant."""
+        instance = self.instance
+        if instance and value and instance.current_company_id != getattr(value, 'id', None):
+            if not self._is_platform_admin():
                 raise serializers.ValidationError(
-                    'Cannot assign brands to user without a company.'
+                    'Only a platform admin can move a user between companies.'
                 )
-            return value
-        
-        invalid_brands = []
-        for brand in value:
-            if brand.company_id != user.current_company_id:
-                invalid_brands.append(brand.name)
-        
-        if invalid_brands:
-            raise serializers.ValidationError(
-                f"The following brands do not belong to the user's company: "
-                f"{', '.join(invalid_brands)}"
-            )
-        
         return value
+
+    def validate(self, attrs):
+        """Validate ``allowed_brands`` against the *incoming* company.
+
+        The previous validator looked at ``instance.current_company``, so
+        changing company + brands in the same request always failed the
+        brand-belongs-to-company check (because it ran against the OLD
+        company). Resolve the effective target company first.
+        """
+        # ``self.instance`` is ``None`` on create paths, but this serializer
+        # is only registered for update / partial_update.
+        instance = self.instance
+        effective_company = (
+            attrs.get('current_company')
+            or (instance.current_company if instance else None)
+        )
+        brands = attrs.get('allowed_brands')
+        if brands is not None:
+            if not effective_company:
+                if brands:
+                    raise serializers.ValidationError({
+                        'allowed_brands': 'Cannot assign brands to a user without a company.',
+                    })
+            else:
+                invalid = [
+                    b.name for b in brands
+                    if b.company_id != getattr(effective_company, 'id', None)
+                ]
+                if invalid:
+                    raise serializers.ValidationError({
+                        'allowed_brands': (
+                            f"The following brands do not belong to the user's company: "
+                            f"{', '.join(invalid)}"
+                        ),
+                    })
+        return attrs
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        """
+        Apply the update, then re-target the user's UserRole rows if the
+        ``current_company`` changed.
+
+        Without re-targeting, every UserRole row keeps pointing at the
+        OLD company — the permission resolver matches at scope X by
+        looking for ``company=X``, so the user resolves to zero perms in
+        the new tenant. We update the company column on each row and
+        also clear ``brand`` / ``sales_channel`` when those records
+        don't belong to the new company (a brand-scoped Manager row
+        that referenced a brand on the old company is no longer valid).
+        """
+        new_company = validated_data.get('current_company', instance.current_company)
+        old_company_id = instance.current_company_id
+        new_company_id = getattr(new_company, 'id', None)
+        moved = old_company_id != new_company_id
+
+        # If we're moving tenants, drop ``allowed_brands`` that don't
+        # belong to the new company. The validate() step already
+        # rejected an explicit brand list that didn't fit, so this only
+        # affects the "company changed but client didn't send a new
+        # brand list" path.
+        if moved and 'allowed_brands' not in validated_data:
+            if new_company_id is not None:
+                still_valid = list(
+                    instance.allowed_brands.filter(company_id=new_company_id)
+                )
+                validated_data['allowed_brands'] = still_valid
+            else:
+                validated_data['allowed_brands'] = []
+
+        user = super().update(instance, validated_data)
+
+        if moved:
+            from apps.rbac.models import UserRole
+            from apps.brands.models import Brand
+            from apps.sales_channels.models import SalesChannel
+
+            new_brand_ids = set(
+                Brand.objects.filter(company_id=new_company_id).values_list('id', flat=True)
+            ) if new_company_id else set()
+            new_channel_ids = set(
+                SalesChannel.objects.filter(brand__company_id=new_company_id).values_list('id', flat=True)
+            ) if new_company_id else set()
+
+            for ur in UserRole.objects.filter(user=user):
+                changed = False
+                if ur.company_id != new_company_id:
+                    ur.company_id = new_company_id
+                    changed = True
+                # A brand-scoped row pointing at a brand on the old company
+                # is now meaningless — clear it (admin can re-scope later).
+                if ur.brand_id and ur.brand_id not in new_brand_ids:
+                    ur.brand_id = None
+                    changed = True
+                if ur.sales_channel_id and ur.sales_channel_id not in new_channel_ids:
+                    ur.sales_channel_id = None
+                    changed = True
+                if changed:
+                    ur.save(update_fields=['company', 'brand', 'sales_channel'])
+
+        return user
 
 
 class ChangePasswordSerializer(serializers.Serializer):
