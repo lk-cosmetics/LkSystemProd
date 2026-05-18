@@ -85,7 +85,11 @@ const navMain = [
     title: 'Manufacturing',
     url: '/dashboard/manufacturing',
     icon: IconBuildingFactory,
-    requiredRole: 'SuperAdmin',
+    // Tied to ``view_inventory`` — same RBAC bucket the page belongs to.
+    // Migrated off the hardcoded ``requiredRole: 'SuperAdmin'`` so a CEO
+    // (and any role with view_inventory) sees the entry instead of being
+    // locked out by name.
+    requiredPermissions: ['view_inventory'],
   },
   {
     title: 'Categories',

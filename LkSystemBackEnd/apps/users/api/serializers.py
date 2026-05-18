@@ -579,28 +579,38 @@ class ChangePasswordSerializer(serializers.Serializer):
         if requesting_user.id == target_user.id:
             return False
         
-        # Superadmin can change anyone's password (check is_superuser flag)
+        # Superusers always pass.
         if requesting_user.is_superuser:
             return True
-        
-        # Check RBAC roles
-        from apps.rbac.services import PermissionService
-        role_names = [r.upper() for r in PermissionService.get_user_role_names(requesting_user)]
 
-        if 'SUPER ADMIN' in role_names:
+        # Permission-based authority — no hardcoded role names. The rules:
+        #   1. ``edit_users`` at the TARGET's company scope ⇒ allowed.
+        #      A CEO has ``edit_users`` at company scope and lands here.
+        #   2. ``edit_users`` at any brand the target also belongs to ⇒
+        #      allowed. A Manager scoped to brand X may change the
+        #      password of a user in brand X.
+        # If the role names ever change (e.g. "CEO" → "Chief Executive"),
+        # nothing breaks here — the permission codename is the contract.
+        from apps.rbac.services import PermissionService
+
+        target_company = getattr(target_user, 'current_company', None)
+        if target_company and PermissionService.has_permission(
+            requesting_user, 'edit_users', company=target_company,
+        ):
             return True
 
-        if 'CEO' in role_names:
-            if (requesting_user.current_company and
-                target_user.current_company and
-                target_user.current_company.id == requesting_user.current_company.id):
-                return True
-
-        if 'MANAGER' in role_names:
-            requesting_user_brands = set(requesting_user.allowed_brands.values_list('id', flat=True))
-            target_user_brands = set(target_user.allowed_brands.values_list('id', flat=True))
-            if requesting_user_brands & target_user_brands:
-                return True
+        target_brand_ids = set(target_user.allowed_brands.values_list('id', flat=True))
+        if target_brand_ids:
+            requester_brand_ids = set(
+                requesting_user.allowed_brands.values_list('id', flat=True)
+            )
+            shared = target_brand_ids & requester_brand_ids
+            from apps.brands.models import Brand
+            for brand in Brand.objects.filter(pk__in=shared):
+                if PermissionService.has_permission(
+                    requesting_user, 'edit_users', brand=brand,
+                ):
+                    return True
 
         return False
 
@@ -839,12 +849,50 @@ class InviteEmployeeSerializer(serializers.Serializer):
         from apps.company.models import Company
         from apps.brands.models import Brand
         from apps.sales_channels.models import SalesChannel
+        from apps.rbac.services import PermissionService
 
         company = Company.objects.get(id=attrs['company_id'])
         attrs['_company'] = company
 
         role = Role.objects.get(id=attrs['role_id'])
         attrs['_role'] = role
+
+        # ── Inviter authority check ──────────────────────────────────────
+        # Without this the endpoint was a privilege-escalation footgun: any
+        # authenticated user could invite anyone to ANY role, including
+        # Super Admin. Enforce two rules:
+        #   (1) Inviter must hold ``create_users`` permission scoped to the
+        #       target company. (Super-users always pass via the resolver.)
+        #   (2) The target role's scope must not be wider than the
+        #       inviter's own — a CEO can't invite a Super Admin, a
+        #       Manager can't invite a CEO, etc.
+        request = self.context.get('request')
+        inviter = request.user if request else None
+        if not inviter or not inviter.is_authenticated:
+            raise serializers.ValidationError('Authentication required.')
+
+        if not inviter.is_superuser:
+            inviter_perms = PermissionService.get_user_permissions(
+                inviter, company=company,
+            )
+            if 'create_users' not in inviter_perms:
+                raise serializers.ValidationError(
+                    "You don't have permission to invite users to this company."
+                )
+            # Refuse to escalate beyond the inviter's reach.
+            inviter_scopes = set(
+                inviter.user_roles.values_list('role__scope_type', flat=True)
+            )
+            rank = {'platform': 4, 'company': 3, 'brand': 2, 'channel': 1}
+            inviter_rank = max((rank.get(s, 0) for s in inviter_scopes), default=0)
+            target_rank = rank.get((role.scope_type or '').lower(), 0)
+            if target_rank > inviter_rank:
+                raise serializers.ValidationError({
+                    'role_id': (
+                        f"You can't invite a {role.name} ({role.scope_type}-scoped) — "
+                        f"this role outranks your own."
+                    ),
+                })
 
         # Validate brands belong to company
         brand_ids = attrs.get('brand_ids', [])
@@ -876,6 +924,26 @@ class InviteEmployeeSerializer(serializers.Serializer):
             attrs['_sales_channel'] = sc
         else:
             attrs['_sales_channel'] = None
+
+        # ── Scope-shape validation for the target role ───────────────────
+        # The accept path needs the right ingredients to mint a UserRole
+        # whose scope columns match ``role.scope_type``. Catch missing
+        # ingredients now (clear error to the inviter) rather than later
+        # (silent zero-permission account).
+        scope = (role.scope_type or '').lower()
+        if scope == 'brand' and not attrs['_brands']:
+            raise serializers.ValidationError({
+                'brand_ids': (
+                    f"{role.name} is brand-scoped — pick at least one brand. "
+                    f"Without it the resulting user would have no effective permissions."
+                ),
+            })
+        if scope == 'channel' and not attrs['_sales_channel']:
+            raise serializers.ValidationError({
+                'sales_channel_id': (
+                    f"{role.name} is channel-scoped — pick a sales channel."
+                ),
+            })
 
         return attrs
 
@@ -1037,6 +1105,18 @@ class AcceptInvitationSerializer(serializers.Serializer):
         invitation = validated_data['_invitation']
         company = invitation.company
 
+        # Sanity guards — an invitation that lost its role or company
+        # post-creation (e.g. the role was deleted while pending) must not
+        # silently produce a zero-permission user. Fail loudly instead.
+        if invitation.role is None:
+            raise serializers.ValidationError({
+                'token': 'This invitation\'s role no longer exists. Please request a new invitation.',
+            })
+        if company is None:
+            raise serializers.ValidationError({
+                'token': 'This invitation\'s company no longer exists. Please request a new invitation.',
+            })
+
         # Generate matricule
         prefix = company.abbreviation if company else 'SYS'
         last_user = User.objects.filter(
@@ -1073,25 +1153,35 @@ class AcceptInvitationSerializer(serializers.Serializer):
         # Create profile stub
         Profile.objects.get_or_create(user=user)
 
-        # Assign the RBAC role at exactly the scope the role's
-        # ``scope_type`` requires. The naive "single brand → narrow
-        # to that brand" produces broken CEO accounts: a CEO is a
-        # company-scoped role; narrowing to ``brand=X`` makes the
-        # permission resolver miss it at company scope and the user
-        # ends up with zero perms even though the role on file has 67.
+        # Assign the RBAC role(s). For brand-scoped roles with multiple
+        # invited brands we mint one UserRole per brand — that's the only
+        # way the permission resolver matches each brand correctly. For
+        # company- or platform-scoped roles a single UserRole is correct.
         from apps.rbac.services import scope_kwargs_for_role
-        scope = scope_kwargs_for_role(
-            invitation.role,
-            company=company,
-            brands=brands,
-            sales_channel=invitation.sales_channel,
-        )
-        UserRole.objects.create(
-            user=user,
-            role=invitation.role,
-            assigned_by=invitation.invited_by,
-            **scope,
-        )
+        role_scope = (invitation.role.scope_type or '').lower()
+        if role_scope == 'brand' and len(brands) > 1:
+            for brand in brands:
+                UserRole.objects.create(
+                    user=user,
+                    role=invitation.role,
+                    company=company,
+                    brand=brand,
+                    sales_channel=None,
+                    assigned_by=invitation.invited_by,
+                )
+        else:
+            scope = scope_kwargs_for_role(
+                invitation.role,
+                company=company,
+                brands=brands,
+                sales_channel=invitation.sales_channel,
+            )
+            UserRole.objects.create(
+                user=user,
+                role=invitation.role,
+                assigned_by=invitation.invited_by,
+                **scope,
+            )
 
         invitation.mark_accepted(user)
 
