@@ -113,28 +113,36 @@ class Command(BaseCommand):
                 },
             )
 
-            # Only set permissions when the role is newly created OR the
-            # operator explicitly asked to reset. This keeps custom edits
-            # an admin made via the API safe from being wiped on every
-            # deploy.
-            should_set_perms = created or self._reset
-            if should_set_perms:
-                if cfg['permissions'] == '__all__':
-                    role.permissions.set(all_perms.values())
-                else:
-                    perm_objects = [
-                        all_perms[code]
-                        for code in cfg['permissions']
-                        if code in all_perms
-                    ]
-                    role.permissions.set(perm_objects)
+            # Seed behaviour for existing roles:
+            #   * default     → UNION new perms in (additive). Admins keep
+            #                  custom edits; newly-introduced permissions
+            #                  (like ``view_manufacturing``) auto-appear
+            #                  on the role after the next deploy.
+            #   * --reset     → exact match. Wipes any custom edits and
+            #                  forces the role back to the seeded set.
+            # New roles always get the full set on creation.
+            if cfg['permissions'] == '__all__':
+                desired = list(all_perms.values())
+            else:
+                desired = [all_perms[code] for code in cfg['permissions'] if code in all_perms]
 
-            action = 'Created' if created else (
-                'Reset' if self._reset else 'Skipped (existing — use --reset-system-roles to overwrite)'
-            )
+            if created or self._reset:
+                role.permissions.set(desired)
+                action = 'Created' if created else 'Reset'
+                added = len(desired)
+            else:
+                existing_ids = set(role.permissions.values_list('id', flat=True))
+                missing = [p for p in desired if p.id not in existing_ids]
+                if missing:
+                    role.permissions.add(*missing)
+                    action = f'Added {len(missing)} missing perm(s)'
+                else:
+                    action = 'Up to date'
+                added = role.permissions.count()
+
             self.stdout.write(
                 f'  Role "{role_name}": {action} '
-                f'({role.permissions.count()} permissions)'
+                f'(now has {role.permissions.count()} permissions)'
             )
 
     # ── Ensure superusers have RBAC role ─────────────────────────────

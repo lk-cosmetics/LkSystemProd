@@ -178,7 +178,7 @@ export function AppRouter() {
             <Route
               path="manufacturing"
               element={
-                <RoleGuard requiredRole="SuperAdmin">
+                <RoleGuard requiredPermission="view_manufacturing">
                   <ManufacturingPage />
                 </RoleGuard>
               }

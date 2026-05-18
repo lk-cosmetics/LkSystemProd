@@ -85,11 +85,11 @@ const navMain = [
     title: 'Manufacturing',
     url: '/dashboard/manufacturing',
     icon: IconBuildingFactory,
-    // Tied to ``view_inventory`` — same RBAC bucket the page belongs to.
-    // Migrated off the hardcoded ``requiredRole: 'SuperAdmin'`` so a CEO
-    // (and any role with view_inventory) sees the entry instead of being
-    // locked out by name.
-    requiredPermissions: ['view_inventory'],
+    // Tied to the dedicated ``view_manufacturing`` permission so the
+    // sidebar entry follows the same RBAC gate as the route guard.
+    // CEO / Manager / Stock Keeper get it via the seeded SYSTEM_ROLES;
+    // any custom role with view_manufacturing also sees it.
+    requiredPermissions: ['view_manufacturing'],
   },
   {
     title: 'Categories',
