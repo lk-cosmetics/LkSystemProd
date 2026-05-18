@@ -22,9 +22,39 @@ User = get_user_model()
 
 
 class Command(BaseCommand):
-    help = 'Seed RBAC permissions and system roles.'
+    """
+    Idempotent RBAC bootstrap.
+
+    The seed runs on every deploy (it's invoked from ``entrypoint.sh``), so
+    it must be **non-destructive** by default — admins who edit a system
+    role's permissions through the API should not see their work wiped on
+    the next image build.
+
+    Behaviour:
+      * Permission catalogue → upsert. New rows in ``SEED_PERMISSIONS`` get
+        created; existing rows stay as-is (the catalogue is the floor, not
+        the ceiling).
+      * System roles → ``get_or_create`` only. New roles are created with
+        their full permission set; existing roles are left alone so
+        manual edits survive.
+      * Pass ``--reset-system-roles`` to force the seeded permissions back
+        onto existing system roles (use only for "fix my staging" cases).
+    """
+
+    help = 'Seed RBAC permissions and system roles (idempotent by default).'
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--reset-system-roles',
+            action='store_true',
+            help=(
+                'Re-apply the seeded permission set to existing system roles. '
+                'Destroys any manual edits — use sparingly.'
+            ),
+        )
 
     def handle(self, *args, **options):
+        self._reset = bool(options.get('reset_system_roles'))
         self._seed_permissions()
         self._cleanup_legacy_permissions()
         self._seed_roles()
@@ -83,18 +113,25 @@ class Command(BaseCommand):
                 },
             )
 
-            # Always update permissions on existing system roles
-            if cfg['permissions'] == '__all__':
-                role.permissions.set(all_perms.values())
-            else:
-                perm_objects = [
-                    all_perms[code]
-                    for code in cfg['permissions']
-                    if code in all_perms
-                ]
-                role.permissions.set(perm_objects)
+            # Only set permissions when the role is newly created OR the
+            # operator explicitly asked to reset. This keeps custom edits
+            # an admin made via the API safe from being wiped on every
+            # deploy.
+            should_set_perms = created or self._reset
+            if should_set_perms:
+                if cfg['permissions'] == '__all__':
+                    role.permissions.set(all_perms.values())
+                else:
+                    perm_objects = [
+                        all_perms[code]
+                        for code in cfg['permissions']
+                        if code in all_perms
+                    ]
+                    role.permissions.set(perm_objects)
 
-            action = 'Created' if created else 'Updated'
+            action = 'Created' if created else (
+                'Reset' if self._reset else 'Skipped (existing — use --reset-system-roles to overwrite)'
+            )
             self.stdout.write(
                 f'  Role "{role_name}": {action} '
                 f'({role.permissions.count()} permissions)'

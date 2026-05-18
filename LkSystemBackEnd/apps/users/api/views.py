@@ -486,30 +486,34 @@ Change the password for a user with role-based permission hierarchy.
         if requesting_user.id == target_user.id:
             return True, 'self'
         
-        # Superadmin can change anyone's password (check is_superuser flag)
+        # Superusers always pass.
         if requesting_user.is_superuser:
             return True, 'superadmin'
-        
-        # Check RBAC roles
+
+        # Permission-based: ``edit_users`` at the right scope wins.
+        # Replaces the brittle hardcoded role-name ladder (SUPER ADMIN /
+        # CEO / MANAGER) that silently broke as soon as a role was
+        # renamed via the UI.
         from apps.rbac.services import PermissionService
-        role_names = [r.upper() for r in PermissionService.get_user_role_names(requesting_user)]
 
-        if 'SUPER ADMIN' in role_names:
-            return True, 'superadmin'
+        target_company = getattr(target_user, 'current_company', None)
+        if target_company and PermissionService.has_permission(
+            requesting_user, 'edit_users', company=target_company,
+        ):
+            return True, 'company_edit_users'
 
-        if 'CEO' in role_names:
-            if (requesting_user.current_company and
-                target_user.current_company and
-                requesting_user.current_company.id == target_user.current_company.id):
-                return True, 'ceo'
-            return False, 'ceo_wrong_company'
-
-        if 'MANAGER' in role_names:
-            requesting_brands = set(requesting_user.allowed_brands.values_list('id', flat=True))
-            target_brands = set(target_user.allowed_brands.values_list('id', flat=True))
-            if requesting_brands & target_brands:
-                return True, 'manager'
-            return False, 'manager_no_common_brand'
+        target_brand_ids = set(target_user.allowed_brands.values_list('id', flat=True))
+        if target_brand_ids:
+            requester_brand_ids = set(
+                requesting_user.allowed_brands.values_list('id', flat=True)
+            )
+            shared = target_brand_ids & requester_brand_ids
+            from apps.brands.models import Brand
+            for brand in Brand.objects.filter(pk__in=shared):
+                if PermissionService.has_permission(
+                    requesting_user, 'edit_users', brand=brand,
+                ):
+                    return True, 'brand_edit_users'
 
         return False, 'insufficient_permissions'
     
