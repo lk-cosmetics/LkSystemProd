@@ -75,6 +75,19 @@ jobs:
           pip install -r requirements.txt
 
       - name: Django system check
+        # ``--deploy --fail-level WARNING`` treats every deploy warning as fatal.
+        # settings.py reads these from the environment, so supply production-
+        # representative values here so the genuine deploy checks pass without
+        # weakening the app or silencing them: a strong SECRET_KEY (>=50 chars,
+        # satisfies security.W009) plus the HTTPS hardening (SSL redirect + HSTS)
+        # that the real production .env sets at runtime. This key is a throwaway
+        # used only to run static checks against the disposable CI database.
+        env:
+          SECRET_KEY: ci-deploy-check-only-not-a-real-secret-0123456789-abcdef
+          SECURE_SSL_REDIRECT: 'True'
+          SECURE_HSTS_SECONDS: '31536000'
+          SECURE_HSTS_INCLUDE_SUBDOMAINS: 'True'
+          SECURE_HSTS_PRELOAD: 'True'
         run: python manage.py check --deploy --fail-level WARNING
 
       - name: Django migrations dry-run

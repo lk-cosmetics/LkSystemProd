@@ -39,6 +39,12 @@ class NotificationViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     ordering = ['-created_at']
 
     def get_queryset(self):
+        # drf-spectacular instantiates the view with an AnonymousUser during
+        # schema generation; short-circuit so it can introspect the serializer
+        # without running the user-scoped filter (which would raise on the
+        # AnonymousUser pk and drop this endpoint from the generated schema).
+        if getattr(self, 'swagger_fake_view', False):
+            return NotificationRecipient.objects.none()
         # Per-user scope is the whole tenant-safety story for reads: a row only
         # exists for users the NotificationService fanned the event out to.
         return (

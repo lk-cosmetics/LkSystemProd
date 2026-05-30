@@ -290,6 +290,23 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = config('X_FRAME_OPTIONS', default='DENY')
 
 # =============================================================================
+# SYSTEM CHECK SILENCING
+# =============================================================================
+# ``manage.py check --deploy`` (run in CI with ``--fail-level WARNING``) also
+# evaluates drf-spectacular's schema-introspection advisories: SerializerMethod
+# getters without a return type hint (W001) and APIViews without a declared
+# ``serializer_class`` (W002). These only affect the *generated OpenAPI doc*
+# quality — never runtime or deploy safety — so they must not gate CI. They are
+# still visible when explicitly building the schema:
+#   ``manage.py spectacular --file schema.yml``
+# The genuine deploy checks (security.W004/W008/W009 etc.) are deliberately NOT
+# silenced — those are satisfied with real settings/env, not hidden.
+SILENCED_SYSTEM_CHECKS = [
+    'drf_spectacular.W001',
+    'drf_spectacular.W002',
+]
+
+# =============================================================================
 # DJANGO REST FRAMEWORK
 # =============================================================================
 
