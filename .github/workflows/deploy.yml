@@ -98,7 +98,10 @@ jobs:
             git reset --hard origin/main
 
             echo "── Building & restarting containers ──────────────────────"
-            ./deploy/deploy-production.sh
+            # Run via ``bash`` so the deploy never depends on the script's
+            # executable bit (repo is Windows-authored, core.fileMode=false).
+            # The script is also chmod +x in git as belt-and-braces.
+            bash deploy/deploy-production.sh
 
             echo "── Pruning dangling images ───────────────────────────────"
             docker image prune -f
