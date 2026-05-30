@@ -46,9 +46,22 @@ jobs:
     needs: pre-deploy-checks
     environment:
       name: production
-      url: https://${{ secrets.PRODUCTION_DOMAIN }}
+      # NOTE: ``environment.url`` has no access to the ``secrets`` context
+      # (GitHub exposes only github/needs/vars/steps/env here) — referencing
+      # ``secrets.PRODUCTION_DOMAIN`` directly is what made the file invalid.
+      # We compose the URL in the step below and read its output here instead.
+      url: ${{ steps.env_url.outputs.url }}
 
     steps:
+      - name: Resolve environment URL
+        # Builds the clickable deployment link shown on the GitHub "production"
+        # environment. PRODUCTION_DOMAIN stays a secret; only the composed URL
+        # is exposed as a step output, which ``environment.url`` *can* read.
+        id: env_url
+        run: echo "url=https://${PRODUCTION_DOMAIN}" >> "$GITHUB_OUTPUT"
+        env:
+          PRODUCTION_DOMAIN: ${{ secrets.PRODUCTION_DOMAIN }}
+
       - name: Validate required secrets
         # Fail fast with a readable message rather than letting ssh-action
         # spit out a cryptic "missing key" trace half a minute later.
