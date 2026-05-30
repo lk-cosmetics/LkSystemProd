@@ -399,8 +399,14 @@ class BillOfMaterialsItemSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
+        from apps.products.models import Product
+
         bom = self.context.get('bom') or getattr(self.instance, 'bom', None)
         component = attrs.get('component') or getattr(self.instance, 'component', None)
+        if component and component.product_type != Product.ProductType.COMPONENT:
+            raise serializers.ValidationError({
+                'component': 'Only component-type products can be used in a Bill of Materials.'
+            })
         if bom and component:
             if component.id == bom.finished_product_id:
                 raise serializers.ValidationError({
@@ -435,10 +441,16 @@ class BillOfMaterialsDetailSerializer(BillOfMaterialsListSerializer):
         fields = BillOfMaterialsListSerializer.Meta.fields + ['items']
 
     def validate(self, attrs):
+        from apps.products.models import Product
+
         finished_product = attrs.get('finished_product') or getattr(self.instance, 'finished_product', None)
         if finished_product and finished_product.is_pack:
             raise serializers.ValidationError({
                 'finished_product': 'Pack products cannot also use a manufacturing BOM.'
+            })
+        if finished_product and finished_product.product_type != Product.ProductType.RESELL_PRODUCT:
+            raise serializers.ValidationError({
+                'finished_product': 'A BOM can only produce a resell_product (the sellable finished good).'
             })
         return attrs
 

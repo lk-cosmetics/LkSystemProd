@@ -11,7 +11,7 @@ import {
   useSidebar,
 } from '@/components/ui/sidebar';
 import { useAuthStore } from '@/store/authStore';
-import { hasRole, hasAnyPermission } from '@/hooks/useAuth';
+import { hasRole, hasAnyPermission, isPosOnlyUser } from '@/hooks/useAuth';
 
 export function NavMain({
   items,
@@ -43,12 +43,7 @@ export function NavMain({
   // Filter items based on RBAC permissions or legacy role
   const visibleItems = items.filter(item => {
     if (!user) return false;
-    const cashierWorkspace =
-      hasRole(user, 'Cashier') &&
-      !hasRole(user, 'SuperAdmin') &&
-      !hasRole(user, 'Admin') &&
-      !hasRole(user, 'Manager') &&
-      !hasRole(user, 'CEO');
+    const cashierWorkspace = isPosOnlyUser(user);
     if (cashierWorkspace && !item.cashierVisible) return false;
     // RBAC permission check (preferred)
     if (item.requiredPermissions?.length) {

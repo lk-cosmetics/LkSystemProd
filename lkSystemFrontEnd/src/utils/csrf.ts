@@ -21,7 +21,6 @@ export async function fetchCsrfToken(): Promise<void> {
     if (!response.ok) {
       console.warn('⚠️ Failed to fetch CSRF token:', response.status);
     } else {
-      console.log('✅ CSRF token fetched successfully');
     }
   } catch (error) {
     console.error('❌ Error fetching CSRF token:', error);

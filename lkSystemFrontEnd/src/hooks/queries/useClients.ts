@@ -16,13 +16,21 @@ export const clientsKeys = {
 // ============================================================================
 
 /**
- * Fetch all clients with optional pagination and filtering
+ * Fetch all clients with optional pagination and filtering.
+ *
+ * Pass ``{ enabled: false }`` to hold the query (e.g. a type-ahead search that
+ * should only fire once the user has typed enough characters). Defaults to
+ * enabled so existing callers are unaffected.
  */
-export function useClients(params?: ClientListParams) {
+export function useClients(
+  params?: ClientListParams,
+  options?: { enabled?: boolean }
+) {
   return useQuery<PaginatedResponse<Client> | Client[]>({
     queryKey: clientsKeys.list(params),
     queryFn: () => clientService.getAll(params),
     staleTime: 5 * 60 * 1000, // 5 minutes
+    enabled: options?.enabled ?? true,
   });
 }
 

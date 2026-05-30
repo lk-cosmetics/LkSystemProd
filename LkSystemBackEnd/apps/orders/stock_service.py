@@ -27,7 +27,7 @@ class OrderStockAvailabilityService:
     def build(cls, order: Order) -> dict[str, Any]:
         lines = list(
             order.lines.filter(is_deleted=False)
-            .exclude(product__product_type=Product.ProductType.PACKAGING)
+            .exclude(product__product_type=Product.ProductType.PACKAGING_ITEM)
             .select_related('product')
         )
         grouped: dict[int, dict[str, Any]] = {}
@@ -126,3 +126,64 @@ class OrderStockAvailabilityService:
             'items': items,
             'unlinked_lines': unlinked,
         }
+
+    @classmethod
+    def status_snapshot(cls, order: Order) -> dict[str, Any]:
+        """Derive ``stock_status`` + ``mapping_required`` (STATUS_MAP.md 5.5).
+
+        Evaluated against the *fulfilling* channel — ``pos_sales_channel`` when the
+        order is routed to POS, otherwise ``sales_channel``. Only customer lines
+        count (packaging-type lines are excluded).
+
+          * any product with ``available_quantity <= 0`` -> ``out_of_stock``
+          * else any product with ``available < required`` -> ``partial_stock``
+          * else                                          -> ``in_stock``
+
+        ``mapping_required`` is True when any customer line is unlinked
+        (``is_linked == False`` or no ``product``); such an order cannot be
+        stock-checked and is forced to ``low`` priority by ``OrderPriorityService``.
+        """
+        SS = Order.StockStatus
+        channel_id = order.pos_sales_channel_id or order.sales_channel_id
+
+        lines = list(
+            order.lines.filter(is_deleted=False)
+            .exclude(product__product_type=Product.ProductType.PACKAGING_ITEM)
+        )
+        mapping_required = any(
+            (not line.is_linked) or (not line.product_id) for line in lines
+        )
+
+        required: dict[int, int] = {}
+        for line in lines:
+            if line.product_id:
+                required[line.product_id] = required.get(line.product_id, 0) + line.quantity
+
+        if not required:
+            return {'stock_status': SS.IN_STOCK, 'mapping_required': mapping_required}
+
+        available = {
+            inv.product_id: inv.available_quantity
+            for inv in SalesChannelInventory.objects.filter(
+                sales_channel_id=channel_id,
+                product_id__in=required.keys(),
+            )
+        }
+
+        any_zero = False
+        any_partial = False
+        for product_id, needed in required.items():
+            have = available.get(product_id, 0)
+            if have <= 0:
+                any_zero = True
+            elif have < needed:
+                any_partial = True
+
+        if any_zero:
+            stock_status = SS.OUT_OF_STOCK
+        elif any_partial:
+            stock_status = SS.PARTIAL_STOCK
+        else:
+            stock_status = SS.IN_STOCK
+
+        return {'stock_status': stock_status, 'mapping_required': mapping_required}

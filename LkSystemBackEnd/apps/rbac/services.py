@@ -89,9 +89,26 @@ def visible_brand_ids(user):
     """
     if not user or not user.is_authenticated:
         return set()
-    if user.is_superuser:
-        return None
-    if user.user_roles.filter(role__scope_type='platform').exists():
+
+    # Active-brand focus narrows EVERYONE, including platform admins. The
+    # workspace-switch endpoint validates that current_brand is reachable, so
+    # the value is trusted here. NULL means "whole company" (no narrowing).
+    if getattr(user, 'current_brand_id', None):
+        return {user.current_brand_id}
+
+    # Platform admin (superuser or platform-scoped role): scoped to the
+    # actively-selected company when one is set (workspace context), otherwise
+    # global reach (None = every company). This makes a Super Admin who picks
+    # Company A in the switcher see ONLY Company A data on company pages.
+    if user.is_superuser or user.user_roles.filter(
+        role__scope_type='platform'
+    ).exists():
+        if user.current_company_id:
+            from apps.brands.models import Brand
+            return set(
+                Brand.objects.filter(company_id=user.current_company_id)
+                .values_list('id', flat=True)
+            )
         return None
 
     ids = set(user.allowed_brands.values_list('id', flat=True))
@@ -116,9 +133,27 @@ def visible_sales_channel_ids(user):
     """
     if not user or not user.is_authenticated:
         return set()
-    if user.is_superuser:
-        return None
-    if user.user_roles.filter(role__scope_type='platform').exists():
+
+    # Active-brand focus narrows channels to that brand for everyone.
+    if getattr(user, 'current_brand_id', None):
+        from apps.sales_channels.models import SalesChannel
+        return set(
+            SalesChannel.objects.filter(brand_id=user.current_brand_id)
+            .values_list('id', flat=True)
+        )
+
+    # Platform admin: scoped to the selected company's channels when a company
+    # is active, otherwise global (None = every channel).
+    if user.is_superuser or user.user_roles.filter(
+        role__scope_type='platform'
+    ).exists():
+        if user.current_company_id:
+            from apps.sales_channels.models import SalesChannel
+            return set(
+                SalesChannel.objects.filter(
+                    brand__company_id=user.current_company_id
+                ).values_list('id', flat=True)
+            )
         return None
 
     # Channel-level RBAC assignments grant direct access to those channels.
@@ -149,6 +184,20 @@ if TYPE_CHECKING:
 
 class PermissionService:
     """Stateless helper — every method is a ``@staticmethod``."""
+
+    # ── Scope helpers ───────────────────────────────────────────────────
+
+    @staticmethod
+    def is_platform_admin(user) -> bool:
+        """
+        True when the user can act across every company: a Django superuser
+        or the holder of any platform-scoped RBAC role (e.g. Super Admin).
+        """
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+        return user.user_roles.filter(role__scope_type='platform').exists()
 
     # ── Core queries ────────────────────────────────────────────────────
 

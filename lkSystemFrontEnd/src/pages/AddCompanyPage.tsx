@@ -28,7 +28,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { useAuthStore } from '@/store/authStore';
-import { hasRole } from '@/hooks/useAuth';
+import { isPlatformAdmin } from '@/hooks/useAuth';
 import { useCreateCompany } from '@/hooks/queries';
 
 // Tunisia Governorates (Cities)
@@ -91,7 +91,7 @@ export default function AddCompanyPage() {
   const logoInputRef = useRef<HTMLInputElement>(null);
 
   // Check if user is SuperAdmin
-  const isSuperAdmin = hasRole(user, 'SuperAdmin');
+  const isSuperAdmin = isPlatformAdmin(user);
 
   const {
     register,

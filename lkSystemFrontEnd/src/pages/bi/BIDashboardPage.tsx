@@ -26,7 +26,7 @@ import {
   useTopProductsQuery,
   useTrendingProductsQuery,
 } from '@/hooks/queries/useBI';
-import { hasRole } from '@/hooks/useAuth';
+import { isPlatformAdmin as isPlatformAdminUser } from '@/hooks/useAuth';
 import { useAuthStore } from '@/store/authStore';
 import type { BIPeriod } from '@/services/bi.service';
 
@@ -48,8 +48,7 @@ const BICharts = memo(RawBICharts);
 
 export function BIDashboardPage() {
   const currentUser = useAuthStore(state => state.user);
-  const isPlatformAdmin =
-    hasRole(currentUser, 'SuperAdmin') || hasRole(currentUser, 'Admin');
+  const isPlatformAdmin = isPlatformAdminUser(currentUser);
 
   // ── Filters ──────────────────────────────────────────────────────────
   const [period, setPeriod] = useState<BIPeriod>('30d');

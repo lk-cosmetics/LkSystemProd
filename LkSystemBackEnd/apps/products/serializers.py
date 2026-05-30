@@ -3,6 +3,8 @@ LkSystem Products App - Serializers
 DRF Serializers for the simplified Product model.
 """
 
+import json
+
 from rest_framework import serializers
 from decimal import Decimal
 
@@ -25,6 +27,7 @@ class ProductSerializer(serializers.ModelSerializer):
     category_names = serializers.SerializerMethodField(read_only=True)
     stock_total = serializers.SerializerMethodField(read_only=True)
     stock_by_channel = serializers.SerializerMethodField(read_only=True)
+    image = serializers.ImageField(required=False, allow_null=True, use_url=True)
 
     class Meta:
         model = Product
@@ -33,6 +36,7 @@ class ProductSerializer(serializers.ModelSerializer):
             'wc_product_id',
             'name',
             'image_url',
+            'image',
             'product_link',
             'barcode',
             'product_type',
@@ -120,8 +124,32 @@ class ProductSerializer(serializers.ModelSerializer):
         return sum(row['quantity'] for row in self.get_stock_by_channel(obj))
 
     def validate(self, attrs):
+        # Multipart (image upload) sends pack_items as a JSON string; decode it
+        # back to a list / None so the structural checks below see real data.
+        raw_pack_items = attrs.get('pack_items')
+        if isinstance(raw_pack_items, str):
+            try:
+                attrs['pack_items'] = (
+                    json.loads(raw_pack_items) if raw_pack_items.strip() else None
+                )
+            except (ValueError, TypeError):
+                raise serializers.ValidationError(
+                    {'pack_items': 'Invalid pack_items JSON.'}
+                )
+
         is_pack = attrs.get('is_pack', getattr(self.instance, 'is_pack', False))
         pack_items = attrs.get('pack_items', getattr(self.instance, 'pack_items', None))
+        product_type = attrs.get(
+            'product_type', getattr(self.instance, 'product_type', Product.ProductType.RESELL_PRODUCT)
+        )
+
+        # Keep product_type='pack' and the is_pack flag in sync (single source of truth).
+        if product_type == Product.ProductType.PACK:
+            is_pack = True
+        if is_pack:
+            product_type = Product.ProductType.PACK
+        attrs['is_pack'] = is_pack
+        attrs['product_type'] = product_type
 
         if is_pack:
             if not pack_items or not isinstance(pack_items, list) or len(pack_items) == 0:
@@ -138,6 +166,31 @@ class ProductSerializer(serializers.ModelSerializer):
 
         return attrs
 
+    def create(self, validated_data):
+        instance = super().create(validated_data)
+        self._mirror_uploaded_image(instance, validated_data)
+        return instance
+
+    def update(self, instance, validated_data):
+        instance = super().update(instance, validated_data)
+        self._mirror_uploaded_image(instance, validated_data)
+        return instance
+
+    @staticmethod
+    def _mirror_uploaded_image(instance, validated_data):
+        """Mirror a freshly uploaded image's served URL into ``image_url``.
+
+        Keeps a single display field (``image_url``) so every existing render
+        path — POS cards, order lines, BI, pack builder — shows the uploaded
+        picture with no per-call change. Only runs when a new file was uploaded
+        in this request; pasting or clearing the URL text field is untouched.
+        """
+        if validated_data.get('image') and instance.image:
+            url = instance.image.url
+            if instance.image_url != url:
+                instance.image_url = url
+                instance.save(update_fields=['image_url'])
+
 
 class ProductListSerializer(serializers.ModelSerializer):
     """Lightweight serializer optimised for list views."""
@@ -152,6 +205,7 @@ class ProductListSerializer(serializers.ModelSerializer):
             'wc_product_id',
             'name',
             'image_url',
+            'image',
             'product_link',
             'barcode',
             'product_type',
@@ -222,9 +276,12 @@ class WooCommerceProductWebhookSerializer(serializers.Serializer):
         validated['wc_product_id'] = validated.pop('id')
         validated['barcode'] = validated.pop('sku', '')
 
-        # Map WC type → local product_type (default to resell)
-        wc_type = validated.pop('type', 'simple')
-        validated['product_type'] = 'packaging' if wc_type == 'packaging' else 'resell'
+        # Every product synced from WooCommerce is a normal sellable good, so it
+        # maps to RESELL_PRODUCT. The internal-only taxonomies (component for BOM
+        # parts, packaging_item for shipping supplies) are created locally and
+        # never arrive over a WooCommerce webhook.
+        validated.pop('type', None)  # WC "type" is informational only
+        validated['product_type'] = Product.ProductType.RESELL_PRODUCT
 
         # Product link
         validated['product_link'] = validated.pop('permalink', '')

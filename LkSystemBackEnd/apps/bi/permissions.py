@@ -54,9 +54,23 @@ def scope_request_to_user(user, requested_company_id, requested_brand_id):
     Returns (company_id, brand_id) where either may be None to mean "all".
     """
 
+    # When no brand is explicitly requested, honour the active-brand workspace
+    # focus so the dashboard narrows to the brand the user is "inside". An
+    # explicit ``requested_brand_id`` still overrides the focus.
+    if not requested_brand_id:
+        requested_brand_id = getattr(user, 'current_brand_id', None)
+
     if is_platform_admin(user):
+        # Default the company to the actively-selected one (workspace context)
+        # so a Super Admin who picked Company A sees only A's dashboard. An
+        # explicit company_id query param still overrides; no company selected
+        # and none requested = global aggregate.
+        company_id = (
+            int(requested_company_id) if requested_company_id
+            else getattr(user, 'current_company_id', None)
+        )
         return (
-            int(requested_company_id) if requested_company_id else None,
+            company_id,
             int(requested_brand_id) if requested_brand_id else None,
         )
 

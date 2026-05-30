@@ -272,7 +272,7 @@ export function LoginForm() {
     resolver: zodResolver(schema)
   });
 
-  const onSubmit = (data: FormData) => console.log(data);
+  const onSubmit = () => {};
 
   return (
     <form onSubmit={handleSubmit(onSubmit)}>
@@ -741,9 +741,8 @@ function LoginFormDemo() {
     resolver: zodResolver(loginSchema),
   });
 
-  const onSubmit = async (data: LoginFormData) => {
+  const onSubmit = async (_data: LoginFormData) => {
     await new Promise(resolve => setTimeout(resolve, 1000));
-    console.log('Login data:', data);
     alert('Login form submitted! Check console for data.');
   };
 
@@ -805,9 +804,8 @@ function RegisterFormDemo() {
     resolver: zodResolver(registerSchema),
   });
 
-  const onSubmit = async (data: RegisterFormData) => {
+  const onSubmit = async (_data: RegisterFormData) => {
     await new Promise(resolve => setTimeout(resolve, 1500));
-    console.log('Registration data:', data);
     alert('Registration form submitted! Check console for data.');
   };
 

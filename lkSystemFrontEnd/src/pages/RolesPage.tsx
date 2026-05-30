@@ -92,7 +92,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from 'sonner';
-import { useDebounce } from '@/hooks';
+import { useDebounce, useCurrentUser } from '@/hooks';
 import {
   rbacService,
   type RBACRole,
@@ -823,6 +823,35 @@ export default function RolesPage() {
     [permissionGroups],
   );
 
+  // ── Privilege ceiling (mirrors the backend) ──
+  // The Django superuser (platform owner) has no ceiling. Every other user
+  // can only grant permissions they themselves hold, so the picker never
+  // offers a permission the API would reject.
+  const currentUser = useCurrentUser();
+  const grantableCodes = useMemo<Set<string> | null>(
+    () =>
+      currentUser?.is_superuser
+        ? null
+        : new Set(currentUser?.permissions ?? []),
+    [currentUser],
+  );
+  const isPlatformAdmin = grantableCodes === null;
+
+  // Permissions shown in the picker: limited to grantable for non-root users,
+  // but always keep codes already on the edited role visible so existing
+  // grants are never silently hidden.
+  const visiblePermissionGroups = useMemo<PermissionGroup[]>(() => {
+    if (grantableCodes === null) return permissionGroups;
+    return permissionGroups
+      .map(g => ({
+        ...g,
+        permissions: g.permissions.filter(
+          p => grantableCodes.has(p.codename) || formPermissions.has(p.codename),
+        ),
+      }))
+      .filter(g => g.permissions.length > 0);
+  }, [permissionGroups, grantableCodes, formPermissions]);
+
   const stats = useMemo(
     () => ({
       total: roles.length,
@@ -852,10 +881,21 @@ export default function RolesPage() {
     });
   }, []);
 
-  const selectAllPermissions = useCallback(
-    () => setFormPermissions(new Set(allPermissionCodes)),
-    [allPermissionCodes],
-  );
+  const selectAllPermissions = useCallback(() => {
+    if (grantableCodes === null) {
+      setFormPermissions(new Set(allPermissionCodes));
+      return;
+    }
+    // Non-root: only select the permissions the actor is allowed to grant,
+    // keeping any already-selected codes intact.
+    setFormPermissions(prev => {
+      const next = new Set(prev);
+      allPermissionCodes.forEach(c => {
+        if (grantableCodes.has(c)) next.add(c);
+      });
+      return next;
+    });
+  }, [allPermissionCodes, grantableCodes]);
 
   const deselectAllPermissions = useCallback(
     () => setFormPermissions(new Set()),
@@ -1368,14 +1408,16 @@ export default function RolesPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {Object.entries(SCOPE_CONFIG).map(([key, config]) => (
-                        <SelectItem key={key} value={key}>
-                          <span className="flex items-center gap-2">
-                            <span>{config.icon}</span>
-                            {config.label}
-                          </span>
-                        </SelectItem>
-                      ))}
+                      {Object.entries(SCOPE_CONFIG)
+                        .filter(([key]) => isPlatformAdmin || key !== 'platform')
+                        .map(([key, config]) => (
+                          <SelectItem key={key} value={key}>
+                            <span className="flex items-center gap-2">
+                              <span>{config.icon}</span>
+                              {config.label}
+                            </span>
+                          </SelectItem>
+                        ))}
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground max-w-md">
@@ -1390,8 +1432,17 @@ export default function RolesPage() {
                 value="permissions"
                 className="flex-1 min-h-0 flex flex-col px-6 py-4 overflow-hidden"
               >
+                {!isPlatformAdmin && (
+                  <div className="flex items-start gap-2 mb-3 rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                    <Info className="size-3.5 mt-0.5 shrink-0" />
+                    <span>
+                      You can only grant permissions included in your own access
+                      level. Roles you create or edit apply to your company only.
+                    </span>
+                  </div>
+                )}
                 <PermissionPicker
-                  permissionGroups={permissionGroups}
+                  permissionGroups={visiblePermissionGroups}
                   selected={formPermissions}
                   onToggle={togglePermission}
                   onToggleCategory={toggleCategory}

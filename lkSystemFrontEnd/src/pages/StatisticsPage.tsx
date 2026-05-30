@@ -1,7 +1,7 @@
 import { Navigate } from 'react-router-dom';
 
 import { BIDashboardPage } from '@/pages/bi/BIDashboardPage';
-import { hasAnyRole, hasPermission } from '@/hooks/useAuth';
+import { hasPermission } from '@/hooks/useAuth';
 import { useAuthStore } from '@/store/authStore';
 
 /**
@@ -14,9 +14,8 @@ import { useAuthStore } from '@/store/authStore';
 export default function StatisticsPage() {
   const user = useAuthStore(state => state.user);
 
-  const canViewBI =
-    hasPermission(user, 'view_bi_dashboard') ||
-    hasAnyRole(user, ['CEO', 'SuperAdmin']);
+  // CEO holds view_bi_dashboard; the Super Admin bypasses via is_superuser.
+  const canViewBI = hasPermission(user, 'view_bi_dashboard');
 
   if (canViewBI) {
     return <BIDashboardPage />;

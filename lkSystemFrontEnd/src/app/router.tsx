@@ -31,22 +31,12 @@ import SettingsPage from '@/pages/SettingsPage';
 import ProtectedRoute from '@/components/ProtectedRoute';
 import RoleGuard from '@/components/RoleGuard';
 import { useAuthStore } from '@/store/authStore';
-import { hasPermission, hasRole } from '@/hooks/useAuth';
+import { isPosOnlyUser } from '@/hooks/useAuth';
 
 function DashboardIndexRedirect() {
   const user = useAuthStore(state => state.user);
-  const cashierWorkspace =
-    hasRole(user, 'Cashier') &&
-    !hasRole(user, 'SuperAdmin') &&
-    !hasRole(user, 'Admin') &&
-    !hasRole(user, 'Manager') &&
-    !hasRole(user, 'CEO');
 
-  if (cashierWorkspace && hasPermission(user, 'use_pos')) {
-    return <Navigate to="/dashboard/pos" replace />;
-  }
-
-  if (!hasPermission(user, 'view_dashboard') && hasPermission(user, 'use_pos')) {
+  if (isPosOnlyUser(user)) {
     return <Navigate to="/dashboard/pos" replace />;
   }
 

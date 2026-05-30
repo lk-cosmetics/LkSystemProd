@@ -161,6 +161,50 @@ class Order(models.Model):
         CANCELLED        = 'cancelled',        'Cancelled'
         CHANGED          = 'changed',          'Changed'
 
+    # ── NEW top-layer status enums (Phase B, additive) ───────────────────────
+    # Back the clean public status fields the UI reads. Persisted-but-derived:
+    # the lifecycle service is the only writer (see apps/orders/STATUS_MAP.md).
+    class OrderStatus(models.TextChoices):
+        NEW                   = 'new',                   'New'
+        AWAITING_CONFIRMATION = 'awaiting_confirmation', 'Awaiting Confirmation'
+        CONFIRMED             = 'confirmed',             'Confirmed'
+        DELAYED               = 'delayed',               'Delayed'
+        NOT_ANSWERED          = 'not_answered',          'Not Answered'
+        CANCELED              = 'canceled',              'Canceled'
+        PREPARING             = 'preparing',             'Preparing'
+        DONE                  = 'done',                  'Done'
+        RETURNED              = 'returned',              'Returned'
+        EXCHANGED             = 'exchanged',             'Exchanged'
+
+    class ConfirmationStatus(models.TextChoices):
+        PENDING   = 'pending',   'Pending'
+        ACCEPTED  = 'accepted',  'Accepted'
+        DELAYED   = 'delayed',   'Delayed'
+        CANCELED  = 'canceled',  'Canceled'
+        NO_ANSWER = 'no_answer', 'No Answer'
+
+    class DeliveryMethod(models.TextChoices):
+        HOME_DELIVERY = 'home_delivery', 'Home Delivery'
+        POS_PICKUP    = 'pos_pickup',    'POS Pickup'
+
+    class StockStatus(models.TextChoices):
+        IN_STOCK      = 'in_stock',      'In Stock'
+        PARTIAL_STOCK = 'partial_stock', 'Partial Stock'
+        OUT_OF_STOCK  = 'out_of_stock',  'Out of Stock'
+
+    class PriorityLevel(models.TextChoices):
+        HIGH   = 'high',   'High'
+        MEDIUM = 'medium', 'Medium'
+        LOW    = 'low',    'Low'
+
+    # Push-sync state TO WooCommerce (distinct from OrderSyncEvent per-run history).
+    class SyncStatus(models.TextChoices):
+        IMPORTED     = 'imported',     'Imported'
+        PENDING_SYNC = 'pending_sync', 'Pending Sync'
+        SYNCING      = 'syncing',      'Syncing'
+        SYNCED       = 'synced',       'Synced'
+        SYNC_FAILED  = 'sync_failed',  'Sync Failed'
+
     # ── Tenant isolation ─────────────────────────────────────────────────────
     company = models.ForeignKey(
         'company.Company',
@@ -481,6 +525,63 @@ class Order(models.Model):
         help_text='Points granted (saved so we can reverse the exact amount on return/cancel).',
     )
 
+    # ── NEW top-layer status fields (Phase B, additive) ──────────────────────
+    # Clean public status the UI/API read. Persisted-but-derived: written only
+    # by the lifecycle service (Phase C). Defaults are safe placeholders so
+    # existing saves and the test suite are unaffected. See STATUS_MAP.md.
+    order_status = models.CharField(
+        max_length=24, choices=OrderStatus.choices, default=OrderStatus.NEW,
+        help_text='Clean business-lifecycle status (the single status the UI shows).',
+    )
+    confirmation_status = models.CharField(
+        max_length=16, choices=ConfirmationStatus.choices,
+        default=ConfirmationStatus.PENDING,
+        help_text='Confirmation-team result, separate from order_status.',
+    )
+    delivery_method = models.CharField(
+        max_length=16, choices=DeliveryMethod.choices,
+        default=DeliveryMethod.HOME_DELIVERY,
+    )
+    stock_status = models.CharField(
+        max_length=16, choices=StockStatus.choices, default=StockStatus.IN_STOCK,
+        help_text='Derived per-order availability; recomputed by the service.',
+    )
+    priority_level = models.CharField(
+        max_length=8, choices=PriorityLevel.choices, default=PriorityLevel.MEDIUM,
+        help_text='Derived handling priority; recomputed by the service.',
+    )
+
+    # WooCommerce push-sync state (distinct from OrderSyncEvent per-run history).
+    sync_status = models.CharField(
+        max_length=16, choices=SyncStatus.choices, default=SyncStatus.IMPORTED,
+        help_text='State of pushing local changes TO WooCommerce.',
+    )
+    sync_error_message = models.TextField(
+        blank=True, default='',
+        help_text='Last WooCommerce push error (set when sync_status=sync_failed).',
+    )
+    last_sync_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='Last successful push TO WooCommerce (distinct from synced_at, the last pull).',
+    )
+
+    # Delay holding-state details (decision 2). Independent of legacy delay_date.
+    delay_until = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When to follow up on a delayed order.',
+    )
+    delay_note = models.TextField(blank=True, default='')
+
+    # "Confirmation activity has begun" signal for awaiting_confirmation (decision 9).
+    confirmation_started_at = models.DateTimeField(null=True, blank=True)
+    assigned_agent = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='assigned_orders',
+        help_text='Confirmation agent assigned to this order.',
+    )
+
     # ── Audit ─────────────────────────────────────────────────────────────────
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -563,6 +664,9 @@ class Order(models.Model):
             models.Index(fields=['company', 'final_outcome'], name='order_final_outcome_idx'),
             models.Index(fields=['company', 'packaging_status'], name='order_packaging_status_idx'),
             models.Index(fields=['company', 'workflow_status'], name='order_workflow_status_idx'),
+            models.Index(fields=['company', 'order_status'], name='order_order_status_idx'),
+            models.Index(fields=['company', 'sync_status'], name='order_sync_status_idx'),
+            models.Index(fields=['company', 'priority_level'], name='order_priority_idx'),
             models.Index(fields=['company', 'contact_status', 'not_answered_at'], name='order_not_answered_at_idx'),
             models.Index(fields=['company', 'in_store_pickup'], name='order_pickup_idx'),
             models.Index(fields=['company', 'pos_sales_channel'], name='order_pos_channel_idx'),
@@ -901,6 +1005,11 @@ class OrderLog(models.Model):
         POINTS_REVERSED     = 'POINTS_REVERSED',     'Loyalty Points Reversed'
         WC_PRODUCT_LINKED   = 'WC_PRODUCT_LINKED',   'WC Product Linked'
         WC_PRODUCT_UNLINKED = 'WC_PRODUCT_UNLINKED', 'WC Product Unlinked'
+        # Phase B: clean order_status lifecycle, manual override, WC push-sync
+        ORDER_STATUS_CHANGED   = 'ORDER_STATUS_CHANGED',   'Order Status Changed'
+        MANUAL_STATUS_OVERRIDE = 'MANUAL_STATUS_OVERRIDE', 'Manual Status Override'
+        WC_CANCEL_SYNCED       = 'WC_CANCEL_SYNCED',       'WooCommerce Cancel Synced'
+        WC_SYNC_RETRIED        = 'WC_SYNC_RETRIED',        'WooCommerce Sync Retried'
 
     order   = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='logs')
     action  = models.CharField(max_length=30, choices=Action.choices)
@@ -1045,3 +1154,86 @@ class OrderSyncEvent(models.Model):
             'status', 'created_count', 'updated_count',
             'error_count', 'error_detail', 'finished_at',
         ])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SYSTEM SETTING  (per-company order-management configuration)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def default_wc_status_map() -> dict:
+    """Default local ``order_status`` → WooCommerce status map (decision 13)."""
+    return {
+        'awaiting_confirmation': 'on-hold',
+        'confirmed': 'processing',
+        'preparing': 'processing',
+        'done': 'completed',
+        'canceled': 'cancelled',
+        'returned': 'refunded',
+        'exchanged': 'processing',
+    }
+
+
+class SystemSetting(models.Model):
+    """
+    Per-company tunables for order management (STATUS_MAP.md decisions 4, 5, 13).
+
+    One row per company, created lazily with defaults via ``get_for_company``.
+    Phase B only defines the model; the priority / fee / sync services read it
+    in Phase C. Nothing here changes behaviour yet.
+    """
+
+    company = models.OneToOneField(
+        'company.Company',
+        on_delete=models.CASCADE,
+        related_name='system_setting',
+    )
+
+    # Priority thresholds (decision 4), amounts in order currency.
+    priority_high_min_amount = models.DecimalField(
+        max_digits=14, decimal_places=2, default=Decimal('299.00'),
+        help_text='total >= this AND in_stock => HIGH priority.',
+    )
+    priority_medium_min_amount = models.DecimalField(
+        max_digits=14, decimal_places=2, default=Decimal('100.00'),
+        help_text='total >= this (and below high) => at least MEDIUM priority.',
+    )
+
+    # No-answer policy (decisions 2, 9).
+    no_answer_max_attempts = models.PositiveSmallIntegerField(
+        default=3,
+        help_text='Unanswered attempts before order_status becomes not_answered.',
+    )
+
+    # POS-pickup delivery fee (decision 5).
+    pos_pickup_delivery_fee = models.DecimalField(
+        max_digits=8, decimal_places=3, default=Decimal('7.000'),
+        help_text='Fee kept on POS-pickup orders at/above the waive threshold.',
+    )
+    pos_pickup_fee_waive_below = models.DecimalField(
+        max_digits=14, decimal_places=2, default=Decimal('299.00'),
+        help_text='POS-pickup orders below this have the delivery fee removed.',
+    )
+
+    # local order_status -> WooCommerce status map (decision 13).
+    wc_status_map = models.JSONField(
+        default=default_wc_status_map, blank=True,
+        help_text='Maps local order_status values to WooCommerce status strings.',
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'orders'
+        db_table = 'order_system_setting'
+        verbose_name = 'System Setting'
+        verbose_name_plural = 'System Settings'
+
+    def __str__(self):
+        return f"SystemSetting<company={self.company_id}>"
+
+    @classmethod
+    def get_for_company(cls, company):
+        """Return the company's settings row, creating defaults if absent."""
+        obj, _ = cls.objects.get_or_create(company=company)
+        return obj

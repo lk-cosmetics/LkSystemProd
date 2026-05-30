@@ -95,7 +95,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useAuthStore } from '@/store/authStore';
-import { hasRole } from '@/hooks/useAuth';
+import { hasPermission } from '@/hooks/useAuth';
 import {
   useCompanies,
   useCompany,
@@ -107,15 +107,15 @@ import { getMediaUrl } from '@/utils/helpers';
 
 export default function CompaniesPage() {
   const { user } = useAuthStore();
-  // Platform-wide actor: can create new tenants and act across companies.
-  const isSuperAdmin = hasRole(user, 'SuperAdmin');
-  // CEO is company-scoped: backend already filters the queryset to their own
-  // tenant, so we just let them in and hide the platform-only buttons.
-  const isCEO = hasRole(user, 'CEO');
-  const canViewCompanies = isSuperAdmin || isCEO;
+  // Page visibility is permission-driven (dynamic): anyone whose role grants
+  // view_company (Super Admin, CEO, ...) can open the Companies page. The
+  // backend already scopes the rows to the active company.
+  const canViewCompanies = hasPermission(user, 'view_company');
   // Only platform admins may create or hard-delete tenants — even a CEO
-  // shouldn't be able to spin up or wipe another company.
-  const canManageTenants = isSuperAdmin;
+  // shouldn't be able to spin up or wipe another company. Driven by the
+  // dynamic permission, not a hardcoded role name: a CEO no longer holds
+  // delete_company, so the Delete action is hidden for them.
+  const canManageTenants = hasPermission(user, 'delete_company');
 
   // React Query - Fetch data with caching
   const { data: companies = [], isLoading, error: fetchError, refetch } = useCompanies();
@@ -439,12 +439,16 @@ export default function CompaniesPage() {
               Manage companies and their information
             </p>
           </div>
-          <Button asChild className="gap-2 w-full sm:w-auto">
-            <Link to="/dashboard/add-company">
-              <Building2 className="size-4" />
-              Add New Company
-            </Link>
-          </Button>
+          {/* Creating a company is a platform-only action. Only users with
+              the create_company permission (Super Admin) see this. */}
+          {hasPermission(user, 'create_company') && (
+            <Button asChild className="gap-2 w-full sm:w-auto">
+              <Link to="/dashboard/add-company">
+                <Building2 className="size-4" />
+                Add New Company
+              </Link>
+            </Button>
+          )}
         </div>
 
         {/* Filters */}

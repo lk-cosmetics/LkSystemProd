@@ -36,7 +36,7 @@ class DeliverySubmissionServiceTests(TestCase):
             name='Crème Coiffante - 150ML',
             wc_product_id=101,
             barcode='CREME-150',
-            product_type=Product.ProductType.FINISHED,
+            product_type=Product.ProductType.RESELL_PRODUCT,
             sales_price='100.00',
         )
         self.actor = get_user_model().objects.create_user(

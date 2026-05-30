@@ -1,11 +1,17 @@
+import { useState } from 'react';
 import {
   IconCreditCard,
   IconDotsVertical,
   IconLogout,
   IconNotification,
   IconUserCircle,
+  IconBuildingStore,
+  IconCheck,
+  IconSwitchHorizontal,
 } from '@tabler/icons-react';
 import { useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
 
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import {
@@ -15,6 +21,9 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
@@ -25,6 +34,10 @@ import {
 } from '@/components/ui/sidebar';
 import { getMediaUrl } from '@/utils/helpers';
 import { useAuthStore } from '@/store/authStore';
+import {
+  workspaceService,
+  type Workspace,
+} from '@/services/workspace.service';
 
 export function NavUser({
   user,
@@ -37,31 +50,72 @@ export function NavUser({
 }) {
   const { isMobile } = useSidebar();
   const navigate = useNavigate();
-  const { logout, user: authUser } = useAuthStore();
+  const queryClient = useQueryClient();
+  const { logout, user: authUser, switchWorkspace } = useAuthStore();
 
-  // Pick the most descriptive role the user holds. SuperAdmin / CEO are the
-  // ones we want to call out explicitly; for everyone else we just take the
-  // first role in their list (or fall back to ``user.role``).
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [loadingWs, setLoadingWs] = useState(false);
+  const [switching, setSwitching] = useState(false);
+
+  const activeCompanyId = authUser?.company_id ?? null;
+  const activeBrandId = authUser?.current_brand_id ?? null;
+  const activeCompanyName = authUser?.company_name ?? null;
+
+  // Pick the most descriptive role to show under the name.
   const roleLabel: string | null = (() => {
     const roles = authUser?.roles ?? [];
     if (roles.length === 0) return authUser?.role || null;
-    const ranked = ['Super Admin', 'SuperAdmin', 'CEO', 'Admin'];
-    for (const r of ranked) {
-      const match = roles.find(x => x?.replace(/[\s_]/g, '').toLowerCase() === r.replace(/\s/g, '').toLowerCase());
-      if (match) return match;
-    }
     return roles[0] ?? null;
   })();
 
+  const loadWorkspaces = async () => {
+    setLoadingWs(true);
+    try {
+      const data = await workspaceService.getWorkspaces();
+      setWorkspaces(data.workspaces);
+    } catch {
+      // Silent: the switcher simply stays empty if it cannot load.
+    } finally {
+      setLoadingWs(false);
+    }
+  };
+
+  const handleSwitch = async (
+    companyId: number,
+    brandId: number | null,
+  ) => {
+    // No-op if the user picked the workspace they are already in.
+    if (companyId === activeCompanyId && (brandId ?? null) === activeBrandId) {
+      return;
+    }
+    setSwitching(true);
+    try {
+      await switchWorkspace(companyId, brandId);
+      // Purge every cached query so no previous-workspace data lingers.
+      await queryClient.cancelQueries();
+      queryClient.clear();
+      toast.success('Workspace switched');
+      // Land on the dashboard of the new workspace.
+      navigate('/dashboard');
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to switch workspace',
+      );
+    } finally {
+      setSwitching(false);
+    }
+  };
+
   const handleLogout = () => {
     logout();
+    queryClient.clear();
     navigate('/login');
   };
 
   return (
     <SidebarMenu>
       <SidebarMenuItem>
-        <DropdownMenu>
+        <DropdownMenu onOpenChange={open => open && loadWorkspaces()}>
           <DropdownMenuTrigger asChild>
             <SidebarMenuButton
               size="lg"
@@ -73,22 +127,21 @@ export function NavUser({
               </Avatar>
               <div className="grid flex-1 text-left text-sm leading-tight">
                 <span className="truncate font-medium">{user.name}</span>
-                <span className="text-muted-foreground truncate text-xs">
-                  {roleLabel ? (
-                    <>
-                      <span className="font-medium text-foreground/80">{roleLabel}</span>
-                      <span className="opacity-60"> · {user.email}</span>
-                    </>
-                  ) : (
-                    user.email
-                  )}
-                </span>
+                {activeCompanyName ? (
+                  <span className="text-primary truncate text-xs font-medium">
+                    {activeCompanyName}
+                  </span>
+                ) : (
+                  <span className="text-muted-foreground truncate text-xs">
+                    {roleLabel ?? user.email}
+                  </span>
+                )}
               </div>
               <IconDotsVertical className="ml-auto size-4" />
             </SidebarMenuButton>
           </DropdownMenuTrigger>
           <DropdownMenuContent
-            className="w-(--radix-dropdown-menu-trigger-width) min-w-56 rounded-lg"
+            className="w-(--radix-dropdown-menu-trigger-width) min-w-60 rounded-lg"
             side={isMobile ? 'bottom' : 'right'}
             align="end"
             sideOffset={4}
@@ -112,7 +165,67 @@ export function NavUser({
                 </div>
               </div>
             </DropdownMenuLabel>
+
             <DropdownMenuSeparator />
+
+            {/* ── Instagram-style workspace switcher ── */}
+            <DropdownMenuGroup>
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger disabled={switching}>
+                  <IconSwitchHorizontal className="mr-2 size-4" />
+                  Switch workspace
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="min-w-64 max-h-96 overflow-y-auto">
+                  {loadingWs && (
+                    <DropdownMenuItem disabled>Loading…</DropdownMenuItem>
+                  )}
+                  {!loadingWs && workspaces.length === 0 && (
+                    <DropdownMenuItem disabled>
+                      No other workspace
+                    </DropdownMenuItem>
+                  )}
+                  {!loadingWs &&
+                    workspaces.map(ws => {
+                      const companyActive =
+                        ws.id === activeCompanyId && activeBrandId === null;
+                      return (
+                        <div key={ws.id}>
+                          {/* Whole-company workspace */}
+                          <DropdownMenuItem
+                            disabled={switching}
+                            onClick={() => handleSwitch(ws.id, null)}
+                            className="font-medium"
+                          >
+                            <IconBuildingStore className="mr-2 size-4" />
+                            <span className="flex-1 truncate">{ws.name}</span>
+                            {companyActive && <IconCheck className="size-4" />}
+                          </DropdownMenuItem>
+                          {/* Brand sub-workspaces */}
+                          {ws.brands.map(b => {
+                            const brandActive =
+                              ws.id === activeCompanyId &&
+                              b.id === activeBrandId;
+                            return (
+                              <DropdownMenuItem
+                                key={b.id}
+                                disabled={switching}
+                                onClick={() => handleSwitch(ws.id, b.id)}
+                                className="pl-8 text-sm"
+                              >
+                                <span className="flex-1 truncate">{b.name}</span>
+                                {brandActive && <IconCheck className="size-4" />}
+                              </DropdownMenuItem>
+                            );
+                          })}
+                        </div>
+                      );
+                    })}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            </DropdownMenuGroup>
+
+            <DropdownMenuSeparator />
+
             <DropdownMenuGroup>
               <DropdownMenuItem onClick={() => navigate('/dashboard/settings')}>
                 <IconUserCircle />

@@ -160,18 +160,53 @@ export default function AddUserPage() {
   });
 
   const selectedCompany = watch('current_company');
+  const selectedRoleId = watch('role');
+
+  // Roles are company-scoped: only show the roles that belong to the company
+  // chosen above. Force the company to be picked first.
+  const rolesForCompany = selectedCompany
+    ? roles.filter(r => r.company === selectedCompany)
+    : [];
+  const selectedRole = roles.find(r => r.id === selectedRoleId) ?? null;
+  // CEO / Company Manager are company-scoped → full company access, so NO
+  // brand picker. Brand Manager / Employee / Cashier are brand- or
+  // channel-scoped → the brand picker is shown so access can be narrowed.
+  const roleNeedsBrand =
+    selectedRole?.scope_type === 'brand' ||
+    selectedRole?.scope_type === 'channel';
+
+  // Clear any selected brands as soon as the role no longer needs them.
+  useEffect(() => {
+    if (!roleNeedsBrand) {
+      setSelectedBrands([]);
+    }
+  }, [roleNeedsBrand]);
+
+  // Load the roles that belong to the selected company. Refetched whenever the
+  // company changes so the picker always shows that company's roles, even for
+  // a Super Admin who is focused on a different workspace.
+  useEffect(() => {
+    if (!selectedCompany) {
+      setRoles([]);
+      return;
+    }
+    rbacService
+      .getRoles({ company: selectedCompany })
+      .then(setRoles)
+      .catch(() => setRoles([]));
+  }, [selectedCompany]);
 
   // Fetch roles, companies, and brands
   useEffect(() => {
     const fetchData = async () => {
       setIsLoadingData(true);
       try {
-        const [rolesData, companiesData, brandsData] = await Promise.all([
-          rbacService.getRoles(),
+        // Roles are fetched per selected company (see the effect below), so
+        // we only load companies + brands here.
+        const [companiesData, brandsData] = await Promise.all([
           companyService.getAllCompanies(),
           brandService.getAllBrands(),
         ]);
-        setRoles(rolesData);
         setCompanies(companiesData);
         setBrands(brandsData);
         setFilteredBrands(brandsData);
@@ -664,47 +699,22 @@ export default function AddUserPage() {
 
               <Separator />
 
-              {/* Role & Company */}
+              {/* Company first → drives the role list and brand access */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="role">Role</Label>
-                  <div className="relative">
-                    <Shield className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-l-text-3 dark:text-d-text-3 z-10" />
-                    <Select
-                      onValueChange={value =>
-                        setValue('role', value ? parseInt(value) : null)
-                      }
-                    >
-                      <SelectTrigger className="pl-10">
-                        <SelectValue placeholder="Select a role (optional)" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {roles.map(role => (
-                          <SelectItem key={role.id} value={role.id.toString()}>
-                            {role.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  {errors.role && (
-                    <p className="text-sm text-red-500">
-                      {errors.role.message}
-                    </p>
-                  )}
-                </div>
-
                 <div className="space-y-2">
                   <Label htmlFor="company">Company</Label>
                   <div className="relative">
                     <Building2 className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-l-text-3 dark:text-d-text-3 z-10" />
                     <Select
-                      onValueChange={value =>
-                        setValue(
-                          'current_company',
-                          value === 'none' ? null : parseInt(value)
-                        )
-                      }
+                      onValueChange={value => {
+                        const companyId =
+                          value === 'none' ? null : parseInt(value);
+                        setValue('current_company', companyId);
+                        // The role list and brand access depend on the
+                        // company, so reset them whenever it changes.
+                        setValue('role', null);
+                        setSelectedBrands([]);
+                      }}
                     >
                       <SelectTrigger className="pl-10">
                         <SelectValue placeholder="Select a company" />
@@ -723,15 +733,57 @@ export default function AddUserPage() {
                     </Select>
                   </div>
                 </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="role">Role</Label>
+                  <div className="relative">
+                    <Shield className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-l-text-3 dark:text-d-text-3 z-10" />
+                    <Select
+                      key={selectedCompany ?? 'no-company'}
+                      disabled={!selectedCompany}
+                      onValueChange={value =>
+                        setValue('role', value ? parseInt(value) : null)
+                      }
+                    >
+                      <SelectTrigger className="pl-10">
+                        <SelectValue
+                          placeholder={
+                            selectedCompany
+                              ? 'Select a role'
+                              : 'Select a company first'
+                          }
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {rolesForCompany.length === 0 && (
+                          <div className="px-2 py-1.5 text-sm text-muted-foreground">
+                            No roles for this company
+                          </div>
+                        )}
+                        {rolesForCompany.map(role => (
+                          <SelectItem key={role.id} value={role.id.toString()}>
+                            {role.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {errors.role && (
+                    <p className="text-sm text-red-500">
+                      {errors.role.message}
+                    </p>
+                  )}
+                </div>
               </div>
 
-              {/* Brand Access */}
-              {filteredBrands.length > 0 && (
+              {/* Brand Access — only for brand/channel-scoped roles.
+                  CEO / Company Manager have full company access. */}
+              {roleNeedsBrand && filteredBrands.length > 0 && (
                 <div className="space-y-3">
                   <Label>Brand Access</Label>
                   <p className="text-sm text-muted-foreground">
-                    Select which brands this user can access
-                    {selectedCompany && ' (filtered by selected company)'}
+                    This role is scoped to specific brands. Select which brands
+                    this user can access.
                   </p>
                   <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                     {filteredBrands.map(brand => (

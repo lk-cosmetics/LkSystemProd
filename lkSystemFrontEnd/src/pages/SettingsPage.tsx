@@ -262,10 +262,8 @@ export default function SettingsPage() {
         },
       };
 
-      console.log('📤 Updating profile via /me/ endpoint:', updateData);
       // Use updateCurrentUser instead of updateUser(id) to avoid permission issues
       const updatedUser = await userService.updateCurrentUser(updateData);
-      console.log('📥 Updated user response:', updatedUser);
 
       // If we have files or additional profile fields, update via profile service
       const hasFiles = avatarFile || cinFrontFile || cinBackFile || diplomaFile;
@@ -297,10 +295,6 @@ export default function SettingsPage() {
           diploma_file: diplomaFile || undefined,
         };
 
-        console.log('📤 Updating profile with files:', {
-          profileData,
-          hasFiles,
-        });
         await profileService.updateProfileWithFiles(
           user.profile.id,
           profileData,

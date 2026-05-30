@@ -16,6 +16,9 @@ class OrderFilterSet(django_filters.FilterSet):
     flow = django_filters.CharFilter(method='filter_flow')
     # Phase 2 — filter by the 10-state main workflow status.
     workflow_status = django_filters.CharFilter(field_name='workflow_status')
+    # Phase D — filter by the clean derived ``order_status`` (the single
+    # canonical lifecycle status the list surface speaks).
+    order_status = django_filters.CharFilter(method='filter_order_status')
     pos_sales_channel = django_filters.NumberFilter(field_name='pos_sales_channel')
     created_from = django_filters.DateFilter(field_name='created_at', lookup_expr='date__gte')
     created_to = django_filters.DateFilter(field_name='created_at', lookup_expr='date__lte')
@@ -31,6 +34,21 @@ class OrderFilterSet(django_filters.FilterSet):
         'retour':           Order.WorkflowStatus.RETOUR,
         'changed':          Order.WorkflowStatus.CHANGED,
     }
+
+    @staticmethod
+    def filter_order_status(queryset, _name, value):
+        """Filter by the clean derived ``order_status`` (Phase D).
+
+        Accepts a single value (``?order_status=delayed``) or a comma-separated
+        group (``?order_status=new,awaiting_confirmation``) so the UI's grouped
+        tabs map to a single query param. Tabs, the per-status counts
+        (``order_status_kpis.by_status``) and the row badge all read this same
+        field, so the list surface stays internally consistent.
+        """
+        values = [v.strip() for v in (value or '').split(',') if v.strip()]
+        if not values:
+            return queryset
+        return queryset.filter(order_status__in=values)
 
     @classmethod
     def filter_flow(cls, queryset, _name, value):

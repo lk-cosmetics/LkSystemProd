@@ -131,7 +131,6 @@ function AdminResetForm({
     setFieldErrors({});
     
     try {
-      console.log('Admin Reset Password Request:', { userId, data });
       await userService.adminResetPassword(userId, {
         new_password: data.new_password,
         new_password_confirm: data.new_password_confirm,

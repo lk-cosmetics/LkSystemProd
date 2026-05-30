@@ -62,7 +62,6 @@ export const apiClient: AxiosInstance = axios.create({
   xsrfHeaderName: 'X-CSRFToken', // Django's expected CSRF header name
 });
 
-console.log('🌐 API Client configured with base URL:', API_CONFIG.BASE_URL);
 
 // Helper function to get CSRF token from cookie
 function getCsrfToken(): string | null {
@@ -88,7 +87,6 @@ apiClient.interceptors.request.use(
     if (accessToken && config.headers) {
       config.headers[AUTH_CONFIG.TOKEN_HEADER] =
         `${AUTH_CONFIG.TOKEN_PREFIX} ${accessToken}`;
-      console.log('🔑 Authorization header attached for:', config.url);
     } else if (!accessToken && config.url && !config.url.includes('/auth/')) {
       console.warn('⚠️ No access token available for:', config.url);
     }

@@ -926,7 +926,7 @@ class OrderIngestionService:
         for line in lines:
             if not line.product_id:
                 continue
-            if line.product and line.product.product_type == Product.ProductType.PACKAGING:
+            if line.product and line.product.product_type == Product.ProductType.PACKAGING_ITEM:
                 # Packaging/store products are handled by OrderLifecycleService.package_order().
                 # They must never be treated as customer sale lines during normal order stock sync.
                 continue
@@ -1064,7 +1064,7 @@ class OrderIngestionService:
                 status=InventoryMovement.MovementStatus.COMPLETED,
             )
             .exclude(
-                product__product_type=Product.ProductType.PACKAGING,
+                product__product_type=Product.ProductType.PACKAGING_ITEM,
             )
             .filter(
                 movement_type__in=[

@@ -59,6 +59,34 @@ interface WooCommercePreviewResponse {
 
 const PRODUCT_ENDPOINT = '/api/v1/products/';
 
+/**
+ * Build a multipart payload for create/update when an image File is attached.
+ * Scalars are stringified; ``pack_items`` is JSON-encoded (so the backend can
+ * clear or replace it — ``null`` → the string "null"); typed nulls such as
+ * ``brand: null`` are omitted because multipart can't carry a typed null and an
+ * empty string would break PK/number fields. Clear those via a normal JSON save.
+ */
+function buildProductFormData(
+  data: CreateProductRequest | UpdateProductRequest,
+  imageFile: File,
+): FormData {
+  const form = new FormData();
+  Object.entries(data).forEach(([key, value]) => {
+    if (value === undefined) return;
+    if (key === 'pack_items') {
+      form.append('pack_items', JSON.stringify(value ?? null));
+    } else if (value === null) {
+      return;
+    } else if (typeof value === 'boolean') {
+      form.append(key, value ? 'true' : 'false');
+    } else {
+      form.append(key, String(value));
+    }
+  });
+  form.append('image', imageFile);
+  return form;
+}
+
 const normalizeProductQueryParams = (params?: ProductQueryParams): ProductQueryParams | undefined => {
   if (!params) return undefined;
 
@@ -161,17 +189,45 @@ class ProductService {
     return response.data;
   }
 
-  async createProduct(data: CreateProductRequest): Promise<Product> {
+  async createProduct(data: CreateProductRequest, imageFile?: File | null): Promise<Product> {
+    if (imageFile) {
+      const response = await apiClient.post<Product>(
+        PRODUCT_ENDPOINT,
+        buildProductFormData(data, imageFile),
+        { headers: { 'Content-Type': 'multipart/form-data' } },
+      );
+      return response.data;
+    }
     const response = await apiClient.post<Product>(PRODUCT_ENDPOINT, data);
     return response.data;
   }
 
-  async updateProduct(id: number, data: UpdateProductRequest): Promise<Product> {
+  async updateProduct(id: number, data: UpdateProductRequest, imageFile?: File | null): Promise<Product> {
+    if (imageFile) {
+      const response = await apiClient.put<Product>(
+        `${PRODUCT_ENDPOINT}${id}/`,
+        buildProductFormData(data, imageFile),
+        { headers: { 'Content-Type': 'multipart/form-data' } },
+      );
+      return response.data;
+    }
     const response = await apiClient.put<Product>(`${PRODUCT_ENDPOINT}${id}/`, data);
     return response.data;
   }
 
-  async partialUpdateProduct(id: number, data: Partial<UpdateProductRequest>): Promise<Product> {
+  async partialUpdateProduct(
+    id: number,
+    data: Partial<UpdateProductRequest>,
+    imageFile?: File | null,
+  ): Promise<Product> {
+    if (imageFile) {
+      const response = await apiClient.patch<Product>(
+        `${PRODUCT_ENDPOINT}${id}/`,
+        buildProductFormData(data, imageFile),
+        { headers: { 'Content-Type': 'multipart/form-data' } },
+      );
+      return response.data;
+    }
     const response = await apiClient.patch<Product>(`${PRODUCT_ENDPOINT}${id}/`, data);
     return response.data;
   }
@@ -302,8 +358,8 @@ class ProductService {
     const response = await apiClient.post<SyncResponse>(
       `${PRODUCT_ENDPOINT}sync/`,
       salesChannelId
-        ? { sales_channel: salesChannelId, default_product_type: 'resell' }
-        : { default_product_type: 'resell' },
+        ? { sales_channel: salesChannelId, default_product_type: 'resell_product' }
+        : { default_product_type: 'resell_product' },
     );
     return response.data;
   }
@@ -322,7 +378,7 @@ class ProductService {
       {
         sales_channel: salesChannelId,
         wc_product_ids: wcProductIds,
-        default_product_type: 'resell',
+        default_product_type: 'resell_product',
       },
     );
     return response.data;

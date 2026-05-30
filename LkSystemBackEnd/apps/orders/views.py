@@ -35,11 +35,13 @@ from requests import exceptions as requests_exceptions
 from apps.rbac.services import PermissionService
 from apps.rbac.models import UserRole
 from apps.sales_channels.models import SalesChannel
+from apps.clients.models import Client
 from .models import Order, OrderLog, OrderSyncEvent
 from .serializers import (
     OrderListSerializer,
     OrderDetailSerializer,
     POSOrderCreateSerializer,
+    ManualOrderCreateSerializer,
     OrderStatusUpdateSerializer,
     OrderEditLockSerializer,
     OrderEditSerializer,
@@ -47,6 +49,7 @@ from .serializers import (
     OrderConfirmSerializer,
     OrderDelaySerializer,
     OrderCancelOutcomeSerializer,
+    ManualTransitionSerializer,
     DeliveryStatusUpdateSerializer,
     OrderPackagingSerializer,
     OrderPickupSerializer,
@@ -60,6 +63,8 @@ from .filters import OrderFilterSet
 from .order_management_service import OrderManagementService
 from .service import OrderIngestionService, OrderIngestionError
 from .lifecycle_service import OrderLifecycleService, LifecycleError
+from .woocommerce_sync_service import WooCommerceSyncService
+from .kpi_service import OrderKPIService
 from .delivery_service import DeliveryError
 from .logging_service import OrderLoggingService
 
@@ -267,6 +272,8 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         'contact_status', 'return_exchange_status',
         'outcome', 'lifecycle_priority', 'client__points',
         'client__first_name', 'client__last_name', 'sales_channel__name',
+        # Phase D — the clean derived lifecycle fields are real columns now.
+        'order_status', 'sync_status', 'priority_level',
     ]
     ordering            = ['lifecycle_priority', '-client__points', '-created_at']
 
@@ -324,7 +331,21 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
     @classmethod
     def _scope_queryset(cls, qs, user, codename: str):
+        # Active-brand workspace focus narrows orders for EVERYONE (including
+        # superusers). An order belongs to a brand directly or through its
+        # sales channel. NULL current_brand = whole-company (no narrowing).
+        brand_id = getattr(user, 'current_brand_id', None)
+        if brand_id:
+            qs = qs.filter(
+                Q(brand_id=brand_id) | Q(sales_channel__brand_id=brand_id)
+            )
+
         if user.is_superuser:
+            # Super Admin scoped to the selected company (workspace context);
+            # with no company selected they see every order (global mode).
+            company_id = getattr(user, 'current_company_id', None)
+            if company_id and not brand_id:
+                qs = qs.filter(company_id=company_id)
             return qs
         scope_q = cls._permission_scope_q(user, codename)
         if scope_q is None:
@@ -355,6 +376,28 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             if order.outcome == Order.Outcome.CONFIRMED
             else 'update_unconfirmed_orders'
         )
+
+    def _transition_response(self, order: Order, request) -> Response:
+        """Serialize a mutated order and schedule any pending WooCommerce push.
+
+        The lifecycle service flips ``sync_status`` to ``pending_sync`` (DB-only)
+        whenever a WooCommerce order's clean ``order_status`` changes. We honour
+        that flag and push AFTER the surrounding DB transaction commits, so a
+        WooCommerce/network failure can never roll back the local change — local
+        is always the source of truth. ``update_order_status`` itself is gated by
+        ``WC_ORDER_PUSH_ENABLED`` and never raises, so this is safe everywhere.
+        """
+        if (
+            order.source == Order.Source.WOOCOMMERCE
+            and order.external_order_id
+            and order.sync_status == Order.SyncStatus.PENDING_SYNC
+        ):
+            actor = getattr(request, 'user', None)
+            transaction.on_commit(
+                lambda: WooCommerceSyncService.update_order_status(order, actor=actor)
+            )
+        payload = OrderDetailSerializer(order).data
+        return Response(payload)
 
     # ── POS / Manual order creation ──────────────────────────────────────
 
@@ -436,6 +479,102 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response(OrderDetailSerializer(order).data, status=status.HTTP_201_CREATED)
 
+    @staticmethod
+    def _billing_from_client(client: Client, base_billing: dict) -> dict:
+        """Build a WooCommerce-shaped billing block from a stored ``Client``.
+
+        ``OrderIngestionService`` resolves/links the client by company+email
+        then company+phone, so we surface the client's email/phone here and the
+        pipeline reconnects the order to the very same client record. Any
+        non-empty field the caller supplied (e.g. a one-off shipping address)
+        takes precedence over the client's stored values.
+        """
+        derived = {
+            'first_name': client.first_name or '',
+            'last_name':  client.last_name or '',
+            'email':      client.email or '',
+            'phone':      client.phone or '',
+            'address_1':  client.address or '',
+            'city':       client.city or '',
+            'state':      client.state or '',
+            'postcode':   client.postcode or '',
+            'country':    client.country or 'TN',
+        }
+        for key, value in (base_billing or {}).items():
+            if value:
+                derived[key] = value
+        return derived
+
+    @action(detail=False, methods=['post'], url_path='manual')
+    def create_manual_order(self, request):
+        """Back-office (Order Manager) manual order creation — ``source=MANUAL``.
+
+        A normal order-creation flow (not a till sale): the admin picks a sales
+        channel, adds line items, optionally applies a fixed/percentage
+        discount, and either links an existing client or sends a free-text
+        billing block. Unlike the POS endpoint it does NOT force
+        ``outcome=CONFIRMED`` / ``payment_status=PAID`` / POS validation — it
+        defaults to the ``processing`` workflow status so the order enters the
+        normal fulfilment lifecycle. The POS checkout path is left untouched.
+        """
+        serializer = ManualOrderCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        sales_channel = data.pop('sales_channel')
+        # Channel-scoped gate: the user must be allowed to create orders on THIS
+        # channel's company/brand — prevents creating orders against a tenant the
+        # caller cannot access by passing an arbitrary sales_channel PK.
+        self._require_permission_for_channel(request.user, 'create_orders', sales_channel)
+        company = sales_channel.brand.company
+
+        # Resolve billing: prefer an explicit, tenant-verified client; otherwise
+        # use the free-text billing block the caller sent verbatim.
+        billing = dict(data.get('billing') or {})
+        client = data.get('client')
+        if client is not None:
+            if client.company_id != company.id:
+                return Response(
+                    {'client': [
+                        "Selected client does not belong to this sales "
+                        "channel's company."
+                    ]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            billing = self._billing_from_client(client, billing)
+
+        payload = {
+            'ticket_id':             data.get('ticket_id', ''),
+            'client_ticket_uuid':    data.get('client_ticket_uuid', ''),
+            'billing':               billing,
+            'line_items':            data.get('line_items', []),
+            'payment_method':        data.get('payment_method', 'cash'),
+            'payment_method_title':  data.get('payment_method_title', 'Cash'),
+            'customer_note':         data.get('customer_note', ''),
+            'status':                data.get('status', 'processing'),
+            'discount_type':         data.get('discount_type', Order.DiscountType.NONE),
+            'discount_value':        str(data.get('discount_value', '0.00')),
+        }
+        for key in ('subtotal', 'total_tax', 'shipping_total', 'discount_total', 'total'):
+            if key in data:
+                payload[key] = str(data[key])
+
+        ingestion = OrderIngestionService()
+        try:
+            order, _created = ingestion.ingest(
+                payload=payload,
+                sales_channel=sales_channel,
+                source=Order.Source.MANUAL,
+                created_by=request.user,
+            )
+        except OrderIngestionError as exc:
+            return Response(
+                {'detail': exc.message, **exc.details},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(OrderDetailSerializer(order).data, status=status.HTTP_201_CREATED)
+
     # ── Status update ────────────────────────────────────────────────────
 
     @action(detail=True, methods=['patch'], url_path='status')
@@ -503,7 +642,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                 if any(field in data for field in ('delivery_status', 'status', 'return_exchange_status', 'outcome')):
                     OrderLifecycleService._recompute_outcome(locked, actor=request.user)
 
-        return Response(OrderDetailSerializer(locked).data)
+        return self._transition_response(locked, request)
 
     @action(detail=True, methods=['patch'], url_path='edit')
     def edit_order(self, request, pk=None):
@@ -517,7 +656,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         OrderManagementService.edit_order(order=order, data=data, actor=request.user)
 
-        return Response(OrderDetailSerializer(order).data)
+        return self._transition_response(order, request)
 
     @action(detail=True, methods=['post'], url_path='soft-delete')
     def soft_delete(self, request, pk=None):
@@ -541,7 +680,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         self._require_permission(request.user, 'restore_soft_deleted_orders', order)
         OrderManagementService.restore_order(order=order, actor=request.user)
-        return Response(OrderDetailSerializer(order).data)
+        return self._transition_response(order, request)
 
     @action(detail=True, methods=['get'], url_path='logs')
     def logs(self, request, pk=None):
@@ -764,7 +903,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             )
             order.save(update_fields=['internal_note', 'updated_at'])
 
-        return Response(OrderDetailSerializer(order).data)
+        return self._transition_response(order, request)
 
     # ── Order Outcome Actions (Confirm / Delay / Cancel) ────────────────
 
@@ -790,7 +929,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         except LifecycleError as exc:
             return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response(OrderDetailSerializer(order).data)
+        return self._transition_response(order, request)
 
     @action(detail=True, methods=['post'], url_path='not-answered')
     def not_answered(self, request, pk=None):
@@ -805,7 +944,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             )
         except LifecycleError as exc:
             return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(OrderDetailSerializer(order).data)
+        return self._transition_response(order, request)
 
     @action(detail=True, methods=['post'], url_path='restore-delayed')
     def restore_delayed(self, request, pk=None):
@@ -816,7 +955,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             order = OrderLifecycleService.restore_delayed(order, actor=request.user)
         except LifecycleError as exc:
             return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(OrderDetailSerializer(order).data)
+        return self._transition_response(order, request)
 
     @action(detail=True, methods=['post'], url_path='delay')
     def delay_order(self, request, pk=None):
@@ -844,7 +983,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         except LifecycleError as exc:
             return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response(OrderDetailSerializer(order).data)
+        return self._transition_response(order, request)
 
     @action(detail=True, methods=['post'], url_path='cancel-outcome')
     def cancel_outcome(self, request, pk=None):
@@ -872,7 +1011,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         except LifecycleError as exc:
             return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response(OrderDetailSerializer(order).data)
+        return self._transition_response(order, request)
 
     @action(detail=False, methods=['post'], url_path='packaging-lookup')
     def packaging_lookup(self, request):
@@ -945,7 +1084,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             )
         except LifecycleError as exc:
             return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(OrderDetailSerializer(order).data)
+        return self._transition_response(order, request)
 
     @action(detail=True, methods=['post'], url_path='unpackage')
     def unpackage_order(self, request, pk=None):
@@ -955,7 +1094,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             order = OrderLifecycleService.unpackage_order(order, actor=request.user)
         except LifecycleError as exc:
             return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(OrderDetailSerializer(order).data)
+        return self._transition_response(order, request)
 
     @action(detail=True, methods=['post'], url_path='mark-pickup')
     def mark_pickup(self, request, pk=None):
@@ -969,7 +1108,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             )
         except LifecycleError as exc:
             return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(OrderDetailSerializer(order).data)
+        return self._transition_response(order, request)
 
     @action(detail=True, methods=['post'], url_path='send-to-pos')
     def send_to_pos(self, request, pk=None):
@@ -985,7 +1124,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             )
         except LifecycleError as exc:
             return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(OrderDetailSerializer(order).data)
+        return self._transition_response(order, request)
 
     @action(detail=True, methods=['post'], url_path='validate-pos')
     def validate_pos(self, request, pk=None):
@@ -1004,7 +1143,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             )
         except LifecycleError as exc:
             return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(OrderDetailSerializer(order).data)
+        return self._transition_response(order, request)
 
     @action(detail=True, methods=['post'], url_path='process-return')
     def process_return(self, request, pk=None):
@@ -1022,7 +1161,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             )
         except LifecycleError as exc:
             return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(OrderDetailSerializer(order).data)
+        return self._transition_response(order, request)
 
     @action(detail=True, methods=['post'], url_path='restore-return-stock')
     def restore_return_stock(self, request, pk=None):
@@ -1032,6 +1171,57 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             order = OrderLifecycleService.restore_stock_from_return(order, actor=request.user)
         except LifecycleError as exc:
             return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
+        return self._transition_response(order, request)
+
+    # ── Manual status override + WooCommerce resync (Phase D) ────────────
+
+    @action(detail=True, methods=['post'], url_path='manual-transition')
+    def manual_transition(self, request, pk=None):
+        """Admin/manager-only backward status override (reason required, audited).
+
+        Gated on the ``manual_status_override`` permission. The lifecycle service
+        re-validates the move against the current derived status, applies the
+        documented side-effects (stock re-deduct / points / WC-sync intent) and
+        writes the MANUAL_STATUS_OVERRIDE audit log. Any resulting WooCommerce
+        push is scheduled after commit so the local status stays the source of
+        truth even if the push later fails.
+        """
+        order = self.get_object()
+        self._require_permission(request.user, 'manual_status_override', order)
+
+        serializer = ManualTransitionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            order = OrderLifecycleService.manual_transition(
+                order,
+                target=data['target'],
+                actor=request.user,
+                reason=data['reason'],
+            )
+        except LifecycleError as exc:
+            return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
+
+        return self._transition_response(order, request)
+
+    @action(detail=True, methods=['post'], url_path='retry-sync')
+    def retry_sync(self, request, pk=None):
+        """Retry a failed/parked WooCommerce status push.
+
+        Explicit operator action — runs the push immediately with ``force=True``
+        (bypassing the global gate). Never raises on a WooCommerce failure: the
+        outcome is recorded on the order (``sync_status`` / ``sync_error_message``)
+        and the local status is untouched.
+        """
+        order = self.get_object()
+        self._require_permission(request.user, 'import_orders', order)
+        if order.source != Order.Source.WOOCOMMERCE or not order.external_order_id:
+            return Response(
+                {'detail': 'Only WooCommerce-sourced orders can be re-synced.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        order = WooCommerceSyncService.retry(order, actor=request.user)
         return Response(OrderDetailSerializer(order).data)
 
     # ── Bulk-action endpoints (Phase 2) ──────────────────────────────────
@@ -1307,6 +1497,32 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             'cancelled':        qs.filter(workflow_status=Order.WorkflowStatus.CANCELLED).count(),
             'changed':          qs.filter(workflow_status=Order.WorkflowStatus.CHANGED).count(),
         }
+
+        # Phase D — clean order_status KPI block (additive; the legacy buckets
+        # above are untouched). Counts realised sales / revenue from the derived
+        # order_status, so returns / exchanges / cancellations are excluded
+        # automatically (they outrank ``done`` in the precedence).
+        kpis = OrderKPIService.compute(queryset=qs)
+        kpis['revenue'] = str(kpis['revenue'])
+        data['order_status_kpis'] = kpis
+
+        # Revenue is sensitive financial data. Strip the aggregate revenue
+        # figures for users who lack ``can_view_financial_reports`` (Super
+        # Admin / CEO / company Manager keep them). Per-order ``total`` and the
+        # order-detail money totals are NOT touched — staff still process
+        # orders; only the dashboard aggregates are gated. Defence-in-depth:
+        # the frontend also hides the cards, but the client is never trusted.
+        can_view_revenue = (
+            request.user.is_superuser
+            or PermissionService.has_permission(
+                request.user, 'can_view_financial_reports'
+            )
+        )
+        if not can_view_revenue:
+            data.pop('revenue', None)
+            if isinstance(data.get('order_status_kpis'), dict):
+                data['order_status_kpis'].pop('revenue', None)
+
         return Response(data)
 
     # ── WooCommerce helpers ──────────────────────────────────────────────
@@ -1865,13 +2081,22 @@ class OrderSyncEventViewSet(viewsets.ReadOnlyModelViewSet):
             'sales_channel', 'company', 'triggered_by',
         ).all()
 
+        # Workspace scoping (applies to Super Admin too): limit to the active
+        # company unless an explicit ?company filter is given. No company
+        # selected and none requested = global mode (all events).
+        explicit_company = self.request.query_params.get('company')
+        if explicit_company:
+            qs = qs.filter(company_id=explicit_company)
+        elif getattr(user, 'current_company_id', None):
+            qs = qs.filter(company_id=user.current_company_id)
+
+        # Active-brand focus narrows to that brand's channels.
+        if getattr(user, 'current_brand_id', None):
+            qs = qs.filter(sales_channel__brand_id=user.current_brand_id)
+
         channel_id = self.request.query_params.get('sales_channel')
         if channel_id:
             qs = qs.filter(sales_channel_id=channel_id)
-
-        company_id = self.request.query_params.get('company')
-        if company_id:
-            qs = qs.filter(company_id=company_id)
 
         sync_status = self.request.query_params.get('status')
         if sync_status:

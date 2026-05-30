@@ -265,15 +265,24 @@ class UserViewSet(viewsets.ModelViewSet):
         """Optimize queryset with related data."""
         queryset = super().get_queryset()
         queryset = queryset.select_related('current_company')
+
+        # Prefetch the relations the list/detail serializers read per row, so
+        # the user list does not issue an N+1 (role name, allowed brands and
+        # avatar were each one query per user before this).
+        if self.action in ('list', 'retrieve'):
+            queryset = queryset.prefetch_related(
+                'allowed_brands', 'profile', 'user_roles__role',
+            )
         
-        if self.action == 'retrieve':
-            queryset = queryset.prefetch_related('allowed_brands', 'profile')
-        
-        # Filter by current user's company (unless superuser)
+        # Scope to the active company whenever one is selected. A Super Admin
+        # who has picked a company in the workspace switcher sees only that
+        # company's users; a Super Admin with no company selected sees every
+        # user (global mode). Normal users always have a company, so they stay
+        # scoped exactly as before.
         user = self.request.user
-        if not user.is_superuser and user.current_company:
-            queryset = queryset.filter(current_company=user.current_company)
-        
+        if user.current_company_id:
+            queryset = queryset.filter(current_company_id=user.current_company_id)
+
         return queryset
     
     @extend_schema(

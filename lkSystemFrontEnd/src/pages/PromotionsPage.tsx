@@ -70,7 +70,7 @@ import {
 } from '@/components/ui/table';
 
 import { useAuthStore } from '@/store/authStore';
-import { hasRole } from '@/hooks/useAuth';
+import { hasAnyPermission } from '@/hooks/useAuth';
 import {
   promotionsKeys,
   useActivatePromotion,
@@ -310,11 +310,13 @@ const PromotionGroupRow = memo(function PromotionGroupRow({
 
 export default function PromotionsPage() {
   const currentUser = useAuthStore(state => state.user);
-  const canManage =
-    hasRole(currentUser, 'SuperAdmin') ||
-    hasRole(currentUser, 'Admin') ||
-    hasRole(currentUser, 'Manager') ||
-    hasRole(currentUser, 'CEO');
+  // Permission-driven (dynamic): anyone whose role grants a promotion-management
+  // permission can manage promotions — including a Brand Manager.
+  const canManage = hasAnyPermission(currentUser, [
+    'create_promotions',
+    'edit_promotions',
+    'delete_promotions',
+  ]);
 
   const queryClient = useQueryClient();
   const groupsQuery = usePromotionGroups();

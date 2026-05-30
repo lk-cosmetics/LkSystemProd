@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# VS Code Local History (editor snapshots, not part of the project)
+.history/
+
 # C extensions
 *.so
 

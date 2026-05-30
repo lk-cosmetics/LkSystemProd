@@ -25,10 +25,15 @@ import { BIPagination } from './BIPagination';
 import { fmtMoney, fmtNumber } from './utils';
 
 const RESALE_LABEL: Record<string, string> = {
+  // Canonical taxonomy (current rows)
+  resell_product: 'Resell Product',
+  pack: 'Pack',
+  component: 'Component',
+  packaging_item: 'Packaging Item',
+  // Legacy values (kept so historical aggregated rows still render a label)
   resell: 'Resell',
   packaging: 'Packaging',
   finished: 'Finished',
-  component: 'Component',
   raw_material: 'Raw material',
 };
 

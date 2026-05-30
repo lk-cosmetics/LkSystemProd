@@ -16,7 +16,7 @@ import {
   CheckCircle, Clock, Package, Pencil, History, Trash2,
   Undo2, Loader2, TrendingUp,
   Truck, Store, RotateCcw, Star, ArrowUpDown, ArrowUp, ArrowDown,
-  X, SlidersHorizontal, AlertTriangle, Phone,
+  X, SlidersHorizontal, AlertTriangle, Phone, ShieldAlert, Plus,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -35,23 +35,29 @@ import {
   DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog';
+import { Textarea } from '@/components/ui/textarea';
+import { Label } from '@/components/ui/label';
 
 import { orderService } from '@/services/order.service';
 import { productService } from '@/services/product.service';
 import { salesChannelService } from '@/services/salesChannel.service';
 import { useAuthStore } from '@/store/authStore';
-import { hasAnyRole, hasPermission } from '@/hooks/useAuth';
+import { hasPermission } from '@/hooks/useAuth';
 import type {
   OrderListItem, OrderDetail, OrderEditLineInput, OrderEditRequest,
   OrderDiscountType, OrderSummary, OrderStatus, SalesChannel, ProductListItem,
-  OrderLogEntry,
+  OrderLogEntry, CleanOrderStatus, POSOrderCreateRequest,
 } from '@/types';
 import type { OrderStatusFieldsPayload, OrderSyncEvent, WooCommerceOrderPreviewResponse } from '@/services/order.service';
 
 import {
   OrderDetailDialog, SyncDialog, PreviewDialog, LogsDialog, MessageAlert,
-  SendToPOSDialog, ReturnLookupDialog,
+  SendToPOSDialog, ReturnLookupDialog, ReturnDialog, CreateOrderDialog,
 } from './components/OrderDialogs';
+import { CleanStatusBadge, SyncStatusBadge, cleanStatusLabel } from './components/orderStatusBadges';
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
 /* HELPERS                                                                   */
@@ -87,54 +93,53 @@ const PAYMENT_STYLES: Record<string, string> = {
 type OrderFlowTab =
   | 'all'
   | 'pending'
-  | 'answered'
+  | 'confirmed'
   | 'not_answered'
   | 'delayed'
-  | 'sent_to_delivery'
-  | 'packaging'
+  | 'preparing'
   | 'done'
-  | 'retour'
-  | 'cancelled'
-  | 'changed'
+  | 'returns'
+  | 'canceled'
   | 'deleted';
 
 const DEFAULT_ORDERING = 'lifecycle_priority,-client__points,-created_at';
 
-// Phase 2 — the 10-state workflow vocabulary drives the tabs and the row badge.
-// Each tab value matches Order.WorkflowStatus on the backend (filters.py wires
-// these into the queryset via ?flow=).
+// Phase D — the tabs speak ONE language: the clean derived ``order_status``.
+// Each tab maps to the order_status value(s) it represents, so the tab filter
+// (?order_status=…), the count (order_status_kpis.by_status) and the row chip
+// (CleanStatusBadge) are always consistent. 'all' and 'deleted' are special
+// (no order_status filter); 'deleted' is gated by view_soft_deleted_orders.
 const FLOW_TABS: Array<{
   value: OrderFlowTab;
   label: string;
   shortLabel: string;
   icon: ReactNode;
+  statuses: CleanOrderStatus[];
 }> = [
-  { value: 'all',              label: 'All',              shortLabel: 'All',     icon: <ShoppingCart className="size-3.5" /> },
-  { value: 'pending',          label: 'Pending',          shortLabel: 'Pending', icon: <Clock className="size-3.5" /> },
-  { value: 'answered',         label: 'Confirmed',        shortLabel: 'Conf',    icon: <CheckCircle className="size-3.5" /> },
-  { value: 'not_answered',     label: 'Not Answered',     shortLabel: 'No ans',  icon: <Clock className="size-3.5" /> },
-  { value: 'delayed',          label: 'Delayed',          shortLabel: 'Delay',   icon: <Clock className="size-3.5" /> },
-  { value: 'sent_to_delivery', label: 'Sent to Delivery', shortLabel: 'Sent',    icon: <Truck className="size-3.5" /> },
-  { value: 'packaging',        label: 'Packaging',        shortLabel: 'Pack',    icon: <Store className="size-3.5" /> },
-  { value: 'done',             label: 'Done',             shortLabel: 'Done',    icon: <CheckCircle className="size-3.5" /> },
-  { value: 'retour',           label: 'Return / Change',  shortLabel: 'Return',  icon: <RotateCcw className="size-3.5" /> },
-  { value: 'cancelled',        label: 'Cancelled',        shortLabel: 'Cancel',  icon: <Trash2 className="size-3.5" /> },
-  { value: 'changed',          label: 'Changed',          shortLabel: 'Change',  icon: <RotateCcw className="size-3.5" /> },
-  { value: 'deleted',          label: 'Deleted',          shortLabel: 'Trash',   icon: <Undo2 className="size-3.5" /> },
+  { value: 'all',          label: 'All',          shortLabel: 'All',     icon: <ShoppingCart className="size-3.5" />, statuses: [] },
+  { value: 'pending',      label: 'Pending',      shortLabel: 'Pending', icon: <Clock className="size-3.5" />,        statuses: ['new', 'awaiting_confirmation'] },
+  { value: 'confirmed',    label: 'Confirmed',    shortLabel: 'Conf',    icon: <CheckCircle className="size-3.5" />,  statuses: ['confirmed'] },
+  { value: 'not_answered', label: 'Not Answered', shortLabel: 'No ans',  icon: <Phone className="size-3.5" />,        statuses: ['not_answered'] },
+  { value: 'delayed',      label: 'Delayed',      shortLabel: 'Delay',   icon: <Clock className="size-3.5" />,        statuses: ['delayed'] },
+  { value: 'preparing',    label: 'Preparing',    shortLabel: 'Prep',    icon: <Package className="size-3.5" />,      statuses: ['preparing'] },
+  { value: 'done',         label: 'Done',         shortLabel: 'Done',    icon: <CheckCircle className="size-3.5" />,  statuses: ['done'] },
+  { value: 'returns',      label: 'Returns',      shortLabel: 'Return',  icon: <RotateCcw className="size-3.5" />,    statuses: ['returned', 'exchanged'] },
+  { value: 'canceled',     label: 'Canceled',     shortLabel: 'Cancel',  icon: <X className="size-3.5" />,            statuses: ['canceled'] },
+  { value: 'deleted',      label: 'Deleted',      shortLabel: 'Trash',   icon: <Trash2 className="size-3.5" />,       statuses: [] },
 ];
 
-// Phase 2 — main workflow status colours for the list row badge.
-const WORKFLOW_STATUS_STYLES: Record<string, string> = {
-  pending:          'bg-amber-100 text-amber-800',
-  answered:         'bg-blue-100 text-blue-800',
-  not_answered:     'bg-rose-100 text-rose-800',
-  delayed:          'bg-orange-100 text-orange-800',
-  sent_to_delivery: 'bg-cyan-100 text-cyan-800',
-  packaging:        'bg-violet-100 text-violet-800',
-  done:             'bg-emerald-100 text-emerald-800',
-  retour:           'bg-purple-100 text-purple-800',
-  cancelled:        'bg-red-100 text-red-800',
-  changed:          'bg-indigo-100 text-indigo-800',
+// Phase D — admin/manager backward overrides. Mirrors the backend
+// ALLOWED_MANUAL_TRANSITIONS exactly; the server re-validates, so this map is
+// purely to drive the UI (which targets to offer, when to show the action).
+const MANUAL_TRANSITIONS: Record<string, string[]> = {
+  done:         ['preparing'],
+  preparing:    ['confirmed'],
+  confirmed:    ['awaiting_confirmation'],
+  delayed:      ['awaiting_confirmation'],
+  not_answered: ['awaiting_confirmation'],
+  canceled:     ['awaiting_confirmation', 'confirmed'],
+  returned:     ['done'],
+  exchanged:    ['done'],
 };
 
 function getPrimarySort(ordering: string) {
@@ -205,18 +210,6 @@ function SortableHead({
   );
 }
 
-// Phase 2 — the primary list-row badge: 10-state workflow.
-function WorkflowBadge({ status }: { status: string }) {
-  if (!status) return null;
-  const styles = WORKFLOW_STATUS_STYLES[status] ?? 'bg-slate-100 text-slate-700';
-  const label = status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-  return (
-    <Badge variant="outline" className={`text-xs border-transparent font-medium ${styles}`}>
-      {label}
-    </Badge>
-  );
-}
-
 function SourceBadge({ source }: { source: string }) {
   return (
     <Badge variant="outline" className={`text-xs border-transparent ${SOURCE_STYLES[source] ?? ''}`}>
@@ -245,20 +238,6 @@ function PriorityBadge({ priority }: { priority?: number | null }) {
   if (!priority || priority > 5) return <Badge variant="outline" className="text-[10px]">Normal</Badge>;
   if (priority <= 2) return <Badge className="text-[10px] bg-rose-600 hover:bg-rose-600">Call client</Badge>;
   return <Badge className="text-[10px] bg-blue-600 hover:bg-blue-600">Next step</Badge>;
-}
-
-function FlowBadge({ order }: { order: OrderListItem }) {
-  if (order.is_deleted) return <Badge variant="destructive" className="text-[10px]">Deleted</Badge>;
-  if (order.returned_at) return <Badge className="text-[10px] bg-purple-600 hover:bg-purple-600">Returned</Badge>;
-  if (order.stock_restored_at) return <Badge className="text-[10px] bg-emerald-600 hover:bg-emerald-600">Stock restored</Badge>;
-  if (isDirectPOSCompleted(order)) return <Badge className="text-[10px] bg-emerald-600 hover:bg-emerald-600">POS done</Badge>;
-  if (order.pos_validated_at) return <Badge className="text-[10px] bg-emerald-600 hover:bg-emerald-600">POS validated</Badge>;
-  if (order.sent_to_pos_at) return <Badge variant="outline" className="text-[10px]">Waiting POS</Badge>;
-  if (order.in_store_pickup) return <Badge variant="outline" className="text-[10px]">POS route</Badge>;
-  if (order.packaging_status && order.packaging_status !== 'NOT_PACKAGED') return <Badge variant="outline" className="text-[10px]">Packaged</Badge>;
-  if (order.delivery_status && order.delivery_status !== 'NONE') return <Badge variant="outline" className="text-[10px]">{order.delivery_status.replace('_', ' ')}</Badge>;
-  if (order.outcome === 'CONFIRMED') return <Badge variant="outline" className="text-[10px]">Confirmed</Badge>;
-  return <Badge variant="outline" className="text-[10px]">Needs call</Badge>;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
@@ -326,6 +305,18 @@ export default function OrdersPage() {
   const [returnLookupDialog, setReturnLookupDialog] = useState(false);
   const [returnLookupLoading, setReturnLookupLoading] = useState(false);
   const [lookupMode, setLookupMode] = useState<'return' | 'packaging'>('return');
+  // Per-item return / exchange disposition (back to stock vs damaged vs missing).
+  const [returnOrder, setReturnOrder] = useState<OrderDetail | null>(null);
+  const [returnDialogOpen, setReturnDialogOpen] = useState(false);
+  // Manual order creation.
+  const [createOrderOpen, setCreateOrderOpen] = useState(false);
+  const [creatingOrder, setCreatingOrder] = useState(false);
+
+  /* ── manual status rollback (Phase D) ─── */
+  const [manualOrder, setManualOrder] = useState<OrderListItem | OrderDetail | null>(null);
+  const [manualTarget, setManualTarget] = useState('');
+  const [manualReason, setManualReason] = useState('');
+  const [manualSubmitting, setManualSubmitting] = useState(false);
 
   /* ── sync state ─── */
   const [channels, setChannels] = useState<SalesChannel[]>([]);
@@ -346,8 +337,15 @@ export default function OrdersPage() {
   const [errorMessage, setErrorMessage] = useState('');
 
   const user = useAuthStore(s => s.user);
-  const isAdmin = hasAnyRole(user, ['SUPERADMIN', 'CEO', 'MANAGER']);
+  // Cross-brand order filter is for users who span multiple brands
+  // (company-scoped roles hold switch_brands; superuser bypasses).
+  const canFilterByBrand = hasPermission(user, 'switch_brands');
+  // Revenue aggregates are sensitive financial data — only Super Admin / CEO /
+  // company Manager (anyone holding can_view_financial_reports) sees them. The
+  // backend strips these fields too; this just hides the cards client-side.
+  const canViewRevenue = hasPermission(user, 'can_view_financial_reports');
   const canImportOrders = hasPermission(user, 'import_orders');
+  const canCreateOrders = hasPermission(user, 'create_orders');
   const canUpdateUnconfirmedOrders = hasPermission(user, 'update_unconfirmed_orders');
   const canUpdateConfirmedOrders = hasPermission(user, 'update_confirmed_orders');
   const canConfirmOrders = hasPermission(user, 'confirm_orders');
@@ -361,6 +359,8 @@ export default function OrdersPage() {
   const canSoftDelete = hasPermission(user, 'soft_delete_orders');
   const canRestoreDeleted = hasPermission(user, 'restore_soft_deleted_orders');
   const canViewDeleted = hasPermission(user, 'view_soft_deleted_orders');
+  // Phase D — admin/manager-only audited backward status override.
+  const canManualOverride = hasPermission(user, 'manual_status_override');
   const deferredSearch = useDeferredValue(search);
 
   /* ── brand/channel maps ─── */
@@ -371,10 +371,7 @@ export default function OrdersPage() {
   }, [channels]);
 
   const visibleFlowTabs = useMemo(
-    () => FLOW_TABS.filter(tab => (
-      tab.value !== 'changed'
-      && (tab.value !== 'deleted' || canViewDeleted)
-    )),
+    () => FLOW_TABS.filter(tab => tab.value !== 'deleted' || canViewDeleted),
     [canViewDeleted],
   );
 
@@ -425,13 +422,24 @@ export default function OrdersPage() {
         ...(channelFilter !== 'all' ? { sales_channel: Number(channelFilter) } : {}),
         ...(deferredSearch ? { search: deferredSearch } : {}),
       };
+      // Phase D — translate the active tab into the clean order_status filter.
+      // 'all' filters nothing; 'deleted' is orthogonal to order_status so it
+      // keeps the dedicated is_deleted flow; every other tab maps to one or
+      // more order_status values (joined for grouped tabs like Pending/Returns).
+      const activeTab = FLOW_TABS.find(t => t.value === flowFilter);
+      const tabParams: { flow?: string; order_status?: string } =
+        flowFilter === 'all'
+          ? {}
+          : flowFilter === 'deleted'
+            ? { flow: 'deleted' }
+            : { order_status: (activeTab?.statuses ?? []).join(',') };
       const [ordersRes, summaryRes] = await Promise.all([
         orderService.getAll({
           page: currentPage,
           page_size: pageSize,
           include_deleted: (includeDeleted || flowFilter === 'deleted') && canViewDeleted,
           ordering,
-          ...(flowFilter !== 'all' ? { flow: flowFilter } : {}),
+          ...tabParams,
           ...sharedFilters,
         }),
         orderService.getSummary(sharedFilters),
@@ -527,7 +535,7 @@ export default function OrdersPage() {
       const detail = await orderService.getById(id);
       setViewOrder(detail);
       setEditMode(false);
-      const customerLines = detail.customer_lines ?? detail.lines.filter(line => line.product_type !== 'packaging');
+      const customerLines = detail.customer_lines ?? detail.lines.filter(line => line.product_type !== 'packaging_item');
       setEditForm({
         lines: customerLines.map((l): OrderEditLineInput => ({
           id: l.id, product: l.product, product_name: l.product_name,
@@ -645,7 +653,7 @@ export default function OrdersPage() {
       return;
     }
     setLoadingPackagingProducts(true);
-    productService.getAllProducts({ brand: brandId, product_type: 'packaging', page_size: 500 })
+    productService.getAllProducts({ brand: brandId, product_type: 'packaging_item', page_size: 500 })
       .then(products => setPackagingProducts(products || []))
       .catch(err => {
         console.error('Failed to load packaging products:', err);
@@ -675,7 +683,7 @@ export default function OrdersPage() {
         if (!products || products.length === 0) {
           console.warn(`No products found for brand ${brandId}`);
         }
-        setEditProducts((products || []).filter(product => product.product_type !== 'packaging'));
+        setEditProducts((products || []).filter(product => product.product_type !== 'packaging_item'));
       })
       .catch(err => {
         console.error('Failed to load edit products:', err);
@@ -932,6 +940,39 @@ export default function OrdersPage() {
     }
   };
 
+  /* ── manual rollback + WC re-sync (Phase D) ─── */
+  const openManualRollback = (order: OrderListItem | OrderDetail) => {
+    const targets = MANUAL_TRANSITIONS[order.order_status] ?? [];
+    setManualOrder(order);
+    setManualTarget(targets[0] ?? '');
+    setManualReason('');
+  };
+
+  const handleManualTransition = async () => {
+    if (!manualOrder || !manualTarget || manualReason.trim().length < 3) return;
+    setManualSubmitting(true);
+    try {
+      const updated = await orderService.manualTransition(
+        manualOrder.id,
+        manualTarget as OrderListItem['order_status'],
+        manualReason.trim(),
+      );
+      if (viewOrder?.id === updated.id) setViewOrder(updated);
+      setManualOrder(null);
+      await fetchData();
+      setSuccessMessage(`Order rolled back to "${cleanStatusLabel(updated.order_status)}".`);
+      setSuccessDialog(true);
+    } catch (err) {
+      setErrorMessage(extractErrorMessage(err, 'Failed to override order status.'));
+      setErrorDialog(true);
+    } finally {
+      setManualSubmitting(false);
+    }
+  };
+
+  const handleRetrySync = (id: number) =>
+    runLifecycleAction(() => orderService.retrySync(id), 'WooCommerce re-sync attempted.');
+
   const openSendPOSDialog = async (order: OrderDetail | OrderListItem) => {
     setSendingPOS(false);
     setSelectedPOSChannel('');
@@ -981,32 +1022,76 @@ export default function OrdersPage() {
     );
   };
 
+  // Open the per-item return dialog. We need the full detail (with lines), so
+  // reuse the already-loaded order when available and fetch it otherwise.
   const handleProcessReturn = async (id: number) => {
+    let detail = viewOrder && viewOrder.id === id ? viewOrder : null;
+    if (!detail) {
+      try {
+        detail = await orderService.getById(id);
+      } catch (err) {
+        setErrorMessage(extractErrorMessage(err, 'Could not load the order to process its return.'));
+        setErrorDialog(true);
+        return;
+      }
+    }
+    setReturnOrder(detail);
+    setReturnDialogOpen(true);
+  };
+
+  const handleConfirmReturn = async (payload: {
+    returnReason: string;
+    returnType: 'RETURNED' | 'EXCHANGED' | 'DAMAGED' | 'MISSING' | 'OTHER';
+    lineConditions: Array<{ line_id: number; condition: 'GOOD' | 'DAMAGED' | 'MISSING' }>;
+  }) => {
+    if (!returnOrder) return;
+    const targetId = returnOrder.id;
     await runLifecycleAction(
-      () => orderService.processReturn(id, 'Returned from order page'),
-      'Return processed and stock restoration checked.',
+      () => orderService.processReturn(targetId, payload),
+      'Return processed: good items restocked, damaged items written off.',
     );
+    setReturnDialogOpen(false);
+    setReturnOrder(null);
+  };
+
+  const handleCreateOrder = async (payload: POSOrderCreateRequest) => {
+    setCreatingOrder(true);
+    try {
+      const created = await orderService.createManual(payload);
+      setCreateOrderOpen(false);
+      await fetchData();
+      setSuccessMessage(`Order ${created.order_number} created.`);
+      setSuccessDialog(true);
+    } catch (err) {
+      setErrorMessage(extractErrorMessage(err, 'Failed to create the order.'));
+      setErrorDialog(true);
+    } finally {
+      setCreatingOrder(false);
+    }
   };
 
   const handleReturnLookup = async (query: string) => {
     setReturnLookupLoading(true);
     try {
-      const result = lookupMode === 'packaging'
-        ? await orderService.packagingLookup(query)
-        : await orderService.returnLookup(query);
-      setReturnLookupDialog(false);
-      setViewOrder(result.order);
-      setEditMode(false);
-      setSuccessMessage(
-        lookupMode === 'packaging'
-          ? ((result as { warnings?: string[] }).warnings?.length
-            ? `Order found. ${(result as { warnings?: string[] }).warnings?.join(' ')}`
-            : 'Packaging order found.')
-        : result.matches > 1
-          ? `Found ${result.matches} matching orders. Showing the newest match.`
-          : 'Returned order found.'
-      );
-      setSuccessDialog(true);
+      if (lookupMode === 'packaging') {
+        const result = await orderService.packagingLookup(query);
+        setReturnLookupDialog(false);
+        setViewOrder(result.order);
+        setEditMode(false);
+        setSuccessMessage(
+          result.warnings?.length
+            ? `Order found. ${result.warnings.join(' ')}`
+            : 'Packaging order found.',
+        );
+        setSuccessDialog(true);
+      } else {
+        // Return mode: open the return-processing popup directly on the matched
+        // order so the operator can classify each item and save the return.
+        const result = await orderService.returnLookup(query);
+        setReturnLookupDialog(false);
+        setReturnOrder(result.order);
+        setReturnDialogOpen(true);
+      }
     } catch (err) {
       setErrorMessage(extractErrorMessage(err, 'No order found for this return lookup.'));
       setErrorDialog(true);
@@ -1120,16 +1205,23 @@ export default function OrdersPage() {
   /* RENDER                                                                   */
   /* ══════════════════════════════════════════════════════════════════════════ */
 
+  // Phase D — every tab count is summed from the clean order_status breakdown
+  // (order_status_kpis.by_status), the same field the row chip renders. Tabs,
+  // counts and badges therefore always agree. 'deleted' is counted separately
+  // (it is orthogonal to order_status).
   const tabCounts = useMemo(() => {
-    const workflow = summary?.workflow_counts ?? {};
-    const legacy = summary?.flow_counts ?? {};
-    return {
-      ...legacy,
-      ...workflow,
-      all: workflow.all ?? legacy.all ?? 0,
-      deleted: legacy.deleted ?? 0,
-      retour: (workflow.retour ?? legacy.returned ?? 0) + (workflow.changed ?? legacy.exchanged ?? 0),
-    } as Record<string, number>;
+    const byStatus = summary?.order_status_kpis?.by_status ?? {};
+    const sumOf = (keys: CleanOrderStatus[]) =>
+      keys.reduce((n, k) => n + (byStatus[k] ?? 0), 0);
+    const counts: Record<string, number> = {
+      all: summary?.order_status_kpis?.total_orders ?? summary?.total_orders ?? 0,
+      deleted: summary?.flow_counts?.deleted ?? 0,
+    };
+    for (const tab of FLOW_TABS) {
+      if (tab.value === 'all' || tab.value === 'deleted') continue;
+      counts[tab.value] = sumOf(tab.statuses);
+    }
+    return counts;
   }, [summary]);
 
   return (
@@ -1146,6 +1238,15 @@ export default function OrdersPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {canCreateOrders && (
+            <Button
+              size="sm"
+              onClick={() => setCreateOrderOpen(true)}
+              className="gap-2"
+            >
+              <Plus className="size-4" /> Create Order
+            </Button>
+          )}
           {canPackageOrders && (
             <Button
               variant="outline"
@@ -1198,18 +1299,33 @@ export default function OrdersPage() {
       {/* ── KPIs ─── */}
       {summary && (
         <div className="space-y-3">
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div className={`grid grid-cols-2 gap-3 ${canViewRevenue ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
             <KpiCard title="Total" value={summary.total_orders} icon={<ShoppingCart className="size-3" />} />
             <KpiCard title="Pending" value={summary.pending} tone="text-amber-600" icon={<Clock className="size-3" />} />
             <KpiCard title="Processing" value={summary.processing} tone="text-blue-600" icon={<Package className="size-3" />} />
             <KpiCard title="Completed" value={summary.completed} tone="text-emerald-600" icon={<CheckCircle className="size-3" />} />
-            <KpiCard title="Revenue" value={`TND ${summary.revenue}`} tone="text-emerald-600" icon={<TrendingUp className="size-3" />} />
+            {canViewRevenue && (
+              <KpiCard title="Revenue" value={`TND ${summary.revenue}`} tone="text-emerald-600" icon={<TrendingUp className="size-3" />} />
+            )}
           </div>
           <div className="grid grid-cols-3 gap-3">
             <KpiCard title="Confirmed" value={summary.confirmed_count} tone="text-emerald-600" icon={<CheckCircle className="size-3" />} />
             <KpiCard title="Delayed" value={summary.delayed_count} tone="text-amber-600" icon={<Clock className="size-3" />} />
             <KpiCard title="Cancelled" value={summary.cancelled_outcome} tone="text-red-600" icon={<ShoppingCart className="size-3" />} />
           </div>
+          {/* Phase D — clean order_status KPIs (genuinely successful sales only). */}
+          {summary.order_status_kpis && (
+            <div className={`grid grid-cols-2 gap-3 ${canViewRevenue ? 'md:grid-cols-6' : 'md:grid-cols-5'}`}>
+              <KpiCard title="Successful Sales" value={summary.order_status_kpis.successful_sales} tone="text-emerald-600" icon={<CheckCircle className="size-3" />} />
+              {canViewRevenue && (
+                <KpiCard title="Net Revenue" value={`TND ${summary.order_status_kpis.revenue}`} tone="text-emerald-600" icon={<TrendingUp className="size-3" />} />
+              )}
+              <KpiCard title="In Confirmation" value={summary.order_status_kpis.in_confirmation} tone="text-amber-600" icon={<Phone className="size-3" />} />
+              <KpiCard title="In Fulfillment" value={summary.order_status_kpis.in_fulfillment} tone="text-blue-600" icon={<Package className="size-3" />} />
+              <KpiCard title="Returned" value={summary.order_status_kpis.returned} tone="text-purple-600" icon={<RotateCcw className="size-3" />} />
+              <KpiCard title="Canceled" value={summary.order_status_kpis.canceled} tone="text-red-600" icon={<X className="size-3" />} />
+            </div>
+          )}
         </div>
       )}
 
@@ -1328,7 +1444,7 @@ export default function OrdersPage() {
                 </SelectContent>
               </Select>
             </div>
-            {isAdmin ? (
+            {canFilterByBrand ? (
               <div className="space-y-1.5">
                 <span className="text-xs font-medium text-muted-foreground">Brand</span>
                 <Select value={brandFilter} onValueChange={setBrandFilter}>
@@ -1387,8 +1503,7 @@ export default function OrdersPage() {
                 <SortableHead label="Points" field="client__points" ordering={ordering} onSort={handleSort} className="hidden lg:table-cell" />
                 <SortableHead label="Channel" field="sales_channel__name" ordering={ordering} onSort={handleSort} className="hidden md:table-cell" />
                 <SortableHead label="Source" field="source" ordering={ordering} onSort={handleSort} className="hidden sm:table-cell" />
-                <SortableHead label="Statuses" field="status" ordering={ordering} onSort={handleSort} />
-                <SortableHead label="Flow" field="outcome" ordering={ordering} onSort={handleSort} className="hidden lg:table-cell" />
+                <SortableHead label="Status" field="order_status" ordering={ordering} onSort={handleSort} />
                 <SortableHead label="Payment" field="payment_status" ordering={ordering} onSort={handleSort} className="hidden lg:table-cell" />
                 <SortableHead label="Total" field="total" ordering={ordering} onSort={handleSort} className="text-right" />
                 <SortableHead label="Date" field="created_at" ordering={ordering} onSort={handleSort} className="hidden md:table-cell" />
@@ -1398,7 +1513,7 @@ export default function OrdersPage() {
             <TableBody>
               {loading && (
                 <TableRow>
-                  <TableCell colSpan={12} className="py-16">
+                  <TableCell colSpan={11} className="py-16">
                     <div className="flex flex-col items-center gap-2">
                       <Loader2 className="size-6 animate-spin text-muted-foreground" />
                       <span className="text-sm text-muted-foreground">Loading orders...</span>
@@ -1408,7 +1523,7 @@ export default function OrdersPage() {
               )}
               {!loading && orders.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={12} className="text-center py-16 text-muted-foreground">
+                  <TableCell colSpan={11} className="text-center py-16 text-muted-foreground">
                     No orders found.
                   </TableCell>
                 </TableRow>
@@ -1446,44 +1561,17 @@ export default function OrdersPage() {
                   <TableCell className="hidden sm:table-cell"><SourceBadge source={o.source} /></TableCell>
                   <TableCell>
                     <div className="flex items-center gap-1.5 flex-wrap">
-                      {/* Phase 2 — workflow_status is the dominant chip. */}
-                      <WorkflowBadge status={(o as any).workflow_status ?? ''} />
-                      {o.wc_status && (
-                        <Badge variant="outline" className="text-[10px] border-indigo-200 text-indigo-700">
-                          WC {o.wc_status.replace('-', ' ')}
-                        </Badge>
-                      )}
-                      {o.contact_status && o.contact_status !== 'NONE' && (
-                        <Badge variant="outline" className="text-[10px] border-amber-200 text-amber-700">
-                          Contact {o.contact_status.replace('_', ' ')}
-                          {o.contact_status === 'NOT_ANSWERED' ? ` · ${o.not_answered_attempts ?? 0}` : ''}
-                        </Badge>
-                      )}
-                      {o.outcome && o.outcome !== 'NONE' && (
-                        <Badge variant="outline" className={`text-[10px] border-transparent ${
-                          o.outcome === 'CONFIRMED' ? 'bg-emerald-100 text-emerald-700' :
-                          o.outcome === 'DELAYED' ? 'bg-amber-100 text-amber-700' :
-                          o.outcome === 'CANCELLED' ? 'bg-red-100 text-red-700' : ''
-                        }`}>
-                          {o.outcome === 'CONFIRMED' ? 'Confirmed' :
-                           o.outcome === 'DELAYED' ? 'Delayed' :
-                           o.outcome === 'CANCELLED' ? 'Cancelled' : o.outcome}
-                        </Badge>
-                      )}
-                      {o.packaging_status && o.packaging_status !== 'NOT_PACKAGED' && (
-                        <Badge variant="outline" className="text-[10px] border-sky-200 text-sky-700">
-                          {o.packaging_status.replace('_', ' ')}
-                        </Badge>
-                      )}
-                      {o.final_outcome && o.final_outcome !== 'NONE' && (
-                        <Badge variant="outline" className="text-[10px] border-emerald-200 text-emerald-700">
-                          {o.final_outcome.replace(/_/g, ' ')}
-                        </Badge>
-                      )}
+                      {/* Phase D — ONE canonical lifecycle chip (the derived
+                          order_status). The internal mechanism fields
+                          (workflow_status / contact_status / outcome / wc_status /
+                          packaging_status / final_outcome) now live only in the
+                          order detail dialog, so the list stays readable. */}
+                      <CleanStatusBadge status={o.order_status} label={o.order_status_display} />
+                      {/* WooCommerce push-sync state — only when noteworthy (hidden for 'imported'). */}
+                      <SyncStatusBadge status={o.sync_status} label={o.sync_status_display} />
                       {o.is_deleted && <Badge variant="destructive" className="text-xs">Deleted</Badge>}
                     </div>
                   </TableCell>
-                  <TableCell className="hidden lg:table-cell"><FlowBadge order={o} /></TableCell>
                   <TableCell className="hidden lg:table-cell"><PaymentBadge status={o.payment_status} /></TableCell>
                   <TableCell className="text-right font-semibold tabular-nums">{fmtCurrency(o.currency, o.total)}</TableCell>
                   <TableCell className="text-xs text-muted-foreground hidden md:table-cell">{fmtDate(o.created_at)}</TableCell>
@@ -1550,6 +1638,18 @@ export default function OrdersPage() {
                           {!o.is_deleted && !o.returned_at && (o.final_outcome === 'SUCCESSFUL_SALE' || o.delivery_status === 'DELIVERED' || o.pos_validated_at) && canProcessReturn && (
                             <DropdownMenuItem onClick={() => handleProcessReturn(o.id)} className="gap-2">
                               <RotateCcw className="size-4" /> Process Return
+                            </DropdownMenuItem>
+                          )}
+                          {/* Phase D — WooCommerce push retry for parked / failed syncs. */}
+                          {!o.is_deleted && o.source === 'WOOCOMMERCE' && o.external_order_id && (o.sync_status === 'sync_failed' || o.sync_status === 'pending_sync') && canImportOrders && (
+                            <DropdownMenuItem onClick={() => handleRetrySync(o.id)} className="gap-2">
+                              <RefreshCw className="size-4" /> Retry WC Sync
+                            </DropdownMenuItem>
+                          )}
+                          {/* Phase D — audited, reason-required backward override (admin/manager). */}
+                          {!o.is_deleted && canManualOverride && (MANUAL_TRANSITIONS[o.order_status]?.length ?? 0) > 0 && (
+                            <DropdownMenuItem onClick={() => openManualRollback(o)} className="gap-2 text-amber-700">
+                              <ShieldAlert className="size-4" /> Manual Rollback
                             </DropdownMenuItem>
                           )}
                           <DropdownMenuSeparator />
@@ -1697,6 +1797,25 @@ export default function OrdersPage() {
         placeholder={lookupMode === 'packaging' ? 'Delivery code, ticket ID, WC ID...' : 'Ticket ID, WC ID, delivery code...'}
       />
 
+      <ReturnDialog
+        open={returnDialogOpen}
+        onOpenChange={(open) => {
+          setReturnDialogOpen(open);
+          if (!open) setReturnOrder(null);
+        }}
+        order={returnOrder}
+        onSubmit={handleConfirmReturn}
+        isLoading={mutatingOrder}
+      />
+
+      <CreateOrderDialog
+        open={createOrderOpen}
+        onOpenChange={setCreateOrderOpen}
+        channels={channels}
+        onSubmit={handleCreateOrder}
+        isLoading={creatingOrder}
+      />
+
       <SyncDialog
         open={syncDialog} onOpenChange={setSyncDialog}
         channels={channels} selectedChannel={selectedSyncChannel}
@@ -1721,6 +1840,58 @@ export default function OrdersPage() {
         open={logsDialog} onOpenChange={setLogsDialog}
         orderNumber={viewOrder?.order_number} logs={orderLogs} isLoading={loadingLogs}
       />
+
+      {/* Phase D — audited manual status rollback (admin/manager only). */}
+      <Dialog open={!!manualOrder} onOpenChange={open => { if (!open) setManualOrder(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ShieldAlert className="size-5 text-amber-600" /> Manual status rollback
+            </DialogTitle>
+            <DialogDescription>
+              Roll {manualOrder?.order_number} back to an earlier status. This is audited and requires a reason.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              Current status:
+              <CleanStatusBadge status={manualOrder?.order_status} label={manualOrder?.order_status_display} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="manual-target">Roll back to</Label>
+              <Select value={manualTarget} onValueChange={setManualTarget}>
+                <SelectTrigger id="manual-target"><SelectValue placeholder="Select a status" /></SelectTrigger>
+                <SelectContent>
+                  {(manualOrder ? MANUAL_TRANSITIONS[manualOrder.order_status] ?? [] : []).map(t => (
+                    <SelectItem key={t} value={t}>{cleanStatusLabel(t)}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="manual-reason">Reason <span className="text-red-500">*</span></Label>
+              <Textarea
+                id="manual-reason"
+                rows={3}
+                value={manualReason}
+                onChange={e => setManualReason(e.target.value)}
+                placeholder="Explain why this order is being rolled back (min 3 characters)…"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setManualOrder(null)} disabled={manualSubmitting}>Cancel</Button>
+            <Button
+              onClick={handleManualTransition}
+              disabled={manualSubmitting || !manualTarget || manualReason.trim().length < 3}
+              className="gap-2"
+            >
+              {manualSubmitting ? <Loader2 className="size-4 animate-spin" /> : <ShieldAlert className="size-4" />}
+              Confirm rollback
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <MessageAlert open={successDialog} onOpenChange={setSuccessDialog} type="success" message={successMessage} />
       <MessageAlert open={errorDialog} onOpenChange={setErrorDialog} type="error" message={errorMessage} />

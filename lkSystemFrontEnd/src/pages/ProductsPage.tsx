@@ -55,7 +55,7 @@ import { Separator } from '@/components/ui/separator';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { useDebounce } from '@/hooks/useDebounce';
 import { useAuthStore } from '@/store/authStore';
-import { hasRole } from '@/hooks/useAuth';
+import { isPlatformAdmin } from '@/hooks/useAuth';
 import { getMediaUrl } from '@/utils/helpers';
 import { productService } from '@/services/product.service';
 import {
@@ -352,7 +352,7 @@ interface FormData {
 }
 
 const EMPTY_FORM: FormData = {
-  name: '', barcode: '', brand: '', product_type: 'resell', status: 'draft',
+  name: '', barcode: '', brand: '', product_type: 'resell_product', status: 'draft',
   purchase_price: '0.00', sales_price: '0.00', image_url: '', product_link: '',
   is_pack: false, pack_items: [],
 };
@@ -770,6 +770,18 @@ export default function ProductsPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [form, setForm] = useState<FormData>(EMPTY_FORM);
+  // Locally-picked image file for upload (null = keep existing image_url / none).
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  // Object URL for previewing the chosen file; recomputed only when the file
+  // changes and revoked on change/unmount so we don't leak blob URLs.
+  const imagePreviewUrl = useMemo(
+    () => (imageFile ? URL.createObjectURL(imageFile) : null),
+    [imageFile],
+  );
+  useEffect(
+    () => () => { if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl); },
+    [imagePreviewUrl],
+  );
   const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
   // ── Camera barcode scanner states ──
@@ -845,7 +857,7 @@ export default function ProductsPage() {
   );
   const { data: allProducts = [] } = useProducts(needAllProducts);
 
-  const isSuperAdmin = hasRole(user, 'SuperAdmin');
+  const isSuperAdmin = isPlatformAdmin(user);
   const wcCh = useMemo(() => salesChannels.filter(c => c.channel_type === 'WOOCOMMERCE'), [salesChannels]);
 
   // ── Auto-clear toasts ──
@@ -1025,6 +1037,7 @@ export default function ProductsPage() {
       image_url: p.image_url, product_link: p.product_link,
       is_pack: p.is_pack, pack_items: p.pack_items ?? [],
     });
+    setImageFile(null);
     setEditOpen(true);
   }, []);
 
@@ -1054,7 +1067,7 @@ export default function ProductsPage() {
     setBcUpdateOpen(true);
   }, []);
 
-  const handleAdd = () => { setForm(EMPTY_FORM); setAddOpen(true); };
+  const handleAdd = () => { setForm(EMPTY_FORM); setImageFile(null); setAddOpen(true); };
   const setF = (k: keyof FormData, v: string) => setForm(f => ({ ...f, [k]: v }));
 
   const submitCreate = async () => {
@@ -1069,8 +1082,10 @@ export default function ProductsPage() {
         image_url: form.image_url, product_link: form.product_link,
         is_pack: form.is_pack,
         pack_items: form.is_pack ? form.pack_items : null,
+        imageFile,
       });
       setToast({ type: 'success', msg: 'Product created!' });
+      setImageFile(null);
       setAddOpen(false);
     } catch (e) {
       setToast({ type: 'error', msg: extractErr(e) });
@@ -1092,8 +1107,10 @@ export default function ProductsPage() {
           is_pack: form.is_pack,
           pack_items: form.is_pack ? form.pack_items : null,
         },
+        imageFile,
       });
       setToast({ type: 'success', msg: 'Product updated!' });
+      setImageFile(null);
       setEditOpen(false);
     } catch (e) {
       setToast({ type: 'error', msg: extractErr(e) });
@@ -1383,11 +1400,24 @@ export default function ProductsPage() {
         </div>
         <div className="space-y-1.5">
           <Label>Type</Label>
-          <Select value={form.product_type} onValueChange={v => setF('product_type', v)}>
+          {/* The type drives pack-ness: choosing "Pack" flips ``is_pack`` on and
+              reveals the pack builder; any other type clears it. This mirrors the
+              backend, where ``product_type='pack'`` and ``is_pack`` are kept in sync. */}
+          <Select
+            value={form.product_type}
+            onValueChange={v => setForm(f => ({
+              ...f,
+              product_type: v,
+              is_pack: v === 'pack',
+              pack_items: v === 'pack' ? f.pack_items : [],
+            }))}
+          >
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="resell">Resell</SelectItem>
-              <SelectItem value="packaging">Packaging</SelectItem>
+              <SelectItem value="resell_product">Resell Product</SelectItem>
+              <SelectItem value="pack">Pack</SelectItem>
+              <SelectItem value="component">Component</SelectItem>
+              <SelectItem value="packaging_item">Packaging Item</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -1416,44 +1446,61 @@ export default function ProductsPage() {
       <Separator />
 
       <div className="space-y-1.5">
-        <Label>Image URL</Label>
-        <Input value={form.image_url} onChange={e => setF('image_url', e.target.value)} placeholder="https://..." />
-        {form.image_url && (
+        <Label>Product image</Label>
+        {/* Upload a picture from the device. It is stored on our server and its
+            served URL is mirrored into image_url, so the image shows everywhere
+            (catalogue cards, POS, order lines, BI) with no extra wiring. */}
+        <Input
+          type="file"
+          accept="image/*"
+          onChange={e => setImageFile(e.target.files?.[0] ?? null)}
+        />
+        {imageFile && imagePreviewUrl ? (
+          <div className="mt-2 flex items-center justify-between gap-3">
+            <img src={imagePreviewUrl} alt="Selected" className="max-h-24 rounded-lg object-contain border" />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-xs font-medium">{imageFile.name}</p>
+              <p className="text-[11px] text-muted-foreground">{(imageFile.size / 1024).toFixed(1)} KB</p>
+            </div>
+            <Button type="button" variant="ghost" size="sm" onClick={() => setImageFile(null)}>
+              Remove
+            </Button>
+          </div>
+        ) : form.image_url ? (
           <div className="mt-2 flex justify-center">
             <img src={getMediaUrl(form.image_url)} alt="Preview" className="max-h-24 rounded-lg object-contain border" loading="lazy" />
           </div>
-        )}
+        ) : null}
+        <p className="text-[11px] text-muted-foreground pt-1">
+          Or paste an image URL (used only when no file is uploaded):
+        </p>
+        <Input value={form.image_url} onChange={e => setF('image_url', e.target.value)} placeholder="https://..." />
       </div>
       <div className="space-y-1.5">
         <Label>Product Link</Label>
         <Input value={form.product_link} onChange={e => setF('product_link', e.target.value)} placeholder="https://..." />
       </div>
 
-      <Separator />
-
-      {/* Pack/Bundle Toggle */}
-      <div className="flex items-center justify-between">
-        <div>
-          <Label htmlFor="pf-ispack" className="text-sm font-medium">Product Pack / Bundle</Label>
-          <p className="text-xs text-muted-foreground mt-0.5">Combine multiple products into one pack</p>
-        </div>
-        <Switch
-          id="pf-ispack"
-          checked={form.is_pack}
-          onCheckedChange={v => setForm(f => ({ ...f, is_pack: v, pack_items: v ? f.pack_items : [] }))}
-        />
-      </div>
-
+      {/* Pack builder — shown only when the Type is "Pack" (drives ``is_pack``). */}
       {form.is_pack && (
-        <PackBuilder
-          form={form}
-          setForm={setForm}
-          // Pre-resolved name / image / barcode for items already saved on
-          // this product. ``selected`` is populated when editing; for the
-          // "new product" form there's no initial detail to hydrate.
-          initialDetails={(selected as Product | null)?.pack_items_detail ?? null}
-          onScanRequest={() => setPackScanOpen(true)}
-        />
+        <>
+          <Separator />
+          <div>
+            <Label className="text-sm font-medium">Pack items</Label>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              This product is a pack — add the products bundled inside it.
+            </p>
+          </div>
+          <PackBuilder
+            form={form}
+            setForm={setForm}
+            // Pre-resolved name / image / barcode for items already saved on
+            // this product. ``selected`` is populated when editing; for the
+            // "new product" form there's no initial detail to hydrate.
+            initialDetails={(selected as Product | null)?.pack_items_detail ?? null}
+            onScanRequest={() => setPackScanOpen(true)}
+          />
+        </>
       )}
     </div>
   );
@@ -1605,8 +1652,10 @@ export default function ProductsPage() {
                 <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All Types</SelectItem>
-                  <SelectItem value="resell">Resell</SelectItem>
-                  <SelectItem value="packaging">Packaging</SelectItem>
+                  <SelectItem value="resell_product">Resell Product</SelectItem>
+                  <SelectItem value="pack">Pack</SelectItem>
+                  <SelectItem value="component">Component</SelectItem>
+                  <SelectItem value="packaging_item">Packaging Item</SelectItem>
                 </SelectContent>
               </Select>
             </div>

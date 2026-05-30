@@ -22,6 +22,7 @@ from .api.views import (
     ValidateInvitationView,
     AcceptInvitationView,
 )
+from .api.workspace_views import WorkspacesView, SwitchWorkspaceView
 
 # Create router and register viewsets
 router = DefaultRouter()
@@ -67,4 +68,8 @@ auth_urlpatterns = [
     # Invitation (public — no auth)
     path('validate-invitation/', ValidateInvitationView.as_view(), name='validate_invitation'),
     path('accept-invitation/', AcceptInvitationView.as_view(), name='accept_invitation'),
+
+    # Workspace switching (authenticated)
+    path('workspaces/', WorkspacesView.as_view(), name='workspaces'),
+    path('switch-workspace/', SwitchWorkspaceView.as_view(), name='switch_workspace'),
 ]

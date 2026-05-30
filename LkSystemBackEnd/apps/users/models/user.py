@@ -94,6 +94,19 @@ class User(AbstractUser):
         verbose_name='Allowed Brands',
         help_text='Brands this user can access (must belong to current_company)'
     )
+
+    # Active brand workspace (sub-workspace inside current_company). NULL means
+    # "whole company" (no brand focus). Set only through the validated
+    # workspace-switch endpoint; when set, data scoping narrows to this brand.
+    current_brand = models.ForeignKey(
+        'brands.Brand',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        verbose_name='Active Brand',
+        help_text='Active brand workspace; must belong to current_company.'
+    )
     
     # Additional fields
     first_name = models.CharField(max_length=150, blank=True)

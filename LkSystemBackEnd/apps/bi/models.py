@@ -64,12 +64,14 @@ class DailyBrandChannelStats(models.Model):
 class DailyProductResaleStats(models.Model):
     """Per-day per-resale-type rollup (resale_type = Product.product_type)."""
 
+    # Mirrors the canonical Product.ProductType taxonomy. Historical rows created
+    # before the taxonomy refactor may still carry legacy values; those simply
+    # display their raw string (choices are advisory, not DB-enforced).
     RESALE_TYPE_CHOICES = (
-        ('resell', 'Resell'),
-        ('packaging', 'Packaging'),
-        ('finished', 'Finished'),
+        ('resell_product', 'Resell Product'),
+        ('pack', 'Pack'),
         ('component', 'Component'),
-        ('raw_material', 'Raw Material'),
+        ('packaging_item', 'Packaging Item'),
     )
 
     company = models.ForeignKey(

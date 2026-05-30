@@ -80,6 +80,36 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   /**
+   * Switch the active workspace (company and/or brand).
+   *
+   * The backend validates the target and returns fresh tokens + the updated
+   * user. We swap the in-store user and access token. The caller (the sidebar
+   * switcher) clears the React Query cache so no previous-workspace data
+   * lingers.
+   */
+  switchWorkspace: async (companyId: number | null, brandId: number | null) => {
+    set({ isLoading: true, error: null });
+    try {
+      const user = await authService.switchWorkspace({
+        company_id: companyId,
+        brand_id: brandId,
+      });
+      set({
+        user,
+        accessToken: authService.getStoredAccessToken(),
+        isAuthenticated: true,
+        isLoading: false,
+        error: null,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to switch workspace';
+      set({ isLoading: false, error: message });
+      throw error;
+    }
+  },
+
+  /**
    * Clear error
    */
   clearError: () => {

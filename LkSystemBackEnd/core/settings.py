@@ -490,6 +490,19 @@ DELIVERY_API_TOKEN   = config('DELIVERY_API_TOKEN',   default='')
 DELIVERY_API_TIMEOUT = config('DELIVERY_API_TIMEOUT', default=15, cast=int)
 
 # =============================================================================
+# WOOCOMMERCE ORDER STATUS PUSH (local → WooCommerce)
+# =============================================================================
+
+# Local is ALWAYS the source of truth. When this gate is False (the default),
+# the system records the intended push and parks the order in ``pending_sync``
+# WITHOUT making any network call — so dev / test / not-yet-configured
+# environments never touch WooCommerce. Flip WC_ORDER_PUSH_ENABLED=true in .env
+# once the live store credentials are verified. A failed push never rolls back
+# the local status; it is recorded for a retry (see WooCommerceSyncService).
+WC_ORDER_PUSH_ENABLED = config('WC_ORDER_PUSH_ENABLED', default=False, cast=bool)
+WC_ORDER_PUSH_TIMEOUT = config('WC_ORDER_PUSH_TIMEOUT', default=30, cast=int)
+
+# =============================================================================
 # CUSTOM USER MODEL
 # =============================================================================
 

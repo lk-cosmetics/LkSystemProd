@@ -7,6 +7,7 @@ from rest_framework import serializers
 from .models import Order, OrderLine, OrderLog, OrderSyncEvent
 from apps.sales_channels.models import SalesChannel
 from apps.clients.models import Client
+from apps.products.models import Product
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -100,6 +101,27 @@ class OrderListSerializer(serializers.ModelSerializer):
     packaged_by_name = serializers.CharField(
         source='packaged_by.get_full_name', read_only=True, default=None,
     )
+    # Phase B/C/D — clean derived top-layer status, with human-readable labels.
+    # These are persisted-but-derived (lifecycle service is the only writer); the
+    # serializer exposes them read-only so the UI reads one clean status set.
+    order_status_display = serializers.CharField(
+        source='get_order_status_display', read_only=True,
+    )
+    confirmation_status_display = serializers.CharField(
+        source='get_confirmation_status_display', read_only=True,
+    )
+    delivery_method_display = serializers.CharField(
+        source='get_delivery_method_display', read_only=True,
+    )
+    stock_status_display = serializers.CharField(
+        source='get_stock_status_display', read_only=True,
+    )
+    priority_level_display = serializers.CharField(
+        source='get_priority_level_display', read_only=True,
+    )
+    sync_status_display = serializers.CharField(
+        source='get_sync_status_display', read_only=True,
+    )
 
     class Meta:
         model  = Order
@@ -143,7 +165,23 @@ class OrderListSerializer(serializers.ModelSerializer):
             'edit_lock_heartbeat_at', 'edit_lock_expires_at', 'edit_lock_token',
             # Sync
             'synced_at',
+            # Phase B/C/D — clean derived top-layer status (the single status
+            # set the UI reads). Read-only: written only by the lifecycle service.
+            'order_status', 'order_status_display',
+            'confirmation_status', 'confirmation_status_display',
+            'delivery_method', 'delivery_method_display',
+            'stock_status', 'stock_status_display',
+            'priority_level', 'priority_level_display',
+            'sync_status', 'sync_status_display',
+            'sync_error_message', 'last_sync_at',
             'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            # Derived fields must never be set through the API — the lifecycle
+            # service is the only writer. Guards against future writable subclasses.
+            'order_status', 'confirmation_status', 'delivery_method',
+            'stock_status', 'priority_level', 'sync_status',
+            'sync_error_message', 'last_sync_at',
         ]
 
     @staticmethod
@@ -211,7 +249,7 @@ class OrderDetailSerializer(OrderListSerializer):
         lines_qs = (
             obj.lines
             .filter(is_deleted=False)
-            .exclude(product__product_type='packaging')
+            .exclude(product__product_type=Product.ProductType.PACKAGING_ITEM)
             .select_related('product')
         )
         return OrderLineSerializer(lines_qs, many=True).data
@@ -219,7 +257,7 @@ class OrderDetailSerializer(OrderListSerializer):
     def get_packaging_lines(self, obj):
         lines_qs = (
             obj.lines
-            .filter(is_deleted=False, product__product_type='packaging')
+            .filter(is_deleted=False, product__product_type=Product.ProductType.PACKAGING_ITEM)
             .select_related('product')
         )
         return OrderLineSerializer(lines_qs, many=True).data
@@ -338,6 +376,21 @@ class POSOrderCreateSerializer(serializers.Serializer):
     total          = serializers.DecimalField(max_digits=14, decimal_places=2, required=False)
 
 
+class ManualOrderCreateSerializer(POSOrderCreateSerializer):
+    """Back-office (Order Manager) order creation — ``source=MANUAL``.
+
+    Identical request shape to the POS serializer, but it represents an order
+    an admin keys in by hand rather than a till sale, so the default workflow
+    status is ``processing`` (a new order awaiting fulfilment) instead of
+    ``completed``. The endpoint that consumes this serializer does NOT force
+    ``outcome=CONFIRMED`` / ``payment_status=PAID`` / POS validation, leaving
+    the POS checkout path untouched.
+    """
+    status = serializers.ChoiceField(
+        choices=['pending', 'processing', 'completed'], default='processing',
+    )
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Status update
 # ═════════════════════════════════════════════════════════════════════════════
@@ -449,6 +502,20 @@ class OrderCancelOutcomeSerializer(serializers.Serializer):
         help_text='Why the order is being cancelled',
     )
     note = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class ManualTransitionSerializer(serializers.Serializer):
+    """Admin/manager-only backward override of the clean ``order_status``.
+
+    ``target`` is one of the documented backward moves (re-validated by the
+    lifecycle service against the current derived status). ``reason`` is
+    mandatory and written to the MANUAL_STATUS_OVERRIDE audit log.
+    """
+    target = serializers.ChoiceField(choices=Order.OrderStatus.choices)
+    reason = serializers.CharField(
+        min_length=3, max_length=1000,
+        help_text='Why the status is being manually rolled back (audited).',
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════════════

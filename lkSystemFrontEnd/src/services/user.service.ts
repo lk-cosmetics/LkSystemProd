@@ -177,15 +177,10 @@ class UserService {
     id: number,
     data: AdminChangePasswordRequest
   ): Promise<ChangePasswordResponse> {
-    console.log('📤 Admin Reset Password - Sending request:', {
-      endpoint: `${AUTH_CONFIG.USER_ENDPOINT}${id}/change_password/`,
-      data,
-    });
     const response = await apiClient.post<ChangePasswordResponse>(
       `${AUTH_CONFIG.USER_ENDPOINT}${id}/change_password/`,
       data
     );
-    console.log('📥 Admin Reset Password - Response:', response.data);
     return response.data;
   }
 

@@ -31,6 +31,13 @@ from apps.inventory.models import SalesChannelInventory
 
 
 def _user_scoped_channel_ids(user):
+    # Delegate to the central scope helper so a Super Admin inside a company
+    # workspace is limited to that company's channels (and to the active brand
+    # when one is focused). Returns None only in global mode (no company).
+    from apps.rbac.services import visible_sales_channel_ids
+    helper_ids = visible_sales_channel_ids(user)
+    if helper_ids is not None:
+        return helper_ids
     if user.is_superuser:
         return None
     try:
@@ -85,13 +92,13 @@ class ProductViewSet(viewsets.ModelViewSet):
 
         qs = qs.select_related('brand').prefetch_related('categories', 'sales_channel_inventories')
 
-        if user.is_superuser:
-            return qs
-        # ``visible_brand_ids`` returns the union of allowed_brands AND
-        # every brand of the user's current_company (when the user holds
-        # a company-scoped RBAC role like CEO). That fixes the previous
-        # over-narrowing where a CEO with a single allowed_brand only saw
-        # one brand's products instead of all the company's products.
+        # Scope by the brands the user can reach. ``visible_brand_ids`` already
+        # scopes a Super Admin to their actively-selected company (workspace
+        # context) and narrows to the active brand when one is focused; it
+        # returns None ONLY when there is no company selected (global mode).
+        # So we must NOT short-circuit on is_superuser here, otherwise the
+        # selected-company context would be ignored and products from other
+        # companies would leak into the list.
         from apps.rbac.services import visible_brand_ids
         brand_ids = visible_brand_ids(user)
         if brand_ids is None:
@@ -284,7 +291,11 @@ class ProductViewSet(viewsets.ModelViewSet):
 
         products = list(
             Product.objects
-            .filter(brand=sales_channel.brand, status=Product.ProductStatus.PUBLISH)
+            .filter(
+                brand=sales_channel.brand,
+                status=Product.ProductStatus.PUBLISH,
+                product_type__in=Product.SELLABLE_TYPES,  # POS only sells resell_product + pack
+            )
             .order_by('name')
         )
         product_ids = [product.id for product in products]
@@ -577,7 +588,14 @@ class ProductViewSet(viewsets.ModelViewSet):
         skipped = 0
         errors = []
 
-        VALID_TYPES = {'resell', 'packaging', 'finished', 'component', 'raw_material'}
+        VALID_TYPES = {'resell_product', 'pack', 'component', 'packaging_item'}
+        # Accept legacy CSV exports and map them onto the canonical taxonomy.
+        LEGACY_TYPE_ALIASES = {
+            'resell': 'resell_product',
+            'finished': 'resell_product',
+            'packaging': 'packaging_item',
+            'raw_material': 'component',
+        }
         VALID_STATUS = set(self.BULK_STATUS_CHOICES)
 
         def to_decimal(raw):
@@ -611,6 +629,10 @@ class ProductViewSet(viewsets.ModelViewSet):
                     errors.append({'row': line_num, 'message': str(exc)})
                     continue
 
+                if payload['product_type']:
+                    payload['product_type'] = LEGACY_TYPE_ALIASES.get(
+                        payload['product_type'], payload['product_type']
+                    )
                 if payload['product_type'] and payload['product_type'] not in VALID_TYPES:
                     skipped += 1
                     errors.append({
@@ -654,7 +676,7 @@ class ProductViewSet(viewsets.ModelViewSet):
                             'message': 'name is required to create a new product',
                         })
                         continue
-                    clean.setdefault('product_type', 'resell')
+                    clean.setdefault('product_type', 'resell_product')
                     clean.setdefault('status', 'publish')
                     clean.setdefault('purchase_price', Decimal('0'))
                     clean.setdefault('sales_price', Decimal('0'))
