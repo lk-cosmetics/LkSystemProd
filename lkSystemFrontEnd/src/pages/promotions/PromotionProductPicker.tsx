@@ -99,7 +99,10 @@ function PromotionProductPickerImpl({ brandId, selected, onChange }: Props) {
       })
       .then(page => {
         if (cancelled) return;
-        setResults(page.results.filter(p => p.product_type === 'resell'));
+        // Promotions apply to sellable items only (resell_product / pack).
+        setResults(page.results.filter(
+          p => p.product_type === 'resell_product' || p.product_type === 'pack',
+        ));
       })
       .catch(() => {
         if (cancelled) return;
@@ -171,10 +174,10 @@ function PromotionProductPickerImpl({ brandId, selected, onChange }: Props) {
           });
           return;
         }
-        if (match.product_type !== 'resell') {
+        if (match.product_type !== 'resell_product' && match.product_type !== 'pack') {
           setScanFeedback({
             type: 'error',
-            message: `"${match.name}" is not a resell product.`,
+            message: `"${match.name}" is not a sellable product.`,
           });
           return;
         }

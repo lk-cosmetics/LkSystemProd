@@ -41,6 +41,10 @@ class LkSystemTokenObtainPairSerializer(TokenObtainPairSerializer):
         token['matricule'] = user.matricule
         token['email'] = user.email
         token['full_name'] = user.get_full_name()
+        # Capability flag (not a role-name): true only for Django superusers,
+        # i.e. the platform owner. The frontend uses it as the single root
+        # bypass; every other capability is resolved from `permissions`.
+        token['is_superuser'] = user.is_superuser
 
         # ── RBAC: dynamic roles & permissions ──
         from apps.rbac.services import PermissionService
@@ -106,10 +110,15 @@ class LkSystemTokenObtainPairSerializer(TokenObtainPairSerializer):
             'role': rbac_roles[0] if rbac_roles else None,
             'roles': rbac_roles,
             'permissions': rbac_perms,
+            'is_superuser': user.is_superuser,
             'can_switch_brands': can_switch,
             'company_id': (
                 user.current_company.id if user.current_company else None
             ),
+            'company_name': (
+                user.current_company.name if user.current_company else None
+            ),
+            'current_brand_id': user.current_brand_id,
             'allowed_brand_ids': user.get_allowed_brand_ids(),
         }
 
@@ -211,9 +220,10 @@ class UserListSerializer(serializers.ModelSerializer):
         return obj.get_full_name()
 
     def get_role_name(self, obj):
-        from apps.rbac.services import PermissionService
-        names = PermissionService.get_user_role_names(obj)
-        return names[0] if names else None
+        # Use the prefetched ``user_roles__role`` (see UserViewSet.get_queryset)
+        # to avoid one query per row on the list endpoint.
+        roles = list(obj.user_roles.all())
+        return roles[0].role.name if roles else None
 
     def get_avatar(self, obj):
         """Return the profile avatar URL (absolute if the request is in
@@ -228,7 +238,10 @@ class UserListSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(url) if request else url
 
     def get_allowed_brand_names(self, obj):
-        return list(obj.allowed_brands.values_list('name', flat=True))
+        # Use the prefetched ``allowed_brands`` (model instances) rather than
+        # ``.values_list(...)``, which would issue a fresh query per row and
+        # defeat the prefetch — the source of the user-list N+1.
+        return [brand.name for brand in obj.allowed_brands.all()]
 
 
 class UserDetailSerializer(serializers.ModelSerializer):
@@ -367,13 +380,42 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
         }
     
     def validate(self, attrs):
-        """Validate passwords match and brands belong to company."""
+        """Validate passwords match, brands belong to company, and the
+        chosen role is one the actor is actually allowed to grant."""
         # Password confirmation
         if attrs.get('password') != attrs.get('password_confirm'):
             raise serializers.ValidationError({
                 'password_confirm': 'Passwords do not match.'
             })
-        
+
+        # RBAC isolation + privilege ceiling on the assigned role.
+        role = attrs.get('role_id')
+        request = self.context.get('request')
+        actor = getattr(request, 'user', None) if request else None
+        if role is not None and actor is not None:
+            from apps.rbac.services import PermissionService
+            from apps.rbac.provisioning import assert_within_ceiling
+
+            if not PermissionService.is_platform_admin(actor):
+                # A company-scoped actor may only grant a role owned by their
+                # own company (never a platform role or another tenant's role
+                # or a global template).
+                actor_company_id = getattr(actor, 'current_company_id', None)
+                if role.scope_type == 'platform':
+                    raise serializers.ValidationError({
+                        'role_id': 'You cannot assign a platform role.'
+                    })
+                if not actor_company_id or role.company_id != actor_company_id:
+                    raise serializers.ValidationError({
+                        'role_id': 'You can only assign roles that belong to '
+                                   'your company.'
+                    })
+                # Cannot grant a role more powerful than the actor.
+                assert_within_ceiling(
+                    actor,
+                    role.permissions.values_list('codename', flat=True),
+                )
+
         return attrs
     
     def validate_allowed_brands(self, value):
@@ -1037,10 +1079,22 @@ class InviteEmployeeSerializer(serializers.Serializer):
             if target_rank > inviter_rank:
                 raise serializers.ValidationError({
                     'role_id': (
-                        f"You can't invite a {role.name} ({role.scope_type}-scoped) — "
-                        f"this role outranks your own."
+                        f"You can't invite a {role.name} ({role.scope_type}-scoped) "
+                        f"because this role outranks your own."
                     ),
                 })
+            # Tenant isolation: the role must be one owned by the target
+            # company, never a global template or another tenant's role.
+            if role.scope_type != 'platform' and role.company_id != company.id:
+                raise serializers.ValidationError({
+                    'role_id': 'You can only invite users to roles that belong '
+                               'to this company.'
+                })
+            # Privilege ceiling: cannot grant permissions you do not hold.
+            from apps.rbac.provisioning import assert_within_ceiling
+            assert_within_ceiling(
+                inviter, role.permissions.values_list('codename', flat=True)
+            )
 
         # Validate brands belong to company
         brand_ids = attrs.get('brand_ids', [])

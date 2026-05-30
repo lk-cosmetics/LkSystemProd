@@ -1,3 +1,28 @@
+"""
+Inventory reconciliation tests for ``OrderIngestionService``.
+
+These exercise the stock-movement engine (``_sync_inventory_movements``),
+which fires when an order reaches the local ``COMPLETED`` status. That happens
+immediately for **immediate-sale** sources (POS / manual entry), whose payload
+status maps straight to the local status.
+
+A WooCommerce *import* is deliberately different: it lands as operationally
+``PENDING`` (see the "status separation" rule in ``OrderIngestionService.
+_map_order_fields``) and defers any stock commitment to the fulfilment
+lifecycle, so the call centre can confirm/cancel before stock is touched. That
+deferral is asserted separately in
+``test_woocommerce_import_defers_stock_to_lifecycle`` here, and end-to-end in
+``apps.orders.tests.test_lifecycle_service``.
+
+The engine itself is source-agnostic, so we drive it with ``MANUAL`` completed
+sales to test its contract in isolation: idempotency, delta adjustment,
+reversal on cancellation, and the insufficient-stock guard.
+
+Run with::
+
+    python manage.py test apps.orders.tests.test_inventory_reconciliation
+"""
+
 from django.test import TestCase
 
 from apps.brands.models import Brand
@@ -24,7 +49,7 @@ class OrderInventoryReconciliationTests(TestCase):
             name='Finished Perfume',
             wc_product_id=101,
             barcode='PERF-101',
-            product_type=Product.ProductType.FINISHED,
+            product_type=Product.ProductType.RESELL_PRODUCT,
             sales_price='100.00',
         )
         self.inventory = SalesChannelInventory.objects.create(
@@ -60,15 +85,25 @@ class OrderInventoryReconciliationTests(TestCase):
             ],
         }
 
+    def ingest_sale(self, *, source=Order.Source.MANUAL, **payload_kwargs):
+        """Ingest one immediate-sale order.
+
+        ``MANUAL`` (and ``POS``) map the payload status straight to the local
+        status, so a ``completed`` sale reaches the reconciliation engine — the
+        path under test here. (A ``WOOCOMMERCE`` import would land as ``PENDING``
+        and skip the engine; that deferral is covered by its own test.)
+        """
+        return self.service.ingest(self.payload(**payload_kwargs), self.channel, source=source)
+
     def refresh_inventory(self):
         self.inventory.refresh_from_db()
         return self.inventory
 
     def test_completed_order_sync_is_idempotent(self):
-        self.service.ingest(self.payload(quantity=2), self.channel)
+        self.ingest_sale(quantity=2)
         self.assertEqual(self.refresh_inventory().quantity, 8)
 
-        self.service.ingest(self.payload(quantity=2), self.channel)
+        self.ingest_sale(quantity=2)
 
         self.assertEqual(self.refresh_inventory().quantity, 8)
         self.assertEqual(
@@ -80,8 +115,8 @@ class OrderInventoryReconciliationTests(TestCase):
         )
 
     def test_order_quantity_update_adjusts_only_delta(self):
-        self.service.ingest(self.payload(quantity=2), self.channel)
-        self.service.ingest(self.payload(quantity=4), self.channel)
+        self.ingest_sale(quantity=2)
+        self.ingest_sale(quantity=4)
 
         self.assertEqual(self.refresh_inventory().quantity, 6)
         self.assertEqual(
@@ -92,10 +127,10 @@ class OrderInventoryReconciliationTests(TestCase):
         )
 
     def test_cancelled_order_reverses_previous_sale_movement(self):
-        self.service.ingest(self.payload(quantity=3), self.channel)
+        self.ingest_sale(quantity=3)
         self.assertEqual(self.refresh_inventory().quantity, 7)
 
-        self.service.ingest(self.payload(status='cancelled', quantity=3), self.channel)
+        self.ingest_sale(status='cancelled', quantity=3)
 
         self.assertEqual(self.refresh_inventory().quantity, 10)
         self.assertEqual(
@@ -109,7 +144,28 @@ class OrderInventoryReconciliationTests(TestCase):
 
     def test_insufficient_stock_raises_error_and_keeps_stock_unchanged(self):
         with self.assertRaises(OrderIngestionError):
-            self.service.ingest(self.payload(quantity=11), self.channel)
+            self.ingest_sale(quantity=11)
 
         self.assertEqual(self.refresh_inventory().quantity, 10)
         self.assertFalse(InventoryMovement.objects.exists())
+
+    def test_woocommerce_import_defers_stock_to_lifecycle(self):
+        # A freshly-imported WooCommerce order is operationally PENDING: the call
+        # centre must confirm and fulfil it before stock is committed. So the
+        # import must NOT deduct stock, even when WooCommerce already marks it
+        # 'completed'. (Stock is committed later through the fulfilment
+        # lifecycle — see test_lifecycle_service.)
+        order, _ = self.service.ingest(
+            self.payload(status='completed', quantity=2),
+            self.channel,
+            source=Order.Source.WOOCOMMERCE,
+        )
+
+        self.assertEqual(order.status, Order.Status.PENDING)
+        self.assertEqual(order.wc_status, 'completed')
+        self.assertEqual(self.refresh_inventory().quantity, 10)
+        self.assertFalse(
+            InventoryMovement.objects.filter(
+                movement_type=InventoryMovement.MovementType.SALE,
+            ).exists()
+        )

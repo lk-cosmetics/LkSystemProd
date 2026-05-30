@@ -60,7 +60,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useAuthStore } from '@/store/authStore';
-import { hasRole } from '@/hooks/useAuth';
+import { isPlatformAdmin } from '@/hooks/useAuth';
 import {
   useBrands,
   useCompanies,
@@ -73,7 +73,7 @@ import { getMediaUrl } from '@/utils/helpers';
 
 export default function BrandsPage() {
   const { user } = useAuthStore();
-  const isSuperAdmin = hasRole(user, 'SuperAdmin');
+  const isSuperAdmin = isPlatformAdmin(user);
 
   // React Query - Fetch data with caching
   const {

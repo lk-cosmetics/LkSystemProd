@@ -129,6 +129,8 @@ SEED_PERMISSIONS: list[tuple[str, str, str, str]] = [
      'View soft-deleted orders'),
     ('restore_soft_deleted_orders', 'Restore Deleted Orders', 'orders',
      'Restore soft-deleted orders'),
+    ('manual_status_override', 'Manual Status Override', 'orders',
+     'Manually roll an order back to an earlier status (admin/manager only, reason required)'),
 
     # POS
     ('use_pos', 'Use POS', 'pos',
@@ -185,6 +187,14 @@ SEED_PERMISSIONS: list[tuple[str, str, str, str]] = [
      'View application settings'),
     ('edit_settings', 'Edit Settings', 'settings',
      'Modify application settings and configuration'),
+
+    # Sensitive / cross-cutting capabilities (separately protected)
+    ('can_view_financial_reports', 'View Financial Reports', 'reports',
+     'View revenue, margins and other sensitive financial numbers'),
+    ('can_invite_users', 'Invite Users', 'users',
+     'Send e-mail invitations to onboard new users'),
+    ('can_assign_roles', 'Assign Roles', 'roles',
+     'Assign or revoke roles for other users'),
 ]
 
 # Legacy codename → new codenames mapping (for migration)
@@ -209,6 +219,14 @@ LEGACY_PERMISSION_MAP: dict[str, list[str]] = {
 # ── System roles ────────────────────────────────────────────────────────
 # scope_type: platform / company / brand / channel
 # permissions: list of codenames or '__all__' for every permission
+#
+# Six business roles (see ``RBAC_ROLE_MATRIX.md`` / report chapter 5):
+#   1. Super Admin            — platform, full access
+#   2. CEO / Company Manager  — company, full access incl. financial numbers
+#   3. Manager                — company, broad incl. financial reports, no settings
+#   4. Brand Manager          — brand, full control of one brand
+#   5. Employee               — operational online-order processing only
+#   6. Cashier                — POS / cashier interface only
 SYSTEM_ROLES: dict[str, dict] = {
     'Super Admin': {
         'description': 'Full platform access. Can manage all companies, brands, and system settings.',
@@ -216,12 +234,19 @@ SYSTEM_ROLES: dict[str, dict] = {
         'permissions': '__all__',
     },
     'CEO': {
-        'description': 'Full access within a company. Can manage all brands, users, and operations.',
+        'description': (
+            'Company Manager / CEO. Full access within a single company, '
+            'including financial numbers, user invitations and role assignment.'
+        ),
         'scope_type': 'company',
         'permissions': [
             'view_dashboard',
             'view_bi_dashboard',
-            'view_company', 'create_company', 'edit_company', 'delete_company',
+            # NOTE: create_company / delete_company are platform-only (creating
+            # or deleting a tenant). A CEO manages their OWN company settings
+            # via view_company + edit_company, but cannot create or delete
+            # companies.
+            'view_company', 'edit_company',
             'view_brands', 'create_brands', 'edit_brands', 'delete_brands', 'switch_brands',
             'view_sales_channels', 'create_sales_channels', 'edit_sales_channels', 'delete_sales_channels',
             'view_products', 'create_products', 'edit_products', 'delete_products',
@@ -236,24 +261,32 @@ SYSTEM_ROLES: dict[str, dict] = {
             'view_delivery_tracking_orders', 'process_return_orders',
             'restore_stock_from_return_orders', 'soft_delete_orders',
             'view_soft_deleted_orders', 'restore_soft_deleted_orders',
+            'manual_status_override',
             'use_pos',
             'view_clients', 'create_clients', 'edit_clients', 'delete_clients',
             'view_promotions', 'create_promotions', 'edit_promotions', 'delete_promotions',
             'view_users', 'create_users', 'edit_users', 'delete_users',
             'view_roles', 'create_roles', 'edit_roles', 'delete_roles',
-            'view_reports', 'export_data',
+            'view_reports', 'export_data', 'can_view_financial_reports',
             'view_settings', 'edit_settings',
+            'can_invite_users', 'can_assign_roles',
         ],
     },
     'Manager': {
-        'description': 'Manages operations within assigned brands.',
-        'scope_type': 'brand',
+        'description': (
+            'Company-level manager. Broad operational control similar to the '
+            'CEO, including financial reports, but without company settings. '
+            'Can invite employees and assign allowed roles within the company.'
+        ),
+        'scope_type': 'company',
         'permissions': [
             'view_dashboard',
-            'view_brands', 'view_sales_channels',
-            'view_products', 'create_products', 'edit_products',
-            'view_categories', 'create_categories', 'edit_categories',
-            'view_inventory', 'create_inventory', 'edit_inventory',
+            'view_company',
+            'view_brands', 'create_brands', 'edit_brands', 'switch_brands',
+            'view_sales_channels', 'create_sales_channels', 'edit_sales_channels', 'delete_sales_channels',
+            'view_products', 'create_products', 'edit_products', 'delete_products',
+            'view_categories', 'create_categories', 'edit_categories', 'delete_categories',
+            'view_inventory', 'create_inventory', 'edit_inventory', 'delete_inventory',
             'view_manufacturing', 'create_manufacturing', 'edit_manufacturing',
             'send_to_factory', 'receive_from_factory',
             'view_orders', 'create_orders', 'edit_orders',
@@ -263,16 +296,75 @@ SYSTEM_ROLES: dict[str, dict] = {
             'view_delivery_tracking_orders', 'process_return_orders',
             'restore_stock_from_return_orders', 'soft_delete_orders',
             'view_soft_deleted_orders', 'restore_soft_deleted_orders',
+            'manual_status_override',
             'use_pos',
-            'view_clients', 'create_clients', 'edit_clients',
-            'view_promotions', 'create_promotions', 'edit_promotions',
-            'view_users',
+            'view_clients', 'create_clients', 'edit_clients', 'delete_clients',
+            'view_promotions', 'create_promotions', 'edit_promotions', 'delete_promotions',
+            'view_users', 'create_users', 'edit_users',
+            'view_roles',
+            'view_reports', 'export_data', 'can_view_financial_reports',
+            'can_invite_users', 'can_assign_roles',
+        ],
+    },
+    'Brand Manager': {
+        'description': (
+            'Full control of one or more assigned brands: stock, orders, '
+            'cashiers, employees, sales channels, promotions and brand '
+            'reports. No company-wide settings or financial numbers.'
+        ),
+        'scope_type': 'brand',
+        'permissions': [
+            'view_dashboard',
+            'view_brands',
+            'view_sales_channels', 'create_sales_channels', 'edit_sales_channels', 'delete_sales_channels',
+            'view_products', 'create_products', 'edit_products', 'delete_products',
+            'view_categories', 'create_categories', 'edit_categories',
+            'view_inventory', 'create_inventory', 'edit_inventory', 'delete_inventory',
+            'view_manufacturing', 'create_manufacturing', 'edit_manufacturing',
+            'send_to_factory', 'receive_from_factory',
+            'view_orders', 'create_orders', 'edit_orders',
+            'import_orders', 'update_unconfirmed_orders', 'update_confirmed_orders',
+            'confirm_orders', 'delay_orders', 'cancel_orders_lifecycle',
+            'send_to_pos_orders', 'validate_pos_orders', 'send_to_delivery_orders',
+            'view_delivery_tracking_orders', 'process_return_orders',
+            'restore_stock_from_return_orders', 'soft_delete_orders',
+            'view_soft_deleted_orders', 'restore_soft_deleted_orders',
+            'manual_status_override',
+            'use_pos',
+            'view_clients', 'create_clients', 'edit_clients', 'delete_clients',
+            'view_promotions', 'create_promotions', 'edit_promotions', 'delete_promotions',
+            'view_users', 'create_users', 'edit_users',
             'view_roles',
             'view_reports', 'export_data',
+            'can_invite_users', 'can_assign_roles',
+        ],
+    },
+    'Employee': {
+        'description': (
+            'Operational role for online-order processing. Views and advances '
+            'orders (confirm, change status, send to delivery, returns). No '
+            'access to users, roles, settings, stock or financial reports.'
+        ),
+        'scope_type': 'company',
+        'permissions': [
+            'view_dashboard',
+            'view_products',
+            'view_orders',
+            'update_unconfirmed_orders', 'update_confirmed_orders',
+            'confirm_orders', 'delay_orders', 'cancel_orders_lifecycle',
+            'send_to_pos_orders', 'send_to_delivery_orders',
+            'view_delivery_tracking_orders', 'process_return_orders',
+            'restore_stock_from_return_orders',
+            'view_clients',
+            'view_promotions',
         ],
     },
     'Cashier': {
-        'description': 'POS operator with order creation rights.',
+        'description': (
+            'POS / cashier operator. Creates and manages sales from the '
+            'cashier interface and sees the daily closing summary. No access '
+            'to admin pages, settings, users, roles or global reports.'
+        ),
         'scope_type': 'channel',
         'permissions': [
             'view_products',
@@ -285,47 +377,15 @@ SYSTEM_ROLES: dict[str, dict] = {
             'view_promotions',
         ],
     },
-    'Stock Keeper': {
-        'description': 'Manages inventory and stock movements.',
-        'scope_type': 'brand',
-        'permissions': [
-            'view_dashboard',
-            'view_products',
-            'view_inventory', 'create_inventory', 'edit_inventory',
-            'view_manufacturing',
-            'send_to_factory', 'receive_from_factory',
-            'view_orders',
-            'view_delivery_tracking_orders',
-        ],
-    },
-    'Sales Rep': {
-        'description': 'Handles sales and client interactions.',
-        'scope_type': 'channel',
-        'permissions': [
-            'view_dashboard',
-            'view_products',
-            'view_orders', 'create_orders',
-            'update_unconfirmed_orders', 'confirm_orders', 'delay_orders',
-            'cancel_orders_lifecycle', 'send_to_pos_orders', 'validate_pos_orders',
-            'use_pos',
-            'view_clients', 'create_clients', 'edit_clients',
-            'view_promotions',
-        ],
-    },
-    'Viewer': {
-        'description': 'Read-only access across the company.',
-        'scope_type': 'company',
-        'permissions': [
-            'view_dashboard', 'view_company',
-            'view_brands', 'view_sales_channels',
-            'view_products', 'view_categories',
-            'view_inventory',
-            'view_orders',
-            'view_clients',
-            'view_promotions',
-            'view_users', 'view_roles',
-            'view_reports',
-            'view_settings',
-        ],
-    },
 }
+
+# ── Legacy role realignment (used by the data migration) ─────────────────
+# Old seeded roles that are retired in favour of the six-role model.
+# Existing UserRole assignments are remapped to the target role, then the
+# old system role is deleted. ``Viewer`` is not remapped: it is demoted to a
+# non-system, read-only custom role so existing read-only users keep working.
+LEGACY_ROLE_REMAP: dict[str, str] = {
+    'Stock Keeper': 'Brand Manager',
+    'Sales Rep': 'Employee',
+}
+LEGACY_ROLE_DEMOTE: list[str] = ['Viewer']

@@ -31,11 +31,19 @@ class Product(models.Model):
     """
 
     class ProductType(models.TextChoices):
-        RESELL = 'resell', 'Resell Product'
-        PACKAGING = 'packaging', 'Packaging / Emballage'
-        FINISHED = 'finished', 'Finished Product'
+        # Canonical item taxonomy. Exactly four values everywhere in the system.
+        #   RESELL_PRODUCT  – normal product bought & resold (perfume, cosmetic, any WC product)
+        #   PACK            – bundle/pack sold to customers (promo/gift/multi-product pack)
+        #   COMPONENT       – used only in BOM/manufacturing, not sold directly (bottle, cap, label, liquid, raw material)
+        #   PACKAGING_ITEM  – used only during order prep/delivery (shipping box, bag, thank-you card, sticker, gift wrap)
+        # RESELL_PRODUCT + PACK are the only *sellable* types (allowed on customer orders).
+        RESELL_PRODUCT = 'resell_product', 'Resell Product'
+        PACK = 'pack', 'Pack'
         COMPONENT = 'component', 'Component'
-        RAW_MATERIAL = 'raw_material', 'Raw Material'
+        PACKAGING_ITEM = 'packaging_item', 'Packaging Item'
+
+    #: Types that may appear on a customer order (WooCommerce / POS sale lines).
+    SELLABLE_TYPES = ('resell_product', 'pack')
 
     class ProductStatus(models.TextChoices):
         PUBLISH = 'publish', 'Published'
@@ -58,6 +66,14 @@ class Product(models.Model):
         max_length=500, blank=True, default='',
         verbose_name='Image URL',
     )
+    image = models.ImageField(
+        upload_to='products/images/', blank=True, null=True,
+        verbose_name='Uploaded Image',
+        help_text=(
+            'Locally uploaded product image. When set, its served URL is '
+            'mirrored into image_url so every existing display path renders it.'
+        ),
+    )
     product_link = models.URLField(
         max_length=500, blank=True, default='',
         verbose_name='Product Link',
@@ -70,7 +86,7 @@ class Product(models.Model):
     product_type = models.CharField(
         max_length=20,
         choices=ProductType.choices,
-        default=ProductType.RESELL,
+        default=ProductType.RESELL_PRODUCT,
         verbose_name='Product Type',
     )
     status = models.CharField(
@@ -188,9 +204,20 @@ class Product(models.Model):
 
     # ── Pack Validation ──────────────────────────────────────────────────
 
+    @property
+    def is_sellable(self) -> bool:
+        """True when this item may appear on a customer order (resell_product or pack)."""
+        return self.product_type in self.SELLABLE_TYPES
+
     def clean(self):
         super().clean()
+        # Keep the canonical product_type and the legacy is_pack flag in sync.
+        # A pack is represented by BOTH product_type='pack' and is_pack=True so that
+        # existing pack logic (pack_items expansion, get_pack_stock) keeps working.
+        if self.product_type == self.ProductType.PACK:
+            self.is_pack = True
         if self.is_pack:
+            self.product_type = self.ProductType.PACK
             self._validate_pack_items()
         elif self.pack_items:
             raise ValidationError({'pack_items': 'pack_items must be empty when is_pack is False.'})

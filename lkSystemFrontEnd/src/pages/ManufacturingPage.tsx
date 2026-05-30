@@ -497,20 +497,25 @@ export default function ManufacturingPage() {
   const showSuccess = (message: string) => setSuccessMessage(message);
   const showError = (message: string) => setErrorMessage(message);
 
+  // A BOM produces a sellable finished good. Per the canonical taxonomy that is
+  // a ``resell_product`` (perfume / cosmetic / normal product) — never a pack,
+  // component or packaging item. The backend enforces the same rule.
   const finishedProducts = useMemo(
     () =>
       products.filter(
         product =>
-          (product.product_type === 'resell' || product.product_type === 'finished') &&
+          product.product_type === 'resell_product' &&
           !product.is_pack &&
           !product.is_deleted
       ),
     [products]
   );
 
-  const packagingProducts = useMemo(
+  // BOM line items may only reference ``component`` products (bottle, cap,
+  // label, liquid, raw material) — not packaging items, not sellable goods.
+  const componentProducts = useMemo(
     () =>
-      products.filter(product => product.product_type === 'packaging' && !product.is_deleted),
+      products.filter(product => product.product_type === 'component' && !product.is_deleted),
     [products]
   );
 
@@ -725,7 +730,8 @@ export default function ManufacturingPage() {
       const created = await productService.createProduct({
         name,
         barcode: quickPackagingForm.barcode.trim() || undefined,
-        product_type: 'packaging',
+        // Quick-create from the BOM dialog always produces a BOM component.
+        product_type: 'component',
         status: 'publish',
         brand: selectedBomFinishedProduct?.brand ?? undefined,
         purchase_price: '0.00',
@@ -1326,7 +1332,7 @@ export default function ManufacturingPage() {
         open={bomDialogOpen}
         onOpenChange={setBomDialogOpen}
         title={editingBomId ? 'Edit Bill of Materials' : 'Create Bill of Materials'}
-        description="Link a finished product to the packaging components needed to produce one unit."
+        description="Link a finished product (resell product) to the components needed to produce one unit."
         wide={true}
         footer={
           <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
@@ -1374,14 +1380,14 @@ export default function ManufacturingPage() {
 
             <div className="rounded-lg border bg-muted/20 p-4">
               <div className="mb-3">
-                <h3 className="text-sm font-semibold">Create missing packaging product</h3>
+                <h3 className="text-sm font-semibold">Create missing component product</h3>
                 <p className="text-xs text-muted-foreground">
-                  Add a bottle, cap, label, box, or packaging item, with optional opening stock.
+                  Add a bottle, cap, label, liquid, or other component, with optional opening stock.
                 </p>
               </div>
               <div className="grid gap-3 grid-cols-1 md:grid-cols-[1fr_0.7fr]">
                 <div>
-                  <Label>Packaging name</Label>
+                  <Label>Component name</Label>
                   <Input
                     className="mt-1"
                     value={quickPackagingForm.name}
@@ -1483,40 +1489,28 @@ export default function ManufacturingPage() {
                   <h3 className="text-sm font-semibold">Components</h3>
                   <p className="text-xs text-muted-foreground">Quantities are required for one finished product.</p>
                 </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    setBomForm(current => ({
-                      ...current,
-                      items: [
-                        ...current.items,
-                        { component: '', quantity_per_unit: '1', notes: '' },
-                      ],
-                    }))
-                  }
-                >
-                  <PackagePlus className="mr-2 h-4 w-4" />
-                  Add component
-                </Button>
+                <span className="text-xs text-muted-foreground">
+                  {bomForm.items.length}{' '}
+                  {bomForm.items.length === 1 ? 'component' : 'components'}
+                </span>
               </div>
 
-              {bomForm.items.map((item, index) => (
+              <div className="space-y-3 max-h-[360px] overflow-y-auto pr-1">
+                {bomForm.items.map((item, index) => (
                 <div
                   key={`${index}-${item.component || 'new'}`}
                   className="grid gap-3 rounded-lg border p-3 grid-cols-1 sm:grid-cols-2 md:grid-cols-[1.4fr_150px_1fr_auto] md:items-start"
                 >
                   <div>
-                    <Label className="text-xs">Packaging component</Label>
+                    <Label className="text-xs">Component</Label>
                     <ProductSearchSelect
-                      products={packagingProducts.filter(
+                      products={componentProducts.filter(
                         product => String(product.id) !== bomForm.finished_product
                       )}
                       value={item.component}
                       onChange={value => updateBomItem(index, 'component', value)}
                       placeholder="Search or scan component..."
-                      emptyMessage="No packaging component found"
+                      emptyMessage="No component found"
                     />
                   </div>
                   <div>
@@ -1557,7 +1551,26 @@ export default function ManufacturingPage() {
                     <Trash2 className="h-4 w-4 text-destructive" />
                   </Button>
                 </div>
-              ))}
+                ))}
+              </div>
+
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full border-dashed"
+                onClick={() =>
+                  setBomForm(current => ({
+                    ...current,
+                    items: [
+                      ...current.items,
+                      { component: '', quantity_per_unit: '1', notes: '' },
+                    ],
+                  }))
+                }
+              >
+                <PackagePlus className="mr-2 h-4 w-4" />
+                Add component
+              </Button>
             </div>
 
             <div>

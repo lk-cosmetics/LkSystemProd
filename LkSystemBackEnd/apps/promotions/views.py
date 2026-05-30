@@ -854,27 +854,27 @@ class PromotionChannelRuleViewSet(viewsets.ModelViewSet):
     filterset_class = PromotionChannelRuleFilter
 
     def get_queryset(self):
-        """Filter by user permissions via promotion → brand → company chain."""
+        """
+        Scope promotions to the brands the user can reach.
+
+        Routed through ``visible_brand_ids`` so it is workspace-aware: a Super
+        Admin is scoped to their selected company (and to the active brand when
+        focused), a CEO sees every brand of their company, and brand/channel
+        users see only their brands. None = global mode (no company selected).
+        """
         queryset = super().get_queryset()
         user = self.request.user
 
         if not user.is_authenticated:
             return queryset.none()
 
-        if user.is_superuser or user.is_staff:
+        from apps.rbac.services import visible_brand_ids
+        brand_ids = visible_brand_ids(user)
+        if brand_ids is None:
             return queryset
-
-        role = getattr(user, 'role', None)
-        if role and (role.name.upper() == 'SUPERADMIN' or getattr(role, 'is_ceo', False)):
-            return queryset
-
-        allowed_brands = user.allowed_brands.all()
-        if allowed_brands.exists():
-            queryset = queryset.filter(
-                Q(promotion__brand__in=allowed_brands) |
-                Q(promotion__brand__isnull=True)
-            )
-        else:
+        if not brand_ids:
             return queryset.none()
-
-        return queryset
+        return queryset.filter(
+            Q(promotion__brand_id__in=brand_ids) |
+            Q(promotion__brand__isnull=True)
+        )

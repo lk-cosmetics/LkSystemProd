@@ -19,6 +19,7 @@ import {
   hasPermission,
   hasAnyPermission,
   hasAllPermissions,
+  isPosOnlyUser,
 } from '@/hooks/useAuth';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -58,12 +59,7 @@ export default function RoleGuard({
     return <Navigate to="/login" replace />;
   }
 
-  const cashierWorkspace =
-    hasRole(user, 'Cashier') &&
-    !hasRole(user, 'SuperAdmin') &&
-    !hasRole(user, 'Admin') &&
-    !hasRole(user, 'Manager') &&
-    !hasRole(user, 'CEO');
+  const cashierWorkspace = isPosOnlyUser(user);
 
   if (cashierWorkspace && !allowCashierWorkspace && location.pathname !== '/dashboard/pos') {
     return <Navigate to="/dashboard/pos" replace />;

@@ -13,7 +13,7 @@ import {
   useSidebar,
 } from '@/components/ui/sidebar';
 import { useAuthStore } from '@/store/authStore';
-import { hasRole, hasAnyPermission } from '@/hooks/useAuth';
+import { hasAnyPermission, isPosOnlyUser } from '@/hooks/useAuth';
 
 export function NavSecondary({
   items,
@@ -43,12 +43,7 @@ export function NavSecondary({
 
   const visibleItems = items.filter(item => {
     if (!user) return false;
-    const cashierWorkspace =
-      hasRole(user, 'Cashier') &&
-      !hasRole(user, 'SuperAdmin') &&
-      !hasRole(user, 'Admin') &&
-      !hasRole(user, 'Manager') &&
-      !hasRole(user, 'CEO');
+    const cashierWorkspace = isPosOnlyUser(user);
     if (cashierWorkspace && !item.cashierVisible) return false;
     if (item.cashierOnly && !cashierWorkspace) return false;
     if (item.requiredPermissions?.length) {

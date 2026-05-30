@@ -11,7 +11,6 @@ export async function testBackendConnection(): Promise<{
   url: string;
 }> {
   try {
-    console.log('🔍 Testing backend connection to:', API_CONFIG.BASE_URL);
 
     const response = await fetch(API_CONFIG.BASE_URL, {
       method: 'GET',
@@ -39,7 +38,6 @@ export async function testBackendConnection(): Promise<{
 if (import.meta.env.DEV) {
   const result = await testBackendConnection();
   if (result.success) {
-    console.log('✅', result.message);
   } else {
     console.error('❌', result.message);
     console.error('💡 Make sure your backend is running on:', result.url);

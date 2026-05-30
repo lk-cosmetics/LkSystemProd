@@ -24,7 +24,7 @@ class OrderManagementService:
             l.id: l
             for l in order.lines
             .filter(is_deleted=False)
-            .exclude(product__product_type=Product.ProductType.PACKAGING)
+            .exclude(product__product_type=Product.ProductType.PACKAGING_ITEM)
         }
         kept_line_ids = set()
 
@@ -67,7 +67,7 @@ class OrderManagementService:
             order=order,
             is_deleted=False,
         ).exclude(
-            product__product_type=Product.ProductType.PACKAGING,
+            product__product_type=Product.ProductType.PACKAGING_ITEM,
         ).exclude(id__in=kept_line_ids).update(is_deleted=True)
 
         if 'discount_type' in data:

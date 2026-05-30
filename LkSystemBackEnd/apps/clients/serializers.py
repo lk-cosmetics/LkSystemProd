@@ -89,7 +89,8 @@ class ClientCreateSerializer(serializers.ModelSerializer):
             'company',
             'brand', 'reseller',
             'email', 'first_name', 'last_name',
-            'phone', 'client_type', 'date_of_birth', 'address', 'state', 'postcode', 'country',
+            'phone', 'client_type', 'date_of_birth',
+            'address', 'city', 'state', 'postcode', 'country',
             'source', 'sales_channel', 'wc_customer_id', 'notes',
             'points', 'number_of_orders', 'number_of_returns', 'is_blocked',
         ]

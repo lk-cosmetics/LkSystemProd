@@ -33,7 +33,6 @@ class AuthService {
    */
   async login(credentials: LoginRequest): Promise<LoginResponse> {
     try {
-      console.log('🔐 Attempting login to:', AUTH_CONFIG.LOGIN_ENDPOINT);
 
       const response = await apiClient.post<LoginResponse>(
         AUTH_CONFIG.LOGIN_ENDPOINT,
@@ -43,12 +42,10 @@ class AuthService {
         }
       );
 
-      console.log('✅ Login successful');
 
       // Store access token in memory (most secure)
       if (response.data.access) {
         accessTokenMemory = response.data.access;
-        console.log('🔑 Access token stored in memory');
       }
 
       // Store refresh token in memory and localStorage (persists across page refreshes)
@@ -58,7 +55,6 @@ class AuthService {
           AUTH_CONFIG.STORAGE_KEY.REFRESH_TOKEN,
           response.data.refresh
         );
-        console.log('🔄 Refresh token stored in memory and localStorage');
       }
 
       // Store user display data in localStorage (non-sensitive)
@@ -90,8 +86,11 @@ class AuthService {
           role: user.role,
           roles: user.roles ?? (user.role ? [user.role] : []),
           permissions: user.permissions ?? [],
+          is_superuser: user.is_superuser ?? false,
           can_switch_brands: user.can_switch_brands,
           company_id: user.company_id,
+          company_name: user.company_name ?? null,
+          current_brand_id: user.current_brand_id ?? null,
           allowed_brand_ids: user.allowed_brand_ids,
         };
         localStorage.setItem(
@@ -132,6 +131,72 @@ class AuthService {
   }
 
   /**
+   * Switch the active workspace (company and/or brand).
+   *
+   * The backend validates the target, then returns a fresh JWT pair whose
+   * claims reflect the new workspace plus the updated user payload. We store
+   * the new tokens exactly like login and persist the refreshed user so the
+   * change survives a page refresh. The caller is responsible for purging the
+   * React Query cache so no stale data from the previous workspace lingers.
+   */
+  async switchWorkspace(body: {
+    company_id?: number | null;
+    brand_id?: number | null;
+  }): Promise<User> {
+    const response = await apiClient.post(
+      '/api/v1/auth/switch-workspace/',
+      body,
+      { withCredentials: true }
+    );
+    const data = response.data;
+
+    if (data.access) {
+      accessTokenMemory = data.access;
+    }
+    if (data.refresh) {
+      refreshTokenMemory = data.refresh;
+      localStorage.setItem(
+        AUTH_CONFIG.STORAGE_KEY.REFRESH_TOKEN,
+        data.refresh
+      );
+    }
+
+    const user = data.user;
+    const [firstName, ...lastNameParts] = (user.full_name || '').split(' ');
+    const lastName = lastNameParts.join(' ');
+    const transformedUser: User = {
+      ...user,
+      roles: user.roles ?? (user.role ? [user.role] : []),
+      firstName: firstName || '',
+      lastName: lastName || '',
+    };
+
+    const userDisplay = {
+      id: user.id,
+      matricule: user.matricule,
+      firstName: firstName || '',
+      lastName: lastName || '',
+      email: user.email,
+      full_name: user.full_name,
+      role: user.role,
+      roles: user.roles ?? (user.role ? [user.role] : []),
+      permissions: user.permissions ?? [],
+      is_superuser: user.is_superuser ?? false,
+      can_switch_brands: user.can_switch_brands,
+      company_id: user.company_id,
+      company_name: user.company_name ?? null,
+      current_brand_id: user.current_brand_id ?? null,
+      allowed_brand_ids: user.allowed_brand_ids,
+    };
+    localStorage.setItem(
+      AUTH_CONFIG.STORAGE_KEY.USER_DISPLAY,
+      JSON.stringify(userDisplay)
+    );
+
+    return transformedUser;
+  }
+
+  /**
    * Logout user and clear stored data
    */
   logout(): void {
@@ -157,14 +222,12 @@ class AuthService {
     data: ForgotPasswordRequest
   ): Promise<ForgotPasswordResponse> {
     try {
-      console.log('📧 Requesting password reset for:', data.email);
 
       const response = await apiClient.post<ForgotPasswordResponse>(
         AUTH_CONFIG.FORGOT_PASSWORD_ENDPOINT,
         data
       );
 
-      console.log('✅ Password reset email sent');
       return response.data;
     } catch (error) {
       console.error('❌ Forgot password error:', error);
@@ -195,14 +258,12 @@ class AuthService {
     data: ValidateResetTokenRequest
   ): Promise<ValidateResetTokenResponse> {
     try {
-      console.log('🔍 Validating reset token');
 
       const response = await apiClient.post<ValidateResetTokenResponse>(
         AUTH_CONFIG.VALIDATE_RESET_TOKEN_ENDPOINT,
         data
       );
 
-      console.log('✅ Token validation result:', response.data.valid);
       return response.data;
     } catch (error) {
       console.error('❌ Token validation error:', error);
@@ -239,14 +300,12 @@ class AuthService {
     data: ResetPasswordRequest
   ): Promise<ResetPasswordResponse> {
     try {
-      console.log('🔐 Resetting password');
 
       const response = await apiClient.post<ResetPasswordResponse>(
         AUTH_CONFIG.RESET_PASSWORD_ENDPOINT,
         data
       );
 
-      console.log('✅ Password reset successful');
       return response.data;
     } catch (error) {
       console.error('❌ Reset password error:', error);
@@ -321,7 +380,6 @@ class AuthService {
         throw new Error('No refresh token available');
       }
 
-      console.log('🔄 Attempting to refresh access token...');
 
       // Send refresh token in request body
       const response = await apiClient.post<TokenRefreshResponse>(
@@ -330,7 +388,6 @@ class AuthService {
         { withCredentials: true }
       );
 
-      console.log('✅ Token refreshed successfully');
 
       // Store new access token in memory
       accessTokenMemory = response.data.access;
@@ -419,7 +476,6 @@ class AuthService {
         // Try to refresh the access token using HttpOnly cookie
         try {
           await this.refreshToken();
-          console.log('✅ Auth initialized with refreshed token');
         } catch {
           // Refresh failed - clear user data but don't redirect
           // User will be redirected when they try to access a protected route

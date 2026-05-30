@@ -14,6 +14,7 @@ import type {
   OrderOutcome,
   OrderContactStatus,
   OrderReturnExchangeStatus,
+  CleanOrderStatus,
 } from '@/types';
 
 export interface OrderListParams {
@@ -24,6 +25,8 @@ export interface OrderListParams {
   source?: string;
   payment_status?: string;
   flow?: string;
+  /** Phase D — clean lifecycle status filter; single value or comma-separated group. */
+  order_status?: string;
   pos_sales_channel?: number;
   search?: string;
   created_from?: string;
@@ -135,6 +138,21 @@ function toPositiveInt(value: unknown, fallback: number) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
+/** Per-line disposition for a structured return (drives the stock-movement matrix). */
+export interface ReturnLineCondition {
+  line_id: number;
+  /** GOOD → back to stock · DAMAGED → write-off · MISSING → no movement · EXCHANGED → restock + sell replacement. */
+  condition: 'GOOD' | 'DAMAGED' | 'MISSING' | 'EXCHANGED';
+  replacement_product_id?: number;
+}
+
+export interface ProcessReturnOptions {
+  returnReason?: string;
+  returnType?: 'RETURNED' | 'EXCHANGED' | 'DAMAGED' | 'MISSING' | 'CANCELLED_REFUSED' | 'OTHER';
+  /** When provided, each customer line's fate is decided individually on the server. */
+  lineConditions?: ReturnLineCondition[];
+}
+
 export const orderService = {
   /** List orders with filters. */
   async getAll(params?: OrderListParams) {
@@ -152,6 +170,20 @@ export const orderService = {
   async createPOS(payload: POSOrderCreateRequest) {
     const { data } = await apiClient.post<OrderDetail>(
       '/api/v1/orders/pos/',
+      payload
+    );
+    return data;
+  },
+
+  /**
+   * Back-office (Order Manager) manual order creation. Same request shape as
+   * the POS endpoint, but the server tags the order ``source=MANUAL``, defaults
+   * to the ``processing`` workflow status, and does NOT force the
+   * confirmed/paid/POS-validated flags a till sale would.
+   */
+  async createManual(payload: POSOrderCreateRequest) {
+    const { data } = await apiClient.post<OrderDetail>(
+      '/api/v1/orders/manual/',
       payload
     );
     return data;
@@ -337,6 +369,27 @@ export const orderService = {
     return data;
   },
 
+  /**
+   * Phase D — admin/manager backward status override (audited, reason required).
+   * The backend re-validates the move against the live derived status and applies
+   * the documented side-effects; this only sends the requested target + reason.
+   */
+  async manualTransition(id: number, target: CleanOrderStatus, reason: string) {
+    const { data } = await apiClient.post<OrderDetail>(
+      `/api/v1/orders/${id}/manual-transition/`,
+      { target, reason }
+    );
+    return data;
+  },
+
+  /** Phase D — retry a failed/parked WooCommerce status push (runs immediately). */
+  async retrySync(id: number) {
+    const { data } = await apiClient.post<OrderDetail>(
+      `/api/v1/orders/${id}/retry-sync/`
+    );
+    return data;
+  },
+
   async markPickup(id: number, note?: string) {
     const { data } = await apiClient.post<OrderDetail>(
       `/api/v1/orders/${id}/mark-pickup/`,
@@ -379,10 +432,25 @@ export const orderService = {
     return data;
   },
 
-  async processReturn(id: number, returnReason?: string) {
+  /**
+   * Process a return / exchange.
+   *
+   * Pass ``lineConditions`` to decide each customer line individually — the
+   * backend restocks GOOD items, records DAMAGED items as a write-off (no
+   * restock), and leaves MISSING items with no stock movement. Omit it for the
+   * legacy whole-order restoration driven by ``returnType``.
+   */
+  async processReturn(id: number, options?: ProcessReturnOptions) {
+    const body: Record<string, unknown> = {
+      return_reason: options?.returnReason ?? '',
+    };
+    if (options?.returnType) body.return_type = options.returnType;
+    if (options?.lineConditions && options.lineConditions.length > 0) {
+      body.line_conditions = options.lineConditions;
+    }
     const { data } = await apiClient.post<OrderDetail>(
       `/api/v1/orders/${id}/process-return/`,
-      { return_reason: returnReason ?? '' }
+      body,
     );
     return data;
   },

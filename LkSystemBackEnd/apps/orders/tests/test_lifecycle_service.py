@@ -34,7 +34,7 @@ class OrderLifecycleServiceTests(TestCase):
             name='Finished Perfume',
             wc_product_id=101,
             barcode='PERF-101',
-            product_type=Product.ProductType.FINISHED,
+            product_type=Product.ProductType.RESELL_PRODUCT,
             sales_price='100.00',
         )
         self.inventory = SalesChannelInventory.objects.create(
@@ -93,7 +93,15 @@ class OrderLifecycleServiceTests(TestCase):
         self.assertEqual(lines[0].quantity, 4)
 
     def test_return_restores_stock_once(self):
-        order, _ = self.service.ingest(self.payload(quantity=2), self.channel)
+        # A completed sale deducts stock (10 -> 8); processing the return must
+        # restore it exactly once (back to 10) and reject a second attempt.
+        # MANUAL maps the payload status straight to COMPLETED, so the sale
+        # movement is recorded at ingest (a WooCommerce import would defer it).
+        order, _ = self.service.ingest(
+            self.payload(quantity=2), self.channel, source=Order.Source.MANUAL,
+        )
+        self.inventory.refresh_from_db()
+        self.assertEqual(self.inventory.quantity, 8)
         OrderLifecycleService.confirm(order, actor=self.actor)
         order.delivery_status = Order.DeliveryStatus.DELIVERED
         order.save(update_fields=['delivery_status', 'updated_at'])
@@ -232,3 +240,129 @@ class OrderLifecycleServiceTests(TestCase):
                 pos_sales_channel=other_pos,
                 actor=self.actor,
             )
+
+    def two_line_payload(self, *, order_id, product_b, quantity=2):
+        """A completed two-line order: self.product + a second product."""
+        return {
+            'id': order_id,
+            'order_key': f'wc_order_{order_id}',
+            'number': str(order_id),
+            'status': 'completed',
+            'currency': 'TND',
+            'billing': {
+                'first_name': 'Test',
+                'last_name': 'Client',
+                'email': f'client-{order_id}@example.com',
+            },
+            'line_items': [
+                {
+                    'id': 7101,
+                    'product_id': self.product.wc_product_id,
+                    'name': self.product.name,
+                    'sku': self.product.barcode,
+                    'quantity': quantity,
+                    'price': '100.00',
+                    'subtotal': str(quantity * 100),
+                    'total': str(quantity * 100),
+                    'total_tax': '0',
+                },
+                {
+                    'id': 7102,
+                    'product_id': product_b.wc_product_id,
+                    'name': product_b.name,
+                    'sku': product_b.barcode,
+                    'quantity': quantity,
+                    'price': '50.00',
+                    'subtotal': str(quantity * 50),
+                    'total': str(quantity * 50),
+                    'total_tax': '0',
+                },
+            ],
+        }
+
+    def test_structured_return_restocks_good_and_writes_off_damaged(self):
+        # Per-line return disposition (the operator picks, line by line, whether
+        # each returned item goes back to stock or is written off as damaged).
+        # A delivered two-line order is returned GOOD + DAMAGED: only the GOOD
+        # line is restocked (RETURN_IN); the DAMAGED line is NOT restocked but
+        # leaves a DAMAGE audit movement. Locks the matrix in lifecycle_service.
+        product_b = Product.objects.create(
+            brand=self.brand,
+            name='Second Perfume',
+            wc_product_id=102,
+            barcode='PERF-102',
+            product_type=Product.ProductType.RESELL_PRODUCT,
+            sales_price='50.00',
+        )
+        inventory_b = SalesChannelInventory.objects.create(
+            sales_channel=self.channel,
+            product=product_b,
+            quantity=10,
+        )
+
+        order, _ = self.service.ingest(
+            self.two_line_payload(order_id=8001, product_b=product_b),
+            self.channel,
+            source=Order.Source.MANUAL,
+        )
+        # Completed MANUAL sale deducts both lines (10 -> 8 each).
+        self.inventory.refresh_from_db()
+        inventory_b.refresh_from_db()
+        self.assertEqual(self.inventory.quantity, 8)
+        self.assertEqual(inventory_b.quantity, 8)
+
+        OrderLifecycleService.confirm(order, actor=self.actor)
+        order.delivery_status = Order.DeliveryStatus.DELIVERED
+        order.save(update_fields=['delivery_status', 'updated_at'])
+
+        lines = {ln.product_id: ln for ln in OrderLine.objects.filter(order=order)}
+        good_line = lines[self.product.id]
+        damaged_line = lines[product_b.id]
+
+        OrderLifecycleService.process_return(
+            order,
+            actor=self.actor,
+            reason='Mixed-condition return',
+            line_conditions=[
+                {'line_id': good_line.id, 'condition': 'GOOD'},
+                {'line_id': damaged_line.id, 'condition': 'DAMAGED'},
+            ],
+        )
+
+        self.inventory.refresh_from_db()
+        inventory_b.refresh_from_db()
+        good_line.refresh_from_db()
+        damaged_line.refresh_from_db()
+
+        # GOOD line: restocked 8 -> 10 with exactly one RETURN_IN movement.
+        self.assertEqual(self.inventory.quantity, 10)
+        self.assertEqual(good_line.return_condition, OrderLine.ReturnCondition.GOOD)
+        self.assertEqual(
+            InventoryMovement.objects.filter(
+                external_reference=order.order_number,
+                product=self.product,
+                movement_type=InventoryMovement.MovementType.RETURN_IN,
+            ).count(),
+            1,
+        )
+
+        # DAMAGED line: NOT restocked (stays 8) but records a DAMAGE movement
+        # and never a RETURN_IN, so the damaged unit is written off cleanly.
+        self.assertEqual(inventory_b.quantity, 8)
+        self.assertEqual(damaged_line.return_condition, OrderLine.ReturnCondition.DAMAGED)
+        self.assertEqual(
+            InventoryMovement.objects.filter(
+                external_reference=order.order_number,
+                product=product_b,
+                movement_type=InventoryMovement.MovementType.DAMAGE,
+            ).count(),
+            1,
+        )
+        self.assertEqual(
+            InventoryMovement.objects.filter(
+                external_reference=order.order_number,
+                product=product_b,
+                movement_type=InventoryMovement.MovementType.RETURN_IN,
+            ).count(),
+            0,
+        )

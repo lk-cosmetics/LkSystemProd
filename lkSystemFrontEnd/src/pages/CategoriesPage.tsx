@@ -71,7 +71,7 @@ import {
 } from '@/components/ui/select';
 import { Checkbox } from '@/components/ui/checkbox';
 import { useAuthStore } from '@/store/authStore';
-import { hasRole } from '@/hooks/useAuth';
+import { isPlatformAdmin } from '@/hooks/useAuth';
 import { 
   useCategories,
   useSalesChannels,
@@ -322,7 +322,7 @@ export default function CategoriesPage() {
   const selectionMode = useMemo(() => selectedCategories.length > 0, [selectedCategories.length]);
 
   // Check if user is SuperAdmin
-  const isSuperAdmin = hasRole(user, 'SuperAdmin');
+  const isSuperAdmin = isPlatformAdmin(user);
 
   // Helper function to extract error messages
   const extractErrorMessage = (error: unknown): string => {

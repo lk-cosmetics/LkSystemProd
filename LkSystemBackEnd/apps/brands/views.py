@@ -92,9 +92,16 @@ class BrandViewSet(viewsets.ModelViewSet):
 
         if not user.is_authenticated:
             return queryset.none()
-        if user.is_superuser:
-            return queryset
-        if user.user_roles.filter(role__scope_type='platform').exists():
+
+        # Platform admin: scoped to the selected company in workspace context,
+        # otherwise every brand (global mode). A brand focus narrows further.
+        if user.is_superuser or user.user_roles.filter(
+            role__scope_type='platform'
+        ).exists():
+            if getattr(user, 'current_brand_id', None):
+                return queryset.filter(pk=user.current_brand_id)
+            if getattr(user, 'current_company_id', None):
+                return queryset.filter(company_id=user.current_company_id)
             return queryset
 
         scope_q = Q()

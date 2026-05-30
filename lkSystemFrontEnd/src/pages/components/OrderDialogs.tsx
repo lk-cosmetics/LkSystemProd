@@ -12,7 +12,7 @@ import { useMemo, useState, useCallback, useRef, useEffect } from 'react';
 import {
   CheckCircle, XCircle, RefreshCw, Eye, History, Undo2,
   Trash2, Plus, Loader2, Pencil, Store, Globe, Check,
-  Package, AlertCircle, TrendingUp, Search, ChevronDown,
+  Package, Boxes, AlertCircle, TrendingUp, Search, ChevronDown,
   CreditCard, Calendar, User, MapPin, Percent, MessageSquare,
   Phone, MessageCircleMore, CalendarClock, Ban, ThumbsUp, Clock,
   ChevronLeft, ChevronRight, Truck, ShieldAlert, ScanLine,
@@ -44,10 +44,15 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { getMediaUrl } from '@/utils/helpers';
+import { productService } from '@/services/product.service';
+import { useAuthStore } from '@/store/authStore';
 import { POSCameraScanner } from '../pos/POSCameraScanner';
+import { OrderClientSelector } from './OrderClientSelector';
+import { CleanStatusBadge, SyncStatusBadge } from './orderStatusBadges';
 import type {
-  OrderDetail, OrderEditRequest, OrderLogEntry, OrderDiscountType,
-  ProductListItem, SalesChannel, OrderStatus, OrderStockCheck,
+  OrderDetail, OrderLine, OrderEditRequest, OrderLogEntry, OrderDiscountType,
+  ProductListItem, SalesChannel, OrderStatus, OrderStockByChannel,
+  POSOrderCreateRequest, Client,
 } from '@/types';
 import type { OrderStatusFieldsPayload, WooCommerceOrderPreviewResponse } from '@/services/order.service';
 
@@ -216,89 +221,227 @@ function ProductImage({ src, alt, size = 'sm' }: { src?: string | null; alt: str
   );
 }
 
-function StockAvailabilityPanel({ stock }: { stock?: OrderStockCheck }) {
-  if (!stock) return null;
+function titleCase(value: string): string {
+  if (!value) return '';
+  return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
+}
 
-  const websiteOk = stock.can_fulfill_from_website;
-  const posOk = stock.can_fulfill_from_pos;
+/** Compact metric cell used by the mobile stock cards. */
+function StockStat({
+  label, value, tone = 'neutral',
+}: Readonly<{ label: string; value: number; tone?: 'neutral' | 'ok' | 'bad' }>) {
+  const color =
+    tone === 'ok' ? 'text-emerald-700' : tone === 'bad' ? 'text-red-700' : 'text-foreground';
+  return (
+    <div className="rounded-md bg-muted/40 px-1.5 py-1">
+      <p className="text-[9px] uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className={`text-xs font-semibold tabular-nums ${color}`}>{value}</p>
+    </div>
+  );
+}
+
+/**
+ * ChannelStockPanel — per-sales-channel stock breakdown.
+ * Each channel is a sub-tab (horizontally scrollable on small screens).
+ * Desktop renders a dense table; mobile renders stacked metric cards.
+ */
+function ChannelStockPanel({ data }: Readonly<{ data?: OrderStockByChannel }>) {
+  const channels = data?.channels ?? [];
+  const [active, setActive] = useState<string>(
+    () => (channels[0] ? String(channels[0].sales_channel.id) : ''),
+  );
+
+  // Keep the selected sub-tab valid if the payload changes (e.g. after a refetch).
+  useEffect(() => {
+    if (channels.length && !channels.some(c => String(c.sales_channel.id) === active)) {
+      setActive(String(channels[0].sales_channel.id));
+    }
+  }, [channels, active]);
+
+  if (!data || channels.length === 0) {
+    return (
+      <div className="rounded-lg border border-dashed p-8 text-center">
+        <Boxes className="mx-auto size-8 text-muted-foreground/40" />
+        <p className="mt-3 text-sm font-medium">No stock-tracked products</p>
+        <p className="mx-auto mt-1 max-w-sm text-xs text-muted-foreground">
+          This order has no linked products to check against channel inventory.
+          {data && data.unlinked_lines.length > 0 &&
+            ` ${data.unlinked_lines.length} unlinked line(s) are not stock-checked.`}
+        </p>
+      </div>
+    );
+  }
+
+  const hasUnlinked = data.unlinked_lines.length > 0;
 
   return (
-    <div className="rounded-lg border p-4 space-y-3">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Stock availability
-          </h4>
-          <p className="mt-1 text-sm font-medium">
-            {stock.has_warnings ? 'Stock warnings found' : 'All linked products have enough stock'}
+    <div className="space-y-3">
+      <div className="space-y-1">
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Stock by sales channel
+        </h4>
+        <p className="text-xs text-muted-foreground">
+          {data.tracked_product_count} product{data.tracked_product_count === 1 ? '' : 's'} checked
+          across {channels.length} channel{channels.length === 1 ? '' : 's'}. The order channel is
+          used for delivery; the assigned POS is used for in-store fulfilment.
+        </p>
+      </div>
+
+      {hasUnlinked && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
+          <AlertCircle className="mt-0.5 size-4 flex-shrink-0 text-amber-600" />
+          <p className="text-xs text-amber-800">
+            <span className="font-medium">
+              {data.unlinked_lines.length} line{data.unlinked_lines.length === 1 ? '' : 's'} not
+              stock-checked.
+            </span>{' '}
+            Unlinked products (no local match) never move stock and don&apos;t block fulfilment:{' '}
+            {data.unlinked_lines.map(l => l.product_name).join(', ')}
           </p>
         </div>
-        <div className="flex flex-wrap gap-1.5">
-          <Badge variant={websiteOk ? 'default' : 'destructive'} className="text-[10px]">
-            Website {websiteOk ? 'OK' : 'Warning'}
-          </Badge>
-          {posOk !== null && (
-            <Badge variant={posOk ? 'default' : 'destructive'} className="text-[10px]">
-              POS {posOk ? 'OK' : 'Warning'}
-            </Badge>
-          )}
-        </div>
-      </div>
+      )}
 
-      <div className="rounded-md border overflow-hidden">
-        <Table>
-          <TableHeader>
-            <TableRow className="hover:bg-transparent">
-              <TableHead className="h-8 text-xs">Product</TableHead>
-              <TableHead className="h-8 text-xs text-center w-14">Req</TableHead>
-              <TableHead className="h-8 text-xs text-center w-24">Website</TableHead>
-              {stock.pos_channel && <TableHead className="h-8 text-xs text-center w-24">POS</TableHead>}
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {stock.items.map(item => (
-              <TableRow key={item.product_id} className={item.has_warning ? 'bg-amber-50/50' : ''}>
-                <TableCell className="py-2">
+      <Tabs value={active} onValueChange={setActive} className="gap-3">
+        {/* Channel selector — scrolls horizontally when channels overflow. */}
+        <div className="-mx-1 overflow-x-auto px-1 pb-1">
+          <TabsList className="inline-flex h-auto w-max gap-1">
+            {channels.map(ch => {
+              const ChannelIcon = ch.sales_channel.channel_type === 'POS' ? Store : Globe;
+              return (
+                <TabsTrigger
+                  key={ch.sales_channel.id}
+                  value={String(ch.sales_channel.id)}
+                  className="gap-1.5 text-xs"
+                >
+                  <ChannelIcon className="size-3.5" />
+                  <span className="max-w-[120px] truncate">{ch.sales_channel.name}</span>
+                  <span
+                    className={`ml-0.5 inline-block size-2 rounded-full ${ch.can_fulfill ? 'bg-emerald-500' : 'bg-red-500'}`}
+                    aria-hidden
+                  />
+                </TabsTrigger>
+              );
+            })}
+          </TabsList>
+        </div>
+
+        {channels.map(ch => {
+          const ChannelIcon = ch.sales_channel.channel_type === 'POS' ? Store : Globe;
+          return (
+            <TabsContent key={ch.sales_channel.id} value={String(ch.sales_channel.id)} className="space-y-3">
+              {/* Channel header */}
+              <div className="flex flex-col gap-2 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-center gap-2">
+                  <div className={`flex size-9 flex-shrink-0 items-center justify-center rounded-lg ${ch.can_fulfill ? 'bg-emerald-600/10' : 'bg-red-600/10'}`}>
+                    <ChannelIcon className={`size-4 ${ch.can_fulfill ? 'text-emerald-600' : 'text-red-600'}`} />
+                  </div>
                   <div className="min-w-0">
-                    {/* Long product names wrap instead of truncating. */}
-                    <p className="text-xs font-medium whitespace-normal break-words leading-snug">{item.product_name}</p>
-                    {item.issues.length > 0 && (
-                      <p className="mt-0.5 text-[11px] text-amber-700">
-                        {item.issues.join(' ')}
-                      </p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <p className="truncate text-sm font-medium">{ch.sales_channel.name}</p>
+                      {ch.is_order_channel && (
+                        <Badge variant="secondary" className="text-[10px]">Order channel</Badge>
+                      )}
+                      {ch.is_pos_channel && (
+                        <Badge variant="secondary" className="text-[10px]">Assigned POS</Badge>
+                      )}
+                      {!ch.sales_channel.is_active && (
+                        <Badge variant="outline" className="text-[10px] text-muted-foreground">Inactive</Badge>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      {ch.sales_channel.channel_type}
+                      {ch.sales_channel.code ? ` · ${ch.sales_channel.code}` : ''}
+                      {ch.sales_channel.store_type ? ` · ${titleCase(ch.sales_channel.store_type)}` : ''}
+                    </p>
+                  </div>
+                </div>
+                <Badge variant={ch.can_fulfill ? 'default' : 'destructive'} className="w-fit gap-1 text-[11px]">
+                  {ch.can_fulfill ? <CheckCircle className="size-3" /> : <XCircle className="size-3" />}
+                  {ch.can_fulfill ? 'Can fulfil order' : 'Insufficient stock'}
+                </Badge>
+              </div>
+
+              {/* Desktop table */}
+              <div className="hidden overflow-hidden rounded-lg border sm:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead className="h-8 text-xs">Product</TableHead>
+                      <TableHead className="h-8 w-16 text-center text-xs">Required</TableHead>
+                      <TableHead className="h-8 w-16 text-center text-xs">On hand</TableHead>
+                      <TableHead className="h-8 w-16 text-center text-xs">Reserved</TableHead>
+                      <TableHead className="h-8 w-20 text-center text-xs">Sale stock</TableHead>
+                      <TableHead className="h-8 w-24 text-center text-xs">Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {ch.items.map(item => (
+                      <TableRow key={item.product_id} className={item.is_sufficient ? '' : 'bg-red-50/50'}>
+                        <TableCell className="py-2">
+                          <p className="break-words text-xs font-medium leading-snug">{item.product_name}</p>
+                          {item.barcode && (
+                            <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">{item.barcode}</p>
+                          )}
+                          {!item.has_inventory_row && (
+                            <p className="mt-0.5 text-[10px] text-amber-700">No inventory row in this channel</p>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-center text-xs tabular-nums">{item.required_quantity}</TableCell>
+                        <TableCell className="text-center text-xs tabular-nums">{item.quantity}</TableCell>
+                        <TableCell className="text-center text-xs tabular-nums text-muted-foreground">{item.reserved_quantity}</TableCell>
+                        <TableCell className={`text-center text-xs font-semibold tabular-nums ${item.is_sufficient ? 'text-emerald-700' : 'text-red-700'}`}>
+                          {item.available_quantity}
+                        </TableCell>
+                        <TableCell className="text-center">
+                          {item.is_sufficient ? (
+                            <Badge variant="outline" className="gap-1 border-emerald-200 text-[10px] text-emerald-700">
+                              <Check className="size-3" />OK
+                            </Badge>
+                          ) : (
+                            <Badge variant="destructive" className="text-[10px]">Short {item.shortfall}</Badge>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+
+              {/* Mobile cards */}
+              <div className="space-y-2 sm:hidden">
+                {ch.items.map(item => (
+                  <div key={item.product_id} className={`rounded-lg border p-3 ${item.is_sufficient ? '' : 'border-red-200 bg-red-50/50'}`}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="break-words text-xs font-medium leading-snug">{item.product_name}</p>
+                        {item.barcode && (
+                          <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">{item.barcode}</p>
+                        )}
+                      </div>
+                      {item.is_sufficient ? (
+                        <Badge variant="outline" className="gap-1 border-emerald-200 text-[10px] text-emerald-700">
+                          <Check className="size-3" />OK
+                        </Badge>
+                      ) : (
+                        <Badge variant="destructive" className="flex-shrink-0 text-[10px]">Short {item.shortfall}</Badge>
+                      )}
+                    </div>
+                    <div className="mt-2 grid grid-cols-4 gap-1 text-center">
+                      <StockStat label="Req" value={item.required_quantity} />
+                      <StockStat label="On hand" value={item.quantity} />
+                      <StockStat label="Reserved" value={item.reserved_quantity} />
+                      <StockStat label="Sale" value={item.available_quantity} tone={item.is_sufficient ? 'ok' : 'bad'} />
+                    </div>
+                    {!item.has_inventory_row && (
+                      <p className="mt-1.5 text-[10px] text-amber-700">No inventory row in this channel</p>
                     )}
                   </div>
-                </TableCell>
-                <TableCell className="text-center text-xs tabular-nums">{item.required_quantity}</TableCell>
-                <TableCell className="text-center text-xs tabular-nums">
-                  {item.website_available_quantity}
-                </TableCell>
-                {stock.pos_channel && (
-                  <TableCell className="text-center text-xs tabular-nums">
-                    {item.pos_available_quantity ?? 0}
-                  </TableCell>
-                )}
-              </TableRow>
-            ))}
-            {stock.unlinked_lines.map(line => (
-              <TableRow key={`unlinked-${line.line_id}`} className="bg-red-50/60">
-                <TableCell className="py-2 text-xs">
-                  <p className="font-medium">{line.product_name}</p>
-                  <p className="text-[11px] text-red-700">{line.issue}</p>
-                </TableCell>
-                <TableCell className="text-center text-xs">{line.required_quantity}</TableCell>
-                <TableCell className="text-center text-xs">-</TableCell>
-                {stock.pos_channel && <TableCell className="text-center text-xs">-</TableCell>}
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-
-      <p className="text-[11px] text-muted-foreground">
-        Website stock: {stock.website_channel?.name ?? 'Not configured'}
-        {stock.pos_channel ? ` · POS stock: ${stock.pos_channel.name}` : ''}
-      </p>
+                ))}
+              </div>
+            </TabsContent>
+          );
+        })}
+      </Tabs>
     </div>
   );
 }
@@ -444,6 +587,498 @@ interface OrderDialogPermissions {
   restore: boolean;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* PACKAGING ITEMS PICKER — shared between the detail dialog's Packaging tab    */
+/* and the dedicated PackagingDialog. Self-contained: tracks its own selection, */
+/* search and scanner state so it can be dropped in anywhere.                   */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+function PackagingItemsPicker({
+  order,
+  packagingProducts,
+  loadingPackagingProducts,
+  isLoading,
+  canPackage,
+  onPackageOrder,
+  onUnpackageOrder,
+}: Readonly<{
+  order: OrderDetail;
+  packagingProducts: ProductListItem[];
+  loadingPackagingProducts?: boolean;
+  isLoading?: boolean;
+  canPackage: boolean;
+  onPackageOrder: (items: Array<{ product_id: number; quantity: number }>, allowUpdate: boolean) => void;
+  onUnpackageOrder: () => void;
+}>) {
+  const packagingLines = order.packaging_lines ?? order.lines.filter(line => line.product_type === 'packaging_item');
+
+  // Multi-select packaging: product_id → quantity. Lets the user tick (or scan)
+  // several packaging products and Save them all in one shot.
+  const [packagingSelection, setPackagingSelection] = useState<Record<number, number>>({});
+  const [packagingSearch, setPackagingSearch] = useState('');
+  const [packagingScannerOpen, setPackagingScannerOpen] = useState(false);
+  const [packagingScanFeedback, setPackagingScanFeedback] =
+    useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const scanInputRef = useRef<HTMLInputElement>(null);
+
+  const filteredPackagingProducts = useMemo(() => {
+    const q = packagingSearch.trim().toLowerCase();
+    const base = q
+      ? packagingProducts.filter(
+          p => p.name.toLowerCase().includes(q) || (p.barcode?.toLowerCase().includes(q))
+        )
+      : packagingProducts;
+    return base.slice(0, 100);
+  }, [packagingProducts, packagingSearch]);
+
+  const selectedPackagingCount = Object.keys(packagingSelection).length;
+  const allFilteredSelected =
+    filteredPackagingProducts.length > 0 &&
+    filteredPackagingProducts.every(p => packagingSelection[p.id] !== undefined);
+
+  const addPackagingProduct = useCallback((productId: number, qty = 1) => {
+    setPackagingSelection(prev => ({ ...prev, [productId]: (prev[productId] ?? 0) + qty }));
+  }, []);
+
+  const togglePackagingProduct = useCallback((productId: number) => {
+    setPackagingSelection(prev => {
+      const next = { ...prev };
+      if (next[productId] !== undefined) delete next[productId];
+      else next[productId] = 1;
+      return next;
+    });
+  }, []);
+
+  const setPackagingProductQty = useCallback((productId: number, qty: number) => {
+    setPackagingSelection(prev => ({
+      ...prev,
+      [productId]: Number.isFinite(qty) && qty > 0 ? qty : 1,
+    }));
+  }, []);
+
+  const toggleSelectAllPackaging = useCallback(() => {
+    setPackagingSelection(prev => {
+      const everyFilteredSelected =
+        filteredPackagingProducts.length > 0 &&
+        filteredPackagingProducts.every(p => prev[p.id] !== undefined);
+      const next = { ...prev };
+      if (everyFilteredSelected) {
+        for (const p of filteredPackagingProducts) delete next[p.id];
+      } else {
+        for (const p of filteredPackagingProducts) {
+          if (next[p.id] === undefined) next[p.id] = 1;
+        }
+      }
+      return next;
+    });
+  }, [filteredPackagingProducts]);
+
+  // Camera scan → exact barcode match adds +1.
+  const handlePackagingScan = useCallback((rawCode: string) => {
+    const code = rawCode.trim();
+    if (!code) return;
+    const match = packagingProducts.find(
+      p => p.barcode && p.barcode.toLowerCase() === code.toLowerCase()
+    );
+    if (!match) {
+      setPackagingScanFeedback({ message: `No packaging product matches "${code}"`, type: 'error' });
+      return;
+    }
+    addPackagingProduct(match.id);
+    setPackagingScanFeedback({ message: `Added ${match.name}`, type: 'success' });
+  }, [packagingProducts, addPackagingProduct]);
+
+  // Smart search/scan box. A hardware barcode reader types the full code then
+  // fires Enter; pressing Enter adds an exact barcode match (the scanner case)
+  // or the single remaining filtered product, otherwise it just narrows the
+  // list. This keeps one field for both "scan with a reader" and "type to find".
+  const handleSearchEnter = useCallback(() => {
+    const code = packagingSearch.trim();
+    if (!code) return;
+    const exact = packagingProducts.find(
+      p => p.barcode && p.barcode.toLowerCase() === code.toLowerCase()
+    );
+    if (exact) {
+      addPackagingProduct(exact.id);
+      setPackagingScanFeedback({ message: `Added ${exact.name}`, type: 'success' });
+      setPackagingSearch('');
+      return;
+    }
+    if (filteredPackagingProducts.length === 1) {
+      const only = filteredPackagingProducts[0];
+      addPackagingProduct(only.id);
+      setPackagingScanFeedback({ message: `Added ${only.name}`, type: 'success' });
+      setPackagingSearch('');
+      return;
+    }
+    if (filteredPackagingProducts.length === 0) {
+      setPackagingScanFeedback({ message: `No packaging product matches "${code}"`, type: 'error' });
+    }
+  }, [packagingSearch, packagingProducts, filteredPackagingProducts, addPackagingProduct]);
+
+  const submitPackaging = useCallback(() => {
+    if (selectedPackagingCount === 0) return;
+    // Merge the selected packaging products onto whatever is already on the
+    // order, so Save stays additive (matches the previous one-at-a-time flow).
+    const merged = new Map<number, number>();
+    for (const line of packagingLines) {
+      if (line.product_id) merged.set(Number(line.product_id), Number(line.quantity));
+    }
+    for (const [productId, qty] of Object.entries(packagingSelection)) {
+      const id = Number(productId);
+      const quantity = Number(qty) > 0 ? Number(qty) : 1;
+      merged.set(id, (merged.get(id) ?? 0) + quantity);
+    }
+    const items = Array.from(merged.entries()).map(([product_id, quantity]) => ({ product_id, quantity }));
+    if (items.length === 0) return;
+    onPackageOrder(items, packagingLines.length > 0 || order.packaging_status !== 'NOT_PACKAGED');
+    setPackagingSelection({});
+    setPackagingSearch('');
+    setPackagingScanFeedback(null);
+    // Keep focus on the scan box so a hardware reader can fire the next code.
+    scanInputRef.current?.focus();
+  }, [
+    onPackageOrder,
+    order.packaging_status,
+    packagingLines,
+    packagingSelection,
+    selectedPackagingCount,
+  ]);
+
+  return (
+    <div className="space-y-4">
+      {/* Status summary */}
+      <div className="rounded-lg border bg-muted/20 p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Packaging step</p>
+            <p className="mt-1 text-sm font-medium">{order.packaging_status.replace('_', ' ')}</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Packaging affects packaging/store stock only. When saved, this order is marked done locally.
+            </p>
+            {order.packaged_at && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Packaged {new Date(order.packaged_at).toLocaleString('en-GB')}
+                {order.packaged_by_name ? ` by ${order.packaged_by_name}` : ''}
+              </p>
+            )}
+          </div>
+          <Badge variant={order.packaging_status === 'NOT_PACKAGED' ? 'outline' : 'default'} className="w-fit">
+            {order.packaging_status === 'NOT_PACKAGED' ? 'Waiting packaging' : 'Packaged'}
+          </Badge>
+        </div>
+      </div>
+
+      {/* Current packaging items on the order */}
+      <div className="rounded-lg border overflow-hidden">
+        <Table>
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <TableHead className="h-9 text-xs font-medium">Packaging item</TableHead>
+              <TableHead className="h-9 text-xs font-medium text-center w-20">Qty</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {packagingLines.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={2} className="py-8 text-center text-sm text-muted-foreground">
+                  No packaging items added yet.
+                </TableCell>
+              </TableRow>
+            ) : packagingLines.map(line => (
+              <TableRow key={line.id}>
+                <TableCell className="py-2.5">
+                  <div className="flex items-center gap-2.5">
+                    <ProductImage src={line.product_image} alt={line.product_name} size="md" />
+                    <div className="min-w-0">
+                      <p className="max-w-[34rem] whitespace-normal break-words text-sm font-medium leading-snug">{line.product_name}</p>
+                      {line.barcode && <p className="text-[11px] text-muted-foreground font-mono">{line.barcode}</p>}
+                    </div>
+                  </div>
+                </TableCell>
+                <TableCell className="text-center tabular-nums text-sm">{line.quantity}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+
+      {canPackage && !order.is_deleted && (
+        <div className="rounded-lg border p-4 space-y-3">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Add packaging items</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Scan with a barcode reader (type / scan then press Enter), use the camera, or tick the
+                packaging products — set each quantity, then Save.
+              </p>
+            </div>
+            {selectedPackagingCount > 0 && (
+              <Badge variant="secondary" className="w-fit">{selectedPackagingCount} selected</Badge>
+            )}
+          </div>
+
+          {/* Smart search + barcode reader (Enter) + camera scan */}
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="relative flex-1">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
+              <Input
+                ref={scanInputRef}
+                value={packagingSearch}
+                onChange={event => { setPackagingSearch(event.target.value); setPackagingScanFeedback(null); }}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') { event.preventDefault(); handleSearchEnter(); }
+                }}
+                placeholder="Scan barcode or search packaging products..."
+                className="h-9 pl-8"
+                autoFocus
+              />
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-9 gap-1.5"
+              onClick={() => { setPackagingScanFeedback(null); setPackagingScannerOpen(true); }}
+            >
+              <ScanLine className="size-3.5" />
+              Camera
+            </Button>
+          </div>
+
+          {packagingScanFeedback && (
+            <p className={`text-xs ${packagingScanFeedback.type === 'success' ? 'text-emerald-600' : 'text-red-600'}`}>
+              {packagingScanFeedback.message}
+            </p>
+          )}
+
+          {/* Select-all toggle */}
+          <label className="flex items-center justify-between rounded-md border bg-muted/20 px-3 py-2 cursor-pointer">
+            <span className="flex items-center gap-2 text-sm font-medium">
+              <Checkbox
+                checked={allFilteredSelected}
+                onCheckedChange={toggleSelectAllPackaging}
+                disabled={filteredPackagingProducts.length === 0}
+              />
+              Select all{packagingSearch.trim() ? ' matching' : ''}
+            </span>
+            <span className="text-xs text-muted-foreground">
+              {filteredPackagingProducts.length} product{filteredPackagingProducts.length === 1 ? '' : 's'}
+            </span>
+          </label>
+
+          {/* Product checklist */}
+          <div className="max-h-72 divide-y overflow-y-auto rounded-md border">
+            {loadingPackagingProducts ? (
+              <div className="flex items-center justify-center gap-2 py-8">
+                <Loader2 className="size-4 animate-spin text-muted-foreground" />
+                <span className="text-xs text-muted-foreground">Loading packaging products...</span>
+              </div>
+            ) : filteredPackagingProducts.length === 0 ? (
+              <div className="py-8 text-center text-sm text-muted-foreground">
+                No packaging products found.
+              </div>
+            ) : filteredPackagingProducts.map(product => {
+              const selectedQty = packagingSelection[product.id];
+              const isSelected = selectedQty !== undefined;
+              return (
+                <div
+                  key={product.id}
+                  className={`flex items-center gap-2.5 px-3 py-2 ${isSelected ? 'bg-primary/5' : 'hover:bg-muted/30'}`}
+                >
+                  <Checkbox
+                    checked={isSelected}
+                    onCheckedChange={() => togglePackagingProduct(product.id)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => togglePackagingProduct(product.id)}
+                    className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+                  >
+                    <ProductImage src={product.image_url} alt={product.name} size="md" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[13px] font-medium leading-snug whitespace-normal break-words">{product.name}</p>
+                      <p className="text-[11px] text-muted-foreground font-mono">{product.barcode || 'No barcode'}</p>
+                    </div>
+                  </button>
+                  {isSelected && (
+                    <Input
+                      value={selectedQty}
+                      onChange={event => setPackagingProductQty(product.id, Number(event.target.value))}
+                      type="number"
+                      min={1}
+                      className="h-8 w-16 text-center"
+                      aria-label={`Quantity for ${product.name}`}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Actions */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              className="h-9 gap-1.5"
+              onClick={submitPackaging}
+              disabled={isLoading || selectedPackagingCount === 0}
+            >
+              {isLoading ? <Loader2 className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
+              Save{selectedPackagingCount > 0 ? ` (${selectedPackagingCount})` : ''}
+            </Button>
+            {packagingLines.length > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-9 gap-1.5 text-red-700 border-red-200 hover:bg-red-50"
+                onClick={onUnpackageOrder}
+                disabled={isLoading}
+              >
+                <Undo2 className="size-3.5" />
+                Reverse packaging stock
+              </Button>
+            )}
+          </div>
+
+          <POSCameraScanner
+            open={packagingScannerOpen}
+            onOpenChange={setPackagingScannerOpen}
+            onBarcodeDetected={handlePackagingScan}
+            feedbackMessage={packagingScanFeedback?.message}
+            feedbackType={packagingScanFeedback?.type}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* PACKAGING DIALOG — focused popup (mirrors the return flow). Opens from the   */
+/* "Scan Packaging" lookup and automatically after an order is sent to delivery.*/
+/* Shows what to pack + the packaging products to add, scan and Save.           */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+export function PackagingDialog({
+  open,
+  onOpenChange,
+  order,
+  packagingProducts,
+  loadingPackagingProducts,
+  isLoading,
+  canPackage,
+  warnings,
+  onPackageOrder,
+  onUnpackageOrder,
+}: Readonly<{
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  order: OrderDetail | null;
+  packagingProducts: ProductListItem[];
+  loadingPackagingProducts?: boolean;
+  isLoading?: boolean;
+  canPackage: boolean;
+  warnings?: string[];
+  onPackageOrder: (items: Array<{ product_id: number; quantity: number }>, allowUpdate: boolean) => void;
+  onUnpackageOrder: () => void;
+}>) {
+  const customerLines = order
+    ? (order.customer_lines ?? order.lines.filter(line => line.product_type !== 'packaging_item'))
+    : [];
+  const title = order ? `Pack order ${order.order_number}` : 'Packaging';
+  const desc = order
+    ? (order.delivery_code
+        ? `Delivery code ${order.delivery_code}`
+        : (order.delivery_reference ? `Delivery ref ${order.delivery_reference}` : undefined))
+    : undefined;
+
+  return (
+    <ResponsiveSheet open={open} onOpenChange={onOpenChange} title={title} description={desc} wide>
+      {!order ? null : (
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] lg:items-start lg:gap-6">
+          {/* ── LEFT COLUMN · context + read-only items to pack ───────────── */}
+          <div className="space-y-4">
+            {/* Delivery context */}
+            {(order.delivery_code || order.delivery_reference || order.sent_to_pos_at) && (
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2">
+                <Truck className="size-4 text-muted-foreground" />
+                <span className="text-sm font-medium">
+                  {order.sent_to_pos_at ? 'Sent to POS' : 'Sent to delivery'}
+                </span>
+                {order.delivery_code && <Badge variant="secondary" className="font-mono">{order.delivery_code}</Badge>}
+                {order.delivery_reference && <Badge variant="outline">Ref {order.delivery_reference}</Badge>}
+              </div>
+            )}
+
+            {/* Lookup warnings (e.g. order not yet dispatched) */}
+            {warnings && warnings.length > 0 && (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800 text-sm">
+                <AlertCircle className="size-4 mt-0.5 flex-shrink-0" />
+                <div className="space-y-0.5">
+                  {warnings.map((w, i) => <p key={i}>{w}</p>)}
+                </div>
+              </div>
+            )}
+
+            {/* What the customer ordered — read-only checklist of items to pack */}
+            <div className="rounded-lg border overflow-hidden">
+              <div className="border-b bg-muted/20 px-3 py-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Items to pack ({customerLines.length})
+                </p>
+              </div>
+              <Table>
+                <TableHeader>
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead className="h-9 text-xs font-medium">Product</TableHead>
+                    <TableHead className="h-9 text-xs font-medium text-center w-16">Qty</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {customerLines.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={2} className="py-6 text-center text-sm text-muted-foreground">
+                        No items on this order.
+                      </TableCell>
+                    </TableRow>
+                  ) : customerLines.map(line => (
+                    <TableRow key={line.id}>
+                      <TableCell className="py-2.5">
+                        <div className="flex items-center gap-2.5">
+                          <ProductImage src={line.product_image} alt={line.product_name} size="md" />
+                          <div className="min-w-0">
+                            <p className="whitespace-normal break-words text-sm font-medium leading-snug">{line.product_name}</p>
+                            {line.barcode && <p className="text-[11px] text-muted-foreground font-mono">{line.barcode}</p>}
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-center tabular-nums text-sm font-semibold">{line.quantity}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+
+          {/* ── RIGHT COLUMN · scan / add / save packaging ────────────────── */}
+          <PackagingItemsPicker
+            order={order}
+            packagingProducts={packagingProducts}
+            loadingPackagingProducts={loadingPackagingProducts}
+            isLoading={isLoading}
+            canPackage={canPackage}
+            onPackageOrder={onPackageOrder}
+            onUnpackageOrder={onUnpackageOrder}
+          />
+        </div>
+      )}
+    </ResponsiveSheet>
+  );
+}
+
 function OrderViewMode({
   order,
   onStatusChange,
@@ -489,36 +1124,19 @@ function OrderViewMode({
     { label: 'Shipping', value: order.shipping_total },
     ...(parseFloat(order.discount_total) > 0 ? [{ label: 'Discount', value: `-${order.discount_total}` }] : []),
   ], [order]);
-  const customerLines = order.customer_lines ?? order.lines.filter(line => line.product_type !== 'packaging');
-  const packagingLines = order.packaging_lines ?? order.lines.filter(line => line.product_type === 'packaging');
-  const [packagingProductId, setPackagingProductId] = useState('');
-  const [packagingQty, setPackagingQty] = useState('1');
+  const customerLines = order.customer_lines ?? order.lines.filter(line => line.product_type !== 'packaging_item');
+  const packagingCount = (order.packaging_lines ?? order.lines.filter(line => line.product_type === 'packaging_item')).length;
   const notAnsweredAttempts = order.not_answered_attempts ?? 0;
   const canEscalateNoAnswer = notAnsweredAttempts > 3 || order.outcome === 'DELAYED';
   const isDelayed = order.outcome === 'DELAYED' || order.contact_status === 'DELAYED';
   const canProcessAfterDone = order.final_outcome === 'SUCCESSFUL_SALE' || order.workflow_status === 'done';
 
-  const submitPackaging = useCallback(() => {
-    const productId = Number(packagingProductId);
-    const quantity = Number(packagingQty);
-    if (!productId || !quantity || quantity <= 0) return;
-    const existing = packagingLines
-      .filter(line => line.product_id)
-      .map(line => ({ product_id: Number(line.product_id), quantity: Number(line.quantity) }));
-    const next = [...existing];
-    const found = next.find(item => item.product_id === productId);
-    if (found) found.quantity += quantity;
-    else next.push({ product_id: productId, quantity });
-    onPackageOrder(next, packagingLines.length > 0 || order.packaging_status !== 'NOT_PACKAGED');
-    setPackagingProductId('');
-    setPackagingQty('1');
-  }, [
-    onPackageOrder,
-    order.packaging_status,
-    packagingLines,
-    packagingProductId,
-    packagingQty,
-  ]);
+  // Fulfilment-channel stock flag — drives the warning dot on the Stock tab.
+  const stockByChannel = order.stock_by_channel;
+  const orderChannelStock = stockByChannel?.channels.find(c => c.is_order_channel) ?? null;
+  const posChannelStock = stockByChannel?.channels.find(c => c.is_pos_channel) ?? null;
+  const fulfilmentChannelStock = order.pos_sales_channel_name ? posChannelStock : orderChannelStock;
+  const stockBlocked = fulfilmentChannelStock ? !fulfilmentChannelStock.can_fulfill : false;
 
   return (
     <div className="space-y-6">
@@ -534,7 +1152,13 @@ function OrderViewMode({
               <Package className="size-3.5" /> Customer ({customerLines.length})
             </TabsTrigger>
             <TabsTrigger value="packaging" className="text-xs gap-1.5">
-              <Package className="size-3.5" /> Packaging ({packagingLines.length})
+              <Package className="size-3.5" /> Packaging ({packagingCount})
+            </TabsTrigger>
+            <TabsTrigger value="stock" className="text-xs gap-1.5">
+              <Boxes className="size-3.5" /> Stock
+              {stockBlocked && (
+                <span className="ml-0.5 inline-block size-1.5 rounded-full bg-red-500" aria-hidden />
+              )}
             </TabsTrigger>
             {(order.customer_note || order.internal_note) && (
               <TabsTrigger value="notes" className="text-xs gap-1.5">
@@ -680,8 +1304,12 @@ function OrderViewMode({
                 )}
               </div>
 
-              <StockAvailabilityPanel stock={order.stock_check} />
             </div>
+          </TabsContent>
+
+          {/* Tab: Stock by sales channel */}
+          <TabsContent value="stock">
+            <ChannelStockPanel data={order.stock_by_channel} />
           </TabsContent>
 
           {/* Tab: Line Items */}
@@ -720,111 +1348,15 @@ function OrderViewMode({
 
           {/* Tab: Packaging */}
           <TabsContent value="packaging">
-            <div className="space-y-4">
-              <div className="rounded-lg border bg-muted/20 p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Packaging step</p>
-                    <p className="mt-1 text-sm font-medium">{order.packaging_status.replace('_', ' ')}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Packaging affects packaging/store stock only. When saved, this order is marked done locally.
-                    </p>
-                    {order.packaged_at && (
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Packaged {new Date(order.packaged_at).toLocaleString('en-GB')}
-                        {order.packaged_by_name ? ` by ${order.packaged_by_name}` : ''}
-                      </p>
-                    )}
-                  </div>
-                  <Badge variant={order.packaging_status === 'NOT_PACKAGED' ? 'outline' : 'default'} className="w-fit">
-                    {order.packaging_status === 'NOT_PACKAGED' ? 'Waiting packaging' : 'Packaged'}
-                  </Badge>
-                </div>
-              </div>
-
-              <div className="rounded-lg border overflow-hidden">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="hover:bg-transparent">
-                      <TableHead className="h-9 text-xs font-medium">Packaging item</TableHead>
-                      <TableHead className="h-9 text-xs font-medium text-center w-20">Qty</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {packagingLines.length === 0 ? (
-                      <TableRow>
-                        <TableCell colSpan={2} className="py-8 text-center text-sm text-muted-foreground">
-                          No packaging items added yet.
-                        </TableCell>
-                      </TableRow>
-                    ) : packagingLines.map(line => (
-                      <TableRow key={line.id}>
-                        <TableCell className="py-2.5">
-                          <div className="flex items-center gap-2.5">
-                            <ProductImage src={line.product_image} alt={line.product_name} size="md" />
-                            <div className="min-w-0">
-                              <p className="max-w-[34rem] whitespace-normal break-words text-sm font-medium leading-snug">{line.product_name}</p>
-                              {line.barcode && <p className="text-[11px] text-muted-foreground font-mono">{line.barcode}</p>}
-                            </div>
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-center tabular-nums text-sm">{line.quantity}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-
-              {permissions?.packageOrder && !order.is_deleted && (
-                <div className="rounded-lg border p-4 space-y-3">
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Add packaging item</p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Select packaging/store products such as box, card, bag, sticker, or sample.
-                    </p>
-                  </div>
-                  <div className="grid gap-2 sm:grid-cols-[1fr_110px_auto]">
-                    <ProductSearchSelect
-                      products={packagingProducts}
-                      value={packagingProductId ? Number(packagingProductId) : null}
-                      onChange={setPackagingProductId}
-                      loading={loadingPackagingProducts}
-                      allowManual={false}
-                    />
-                    <Input
-                      value={packagingQty}
-                      onChange={event => setPackagingQty(event.target.value)}
-                      type="number"
-                      min={1}
-                      className="h-9"
-                    />
-                    <Button
-                      type="button"
-                      size="sm"
-                      className="h-9 gap-1.5"
-                      onClick={submitPackaging}
-                      disabled={isLoading || !packagingProductId || Number(packagingQty) <= 0}
-                    >
-                      {isLoading ? <Loader2 className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
-                      Save
-                    </Button>
-                  </div>
-                  {packagingLines.length > 0 && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="gap-1.5 text-red-700 border-red-200 hover:bg-red-50"
-                      onClick={onUnpackageOrder}
-                      disabled={isLoading}
-                    >
-                      <Undo2 className="size-3.5" />
-                      Reverse packaging stock
-                    </Button>
-                  )}
-                </div>
-              )}
-            </div>
+            <PackagingItemsPicker
+              order={order}
+              packagingProducts={packagingProducts}
+              loadingPackagingProducts={loadingPackagingProducts}
+              isLoading={isLoading}
+              canPackage={!!permissions?.packageOrder}
+              onPackageOrder={onPackageOrder}
+              onUnpackageOrder={onUnpackageOrder}
+            />
           </TabsContent>
 
           {/* Tab: Notes */}
@@ -1530,6 +2062,18 @@ export function OrderDetailDialog({
             </div>
           )}
 
+          {/* Phase D — canonical clean status + WooCommerce sync state strip. */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-medium text-muted-foreground">Status</span>
+            <CleanStatusBadge status={order.order_status} label={order.order_status_display} />
+            <SyncStatusBadge status={order.sync_status} label={order.sync_status_display} />
+            {order.sync_status === 'sync_failed' && order.sync_error_message && (
+              <span className="text-[11px] text-red-600 truncate max-w-[260px]" title={order.sync_error_message}>
+                {order.sync_error_message}
+              </span>
+            )}
+          </div>
+
           {!isEditMode ? (
             <OrderViewMode
               order={order}
@@ -1967,6 +2511,852 @@ export function ReturnLookupDialog({
           setQuery(value);
           submit(value);
         }}
+      />
+    </>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* RETURN DIALOG — per-item disposition (back to stock vs waste), incl. packaging */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Per-item return disposition the operator chooses in the UI. Two simple options,
+ * each mapping straight to a backend stock outcome:
+ *   GOOD    → restock         (backend GOOD    → InventoryMovement RETURN_IN)
+ *   DAMAGED → write-off/waste  (backend DAMAGED → InventoryMovement DAMAGE; never restocked)
+ */
+type ReturnDisposition = 'GOOD' | 'DAMAGED';
+
+/** Backend stock condition accepted by process_return. */
+type BackendCondition = 'GOOD' | 'DAMAGED' | 'MISSING';
+
+const DISPOSITION_TO_BACKEND: Record<ReturnDisposition, BackendCondition> = {
+  GOOD: 'GOOD',
+  DAMAGED: 'DAMAGED',
+};
+
+/** Whether a chosen disposition puts the item back into available stock. */
+const DISPOSITION_RESTOCKS: Record<ReturnDisposition, boolean> = {
+  GOOD: true,
+  DAMAGED: false,
+};
+
+const DISPOSITION_LABEL: Record<ReturnDisposition, string> = {
+  GOOD: 'Good — back to stock',
+  DAMAGED: 'Damaged — waste / no stock',
+};
+
+const DISPOSITION_OPTIONS: ReturnDisposition[] = ['GOOD', 'DAMAGED'];
+
+interface ReturnDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  order: OrderDetail | null;
+  onSubmit: (payload: {
+    returnReason: string;
+    returnType: 'RETURNED' | 'EXCHANGED' | 'DAMAGED' | 'MISSING' | 'OTHER';
+    lineConditions: Array<{ line_id: number; condition: BackendCondition }>;
+  }) => void;
+  isLoading?: boolean;
+}
+
+/** One item row inside the return popup — image, name/qty, and the disposition picker. */
+function ReturnItemRow({
+  line, value, onChange, disabled,
+}: Readonly<{
+  line: OrderLine;
+  value: ReturnDisposition | undefined;
+  onChange: (value: ReturnDisposition) => void;
+  disabled?: boolean;
+}>) {
+  const restocks = value ? DISPOSITION_RESTOCKS[value] : null;
+  return (
+    <div className="flex flex-col gap-2 p-3 sm:flex-row sm:items-center sm:gap-3">
+      <div className="flex min-w-0 flex-1 items-center gap-3">
+        <ProductImage src={line.product_image} alt={line.product_name} size="md" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium whitespace-normal break-words leading-snug">{line.product_name}</p>
+          <p className="text-[11px] text-muted-foreground">
+            Qty {line.quantity}{line.barcode ? ` · ${line.barcode}` : ''}
+          </p>
+        </div>
+      </div>
+      <div className="flex items-center gap-2 sm:flex-shrink-0">
+        <Select
+          value={value ?? ''}
+          onValueChange={v => onChange(v as ReturnDisposition)}
+          disabled={disabled}
+        >
+          <SelectTrigger
+            className={`h-9 w-full text-xs sm:w-[210px] ${value ? '' : 'border-amber-400 text-amber-700 dark:text-amber-400'}`}
+          >
+            <SelectValue placeholder="Select condition…" />
+          </SelectTrigger>
+          <SelectContent>
+            {DISPOSITION_OPTIONS.map(opt => (
+              <SelectItem key={opt} value={opt}>
+                <span className="flex items-center gap-2">
+                  <span
+                    className={`size-1.5 rounded-full ${DISPOSITION_RESTOCKS[opt] ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                    aria-hidden
+                  />
+                  {DISPOSITION_LABEL[opt]}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {value && (
+          <Badge
+            variant="outline"
+            className={`hidden shrink-0 gap-1 text-[10px] sm:inline-flex ${
+              restocks
+                ? 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
+                : 'border-rose-300 bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-400'
+            }`}
+          >
+            {restocks ? <TrendingUp className="size-3" /> : <Ban className="size-3" />}
+            {restocks ? 'Stock' : 'Waste'}
+          </Badge>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Return processing popup. Shows the full order context, then forces the operator
+ * to classify EVERY item (customer products AND packaging) before saving. Each
+ * item's four-way condition decides whether it returns to available stock or is
+ * written off as waste; the backend then restocks, records inventory movements,
+ * flips the order to RETURNED, reverses revenue/KPIs/points, and logs the action.
+ */
+export function ReturnDialog({ open, onOpenChange, order, onSubmit, isLoading }: Readonly<ReturnDialogProps>) {
+  const customerLines = useMemo(
+    () => (order
+      ? (order.customer_lines ?? order.lines.filter(l => l.product_type !== 'packaging_item' && !l.is_deleted))
+      : []),
+    [order],
+  );
+  const packagingLines = useMemo(
+    () => (order
+      ? (order.packaging_lines ?? order.lines.filter(l => l.product_type === 'packaging_item' && !l.is_deleted))
+      : []),
+    [order],
+  );
+  const allLines = useMemo(() => [...customerLines, ...packagingLines], [customerLines, packagingLines]);
+
+  const [reason, setReason] = useState('');
+  const [dispositions, setDispositions] = useState<Record<number, ReturnDisposition>>({});
+
+  // (Re)initialise whenever a different order is opened. Intentionally leave every
+  // item UNSET so the operator must consciously classify each one before saving.
+  useEffect(() => {
+    if (!open || !order) return;
+    setDispositions({});
+    setReason('');
+  }, [open, order]);
+
+  const setLineDisposition = useCallback((lineId: number, value: ReturnDisposition) => {
+    setDispositions(prev => ({ ...prev, [lineId]: value }));
+  }, []);
+
+  const pendingCount = allLines.filter(l => !dispositions[l.id]).length;
+  const restockCount = allLines.filter(l => {
+    const d = dispositions[l.id];
+    return d ? DISPOSITION_RESTOCKS[d] : false;
+  }).length;
+  const wasteCount = allLines.filter(l => {
+    const d = dispositions[l.id];
+    return d ? !DISPOSITION_RESTOCKS[d] : false;
+  }).length;
+  const allClassified = allLines.length > 0 && pendingCount === 0;
+
+  const channelName = order
+    ? (order.pos_validated_at && order.pos_sales_channel_name ? order.pos_sales_channel_name : order.sales_channel_name)
+    : '';
+
+  const handleSubmit = useCallback(() => {
+    if (!order) return;
+    // Resolve every line's disposition up front; bail if any is still unset so we
+    // never submit a partially-classified return.
+    const classified: Array<{ line: OrderLine; disposition: ReturnDisposition }> = [];
+    for (const line of allLines) {
+      const disposition = dispositions[line.id];
+      if (!disposition) return;
+      classified.push({ line, disposition });
+    }
+    if (classified.length === 0) return;
+
+    const lineConditions = classified.map(({ line, disposition }) => ({
+      line_id: line.id,
+      condition: DISPOSITION_TO_BACKEND[disposition],
+    }));
+    // Preserve the precise four-way per-item choice in the audit trail — the
+    // backend enum only distinguishes GOOD/DAMAGED, so the human-readable detail
+    // lives in the reason recorded on the OrderLog.
+    const breakdown = classified
+      .map(({ line, disposition }) => `${line.product_name} ×${line.quantity}: ${DISPOSITION_LABEL[disposition]}`)
+      .join('; ');
+    const typed = reason.trim();
+    const returnReason = typed ? `${typed} | Item conditions — ${breakdown}` : `Item conditions — ${breakdown}`;
+    onSubmit({ returnReason, returnType: 'RETURNED', lineConditions });
+  }, [order, allLines, dispositions, reason, onSubmit]);
+
+  return (
+    <ResponsiveSheet
+      open={open}
+      onOpenChange={onOpenChange}
+      wide
+      title="Process Return"
+      description={order ? `Classify every item from ${order.order_number}, then save the return.` : undefined}
+      footer={
+        <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <span className="text-xs">
+            {allLines.length === 0 ? (
+              <span className="text-muted-foreground">No items to return.</span>
+            ) : pendingCount > 0 ? (
+              <span className="font-medium text-amber-600 dark:text-amber-400">
+                {pendingCount} item{pendingCount === 1 ? '' : 's'} still need a condition
+              </span>
+            ) : (
+              <span className="text-muted-foreground">
+                <span className="font-medium text-emerald-600 dark:text-emerald-400">{restockCount} back to stock</span>
+                {' · '}
+                <span className="font-medium text-rose-600 dark:text-rose-400">{wasteCount} waste</span>
+              </span>
+            )}
+          </span>
+          <div className="flex justify-end gap-2">
+            <Button size="sm" variant="outline" onClick={() => onOpenChange(false)} disabled={isLoading}>
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={handleSubmit}
+              disabled={isLoading || !allClassified}
+              className="gap-1.5"
+            >
+              {isLoading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+              Save Return
+            </Button>
+          </div>
+        </div>
+      }
+    >
+      <div className="space-y-4">
+        {/* ── Order summary ─────────────────────────────────────────────── */}
+        {order && (
+          <div className="rounded-lg border bg-muted/20 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold">{order.order_number}</span>
+                <CleanStatusBadge status={order.order_status} label={order.order_status_display} />
+              </div>
+              <span className="text-sm font-semibold tabular-nums">
+                {order.total} {order.currency}
+              </span>
+            </div>
+            <div className="mt-2 grid grid-cols-1 gap-x-4 gap-y-1.5 text-xs text-muted-foreground sm:grid-cols-2">
+              <span className="flex items-center gap-1.5 min-w-0">
+                <User className="size-3.5 shrink-0" />
+                <span className="truncate text-foreground">{order.client_name || 'Walk-in customer'}</span>
+              </span>
+              {order.client_phone && (
+                <span className="flex items-center gap-1.5 min-w-0">
+                  <Phone className="size-3.5 shrink-0" />
+                  <span className="truncate">{order.client_phone}</span>
+                </span>
+              )}
+              <span className="flex items-center gap-1.5 min-w-0">
+                <Store className="size-3.5 shrink-0" />
+                <span className="truncate">{channelName}</span>
+              </span>
+              <span className="flex items-center gap-1.5">
+                <Calendar className="size-3.5 shrink-0" />
+                {new Date(order.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}
+              </span>
+              <span className="flex items-center gap-1.5 min-w-0">
+                <CreditCard className="size-3.5 shrink-0" />
+                <span className="truncate">{order.payment_method || 'Payment N/A'}</span>
+              </span>
+              {order.client_return_count > 0 && (
+                <span className="flex items-center gap-1.5 text-amber-600 dark:text-amber-400">
+                  <AlertCircle className="size-3.5 shrink-0" />
+                  {order.client_return_count} previous return{order.client_return_count === 1 ? '' : 's'}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="space-y-1.5">
+          <Label className="text-xs font-medium">Reason (optional)</Label>
+          <Input
+            value={reason}
+            onChange={e => setReason(e.target.value)}
+            placeholder="e.g. wrong size, customer changed mind, defective…"
+            disabled={isLoading}
+            className="h-9"
+          />
+        </div>
+
+        <div className="rounded-lg border bg-muted/20 p-3 text-xs text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="size-2 rounded-full bg-emerald-500" aria-hidden />
+            <span className="font-medium text-foreground">Good</span> returns the item to available stock.
+          </span>
+          <span className="mx-2 hidden sm:inline">·</span>
+          <span className="mt-1 flex items-center gap-1.5 sm:mt-0 sm:inline-flex">
+            <span className="size-2 rounded-full bg-rose-500" aria-hidden />
+            <span className="font-medium text-foreground">Damaged</span> is marked as waste (not restocked).
+          </span>
+        </div>
+
+        {allLines.length === 0 ? (
+          <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+            This order has no items to return.
+          </div>
+        ) : (
+          <>
+            {/* ── Order items ─────────────────────────────────────────────── */}
+            {customerLines.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+                  <Package className="size-3.5" />
+                  Order items
+                  <Badge variant="secondary" className="text-[10px]">{customerLines.length}</Badge>
+                </div>
+                <div className="divide-y rounded-lg border">
+                  {customerLines.map(line => (
+                    <ReturnItemRow
+                      key={line.id}
+                      line={line}
+                      value={dispositions[line.id]}
+                      onChange={v => setLineDisposition(line.id, v)}
+                      disabled={isLoading}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ── Packaging items ─────────────────────────────────────────── */}
+            {packagingLines.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+                  <Package className="size-3.5" />
+                  Packaging items
+                  <Badge variant="secondary" className="text-[10px]">{packagingLines.length}</Badge>
+                </div>
+                <div className="divide-y rounded-lg border">
+                  {packagingLines.map(line => (
+                    <ReturnItemRow
+                      key={line.id}
+                      line={line}
+                      value={dispositions[line.id]}
+                      onChange={v => setLineDisposition(line.id, v)}
+                      disabled={isLoading}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </ResponsiveSheet>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* CREATE ORDER DIALOG — manual order creation (Method B / POS ingestion)     */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+interface CreateOrderDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  channels: SalesChannel[];
+  onSubmit: (payload: POSOrderCreateRequest) => void;
+  isLoading?: boolean;
+}
+
+interface DraftLine {
+  product: ProductListItem;
+  quantity: number;
+  price: string;
+}
+
+/**
+ * Manual order creation from the Order Operations page. Products are loaded for
+ * the chosen channel's brand; lines can be added by search or barcode scan. The
+ * payload is fed through the same POS ingestion path used by the till, so stock
+ * reconciliation and totals are computed authoritatively on the server.
+ */
+export function CreateOrderDialog({
+  open, onOpenChange, channels, onSubmit, isLoading,
+}: Readonly<CreateOrderDialogProps>) {
+  // Manual orders from the Order Manager are WooCommerce-style fulfilment orders
+  // (they route through the delivery API), so only WooCommerce channels qualify —
+  // POS/WEB channels are intentionally excluded here.
+  const activeChannels = useMemo(
+    () => channels.filter(c => c.is_active && c.channel_type === 'WOOCOMMERCE'),
+    [channels],
+  );
+  // The user's focused workspace brand (null = whole-company focus). Used to
+  // pre-scope the dialog so a multi-brand company doesn't dump every channel.
+  const activeBrandId = useAuthStore(s => s.user?.current_brand_id ?? null);
+  const [brandFilter, setBrandFilter] = useState('');
+  const [channelId, setChannelId] = useState('');
+  const [products, setProducts] = useState<ProductListItem[]>([]);
+  const [loadingProducts, setLoadingProducts] = useState(false);
+  const [lines, setLines] = useState<DraftLine[]>([]);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scanFeedback, setScanFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [client, setClient] = useState<Client | null>(null);
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'card' | 'bank'>('cash');
+  const [orderStatus, setOrderStatus] = useState<'pending' | 'processing' | 'completed'>('processing');
+  const [discountType, setDiscountType] = useState<OrderDiscountType>('NONE');
+  const [discountValue, setDiscountValue] = useState('');
+  const [customerNote, setCustomerNote] = useState('');
+
+  // Distinct brands reachable through the (already tenant-scoped) channel list.
+  const brandOptions = useMemo(() => {
+    const m = new Map<number, string>();
+    activeChannels.forEach(c => {
+      if (c.brand != null && !m.has(c.brand)) m.set(c.brand, c.brand_name || `Brand ${c.brand}`);
+    });
+    return Array.from(m, ([id, name]) => ({ id, name }));
+  }, [activeChannels]);
+  const multiBrand = brandOptions.length > 1;
+
+  // Channels narrowed to the chosen brand. With no brand picked we fall back to
+  // the full (company-scoped) list so single-brand companies are unaffected.
+  const visibleChannels = useMemo(
+    () => (brandFilter ? activeChannels.filter(c => String(c.brand) === brandFilter) : activeChannels),
+    [activeChannels, brandFilter],
+  );
+
+  const selectedChannel = useMemo(
+    () => activeChannels.find(c => String(c.id) === channelId),
+    [activeChannels, channelId],
+  );
+  const brandId = selectedChannel?.brand;
+
+  // Reset everything when the dialog closes so the next open starts clean.
+  useEffect(() => {
+    if (open) return;
+    setBrandFilter(''); setChannelId(''); setProducts([]); setLines([]); setScanFeedback(null);
+    setClient(null); setPaymentMethod('cash'); setOrderStatus('processing');
+    setDiscountType('NONE'); setDiscountValue(''); setCustomerNote('');
+  }, [open]);
+
+  // On open, focus the brand: prefer the user's active workspace brand; with no
+  // active brand a multi-brand company starts unset (forcing an explicit pick),
+  // while a single-brand company is left as-is (the selector stays hidden).
+  useEffect(() => {
+    if (!open) return;
+    setBrandFilter(
+      activeBrandId && brandOptions.some(b => b.id === activeBrandId) ? String(activeBrandId) : '',
+    );
+    // brandOptions/activeBrandId are read once at open time on purpose.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Drop the chosen channel if it no longer belongs to the focused brand, so the
+  // channel select never shows a value from a different brand.
+  useEffect(() => {
+    if (!brandFilter) return;
+    setChannelId(prev => {
+      if (!prev) return prev;
+      const ch = activeChannels.find(c => String(c.id) === prev);
+      return ch && String(ch.brand) === brandFilter ? prev : '';
+    });
+  }, [brandFilter, activeChannels]);
+
+  // Load the brand's products whenever the channel (hence brand) changes; a new
+  // brand means a different catalogue, so any half-built cart is cleared.
+  useEffect(() => {
+    if (!open || !brandId) { setProducts([]); return; }
+    let cancelled = false;
+    setLoadingProducts(true);
+    setLines([]);
+    // A brand change may also mean a different company; drop any picked client
+    // so we never submit a cross-tenant customer (the backend rejects it too).
+    setClient(null);
+    productService.getAllProducts({ brand: brandId, page_size: 500 })
+      .then(items => { if (!cancelled) setProducts((items || []).filter(p => p.product_type !== 'packaging_item')); })
+      .catch(() => { if (!cancelled) setProducts([]); })
+      .finally(() => { if (!cancelled) setLoadingProducts(false); });
+    return () => { cancelled = true; };
+  }, [open, brandId]);
+
+  const addProduct = useCallback((productId: string) => {
+    const product = products.find(p => String(p.id) === productId);
+    if (!product) return;
+    setLines(prev => {
+      const existing = prev.find(l => l.product.id === product.id);
+      if (existing) {
+        return prev.map(l => (l.product.id === product.id ? { ...l, quantity: l.quantity + 1 } : l));
+      }
+      return [...prev, { product, quantity: 1, price: String(product.sales_price ?? '0') }];
+    });
+  }, [products]);
+
+  const handleScan = useCallback((raw: string) => {
+    const code = raw.trim();
+    if (!code) return;
+    const match = products.find(p => p.barcode && p.barcode.toLowerCase() === code.toLowerCase());
+    if (!match) {
+      setScanFeedback({ message: `No product matches "${code}"`, type: 'error' });
+      return;
+    }
+    addProduct(String(match.id));
+    setScanFeedback({ message: `Added ${match.name}`, type: 'success' });
+  }, [products, addProduct]);
+
+  const updateQty = useCallback((productId: number, qty: number) => {
+    setLines(prev => prev.map(l => (
+      l.product.id === productId
+        ? { ...l, quantity: Number.isFinite(qty) && qty > 0 ? Math.floor(qty) : 1 }
+        : l
+    )));
+  }, []);
+  const updatePrice = useCallback((productId: number, price: string) => {
+    setLines(prev => prev.map(l => (l.product.id === productId ? { ...l, price } : l)));
+  }, []);
+  const removeLine = useCallback((productId: number) => {
+    setLines(prev => prev.filter(l => l.product.id !== productId));
+  }, []);
+
+  const subtotal = useMemo(
+    () => lines.reduce((sum, l) => sum + l.quantity * (parseFloat(l.price) || 0), 0),
+    [lines],
+  );
+
+  // Discount preview — mirrors the server's authoritative recompute so the UI
+  // total matches what the order will actually be saved with.
+  const discountNum = parseFloat(discountValue) || 0;
+  const discountInvalid =
+    discountType !== 'NONE' &&
+    (discountNum < 0 || (discountType === 'PERCENTAGE' && discountNum > 100));
+  const discountTotal = useMemo(() => {
+    if (discountType === 'PERCENTAGE') {
+      return Math.min(subtotal, subtotal * (Math.min(Math.max(discountNum, 0), 100) / 100));
+    }
+    if (discountType === 'FIXED') {
+      return Math.min(subtotal, Math.max(discountNum, 0));
+    }
+    return 0;
+  }, [discountType, discountNum, subtotal]);
+  const grandTotal = Math.max(0, subtotal - discountTotal);
+
+  const canSubmit = !!channelId && lines.length > 0 && !discountInvalid && !isLoading;
+
+  const handleSubmit = useCallback(() => {
+    if (!channelId || lines.length === 0 || discountInvalid) return;
+    // Link the client by id; the server derives WooCommerce billing from the
+    // stored Client and re-resolves it inside the ingest pipeline. We send only
+    // the discount *intent* (type + value) and let the backend recompute
+    // discount_total / total authoritatively — never trust client-side money.
+    const payload: POSOrderCreateRequest = {
+      sales_channel: Number(channelId),
+      client: client?.id ?? null,
+      line_items: lines.map(l => ({
+        local_product_id: l.product.id,
+        name: l.product.name,
+        sku: l.product.barcode ?? '',
+        quantity: l.quantity,
+        price: (parseFloat(l.price) || 0).toFixed(2),
+        total: (l.quantity * (parseFloat(l.price) || 0)).toFixed(2),
+      })),
+      payment_method: paymentMethod,
+      payment_method_title:
+        paymentMethod === 'cash' ? 'Cash' : paymentMethod === 'card' ? 'Card' : 'Bank Transfer',
+      customer_note: customerNote,
+      status: orderStatus,
+      discount_type: discountType,
+      discount_value:
+        discountType === 'NONE' ? '0.00' : (parseFloat(discountValue) || 0).toFixed(2),
+    };
+    onSubmit(payload);
+  }, [
+    channelId, lines, client, paymentMethod, customerNote,
+    orderStatus, discountType, discountValue, discountInvalid, onSubmit,
+  ]);
+
+  return (
+    <>
+      <ResponsiveSheet
+        open={open}
+        onOpenChange={onOpenChange}
+        wide
+        title="Create Order"
+        description="Manually create an order. Stock and totals are reconciled on the server."
+        footer={
+          <div className="flex w-full items-center justify-between gap-2">
+            <span className="text-sm font-medium">Total: {grandTotal.toFixed(2)} TND</span>
+            <div className="flex gap-2">
+              <Button size="sm" variant="outline" onClick={() => onOpenChange(false)} disabled={isLoading}>
+                Cancel
+              </Button>
+              <Button size="sm" onClick={handleSubmit} disabled={!canSubmit} className="gap-1.5">
+                {isLoading ? <Loader2 className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
+                Create Order
+              </Button>
+            </div>
+          </div>
+        }
+      >
+        <div className="space-y-4">
+          {multiBrand && (
+            <div className="space-y-1.5">
+              <Label className="text-xs font-medium">Brand</Label>
+              <Select value={brandFilter} onValueChange={setBrandFilter} disabled={isLoading}>
+                <SelectTrigger className="h-9"><SelectValue placeholder="Select a brand…" /></SelectTrigger>
+                <SelectContent>
+                  {brandOptions.map(b => (
+                    <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground">
+                This company has several brands. Pick one to scope the channels and products below.
+              </p>
+            </div>
+          )}
+
+          <div className="space-y-1.5">
+            <Label className="text-xs font-medium">Sales channel</Label>
+            <Select
+              value={channelId}
+              onValueChange={setChannelId}
+              disabled={isLoading || (multiBrand && !brandFilter)}
+            >
+              <SelectTrigger className="h-9">
+                <SelectValue placeholder={multiBrand && !brandFilter ? 'Select a brand first…' : 'Select a sales channel…'} />
+              </SelectTrigger>
+              <SelectContent>
+                {visibleChannels.map(c => (
+                  <SelectItem key={c.id} value={String(c.id)}>
+                    {c.name}{c.brand_name ? ` · ${c.brand_name}` : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {activeChannels.length === 0 && (
+            <div className="rounded-lg border border-dashed border-amber-300 bg-amber-50 p-4 text-center text-xs text-amber-800">
+              No WooCommerce sales channel is available for your workspace. Manual delivery
+              orders can only be created on a WooCommerce channel.
+            </div>
+          )}
+
+          {channelId ? (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Label className="text-xs font-medium">Add products</Label>
+                <span className="text-[11px] text-muted-foreground">
+                  {loadingProducts ? 'Loading…' : `${products.length} available · add as many as you need`}
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <div className="min-w-0 flex-1">
+                  <ProductSearchSelect
+                    products={products}
+                    value={null}
+                    onChange={addProduct}
+                    loading={loadingProducts}
+                    allowManual={false}
+                  />
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  onClick={() => setScannerOpen(true)}
+                  title="Scan barcode"
+                >
+                  <ScanLine className="size-4" />
+                </Button>
+              </div>
+              {scanFeedback && (
+                <p className={`text-xs ${scanFeedback.type === 'success' ? 'text-emerald-600' : 'text-red-600'}`}>
+                  {scanFeedback.message}
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+              Select a sales channel to load its products.
+            </div>
+          )}
+
+          {lines.length > 0 && (
+            <div className="divide-y rounded-lg border">
+              {lines.map(l => (
+                <div key={l.product.id} className="flex items-center gap-3 p-3">
+                  <ProductImage src={l.product.image_url} alt={l.product.name} size="md" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium whitespace-normal break-words leading-snug">{l.product.name}</p>
+                    <p className="text-[11px] text-muted-foreground">{l.product.barcode || '—'}</p>
+                  </div>
+                  <div className="flex flex-shrink-0 items-center gap-2">
+                    <Input
+                      type="number"
+                      min={1}
+                      value={l.quantity}
+                      onChange={e => updateQty(l.product.id, parseInt(e.target.value, 10))}
+                      className="h-8 w-16 text-xs"
+                      aria-label="Quantity"
+                    />
+                    <Input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={l.price}
+                      onChange={e => updatePrice(l.product.id, e.target.value)}
+                      className="h-8 w-24 text-xs"
+                      aria-label="Unit price"
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="size-8 text-red-600"
+                      onClick={() => removeLine(l.product.id)}
+                      aria-label="Remove line"
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <Label className="text-xs font-medium">Customer (optional)</Label>
+            <OrderClientSelector
+              value={client}
+              onChange={setClient}
+              salesChannelId={selectedChannel?.id ?? null}
+              brandId={brandId ?? null}
+              disabled={isLoading}
+            />
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label className="text-xs font-medium">Payment method</Label>
+              <Select value={paymentMethod} onValueChange={v => setPaymentMethod(v as typeof paymentMethod)} disabled={isLoading}>
+                <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="cash">Cash</SelectItem>
+                  <SelectItem value="card">Card</SelectItem>
+                  <SelectItem value="bank">Bank Transfer</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs font-medium">Status</Label>
+              <Select value={orderStatus} onValueChange={v => setOrderStatus(v as typeof orderStatus)} disabled={isLoading}>
+                <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="processing">Processing</SelectItem>
+                  <SelectItem value="pending">Pending (fulfil later)</SelectItem>
+                  <SelectItem value="completed">Completed (paid)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label className="text-xs font-medium">Customer note (optional)</Label>
+            <Textarea
+              value={customerNote}
+              onChange={e => setCustomerNote(e.target.value)}
+              rows={2}
+              placeholder="Any note for this order…"
+            />
+          </div>
+
+          {/* Discount + live totals — only meaningful once items exist. The
+              preview mirrors the server's recompute; the backend remains the
+              source of truth for the saved figures. */}
+          {lines.length > 0 && (
+            <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium">Discount</Label>
+                  <Select
+                    value={discountType}
+                    onValueChange={v => setDiscountType(v as OrderDiscountType)}
+                    disabled={isLoading}
+                  >
+                    <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="NONE">No discount</SelectItem>
+                      <SelectItem value="FIXED">Fixed amount (TND)</SelectItem>
+                      <SelectItem value="PERCENTAGE">Percentage (%)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {discountType !== 'NONE' && (
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-medium">
+                      {discountType === 'PERCENTAGE' ? 'Percentage (0–100)' : 'Amount (TND)'}
+                    </Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={discountType === 'PERCENTAGE' ? 100 : undefined}
+                      step="0.01"
+                      value={discountValue}
+                      onChange={e => setDiscountValue(e.target.value)}
+                      className="h-9"
+                      placeholder={discountType === 'PERCENTAGE' ? 'e.g. 10' : 'e.g. 5.00'}
+                      aria-invalid={discountInvalid}
+                    />
+                  </div>
+                )}
+              </div>
+              {discountInvalid && (
+                <p className="text-xs text-red-600">
+                  {discountType === 'PERCENTAGE'
+                    ? 'Percentage must be between 0 and 100.'
+                    : 'Discount amount cannot be negative.'}
+                </p>
+              )}
+              <div className="space-y-1 border-t pt-2 text-sm">
+                <div className="flex justify-between text-muted-foreground">
+                  <span>Subtotal</span>
+                  <span>{subtotal.toFixed(2)} TND</span>
+                </div>
+                {discountTotal > 0 && (
+                  <div className="flex justify-between text-emerald-600">
+                    <span>Discount</span>
+                    <span>−{discountTotal.toFixed(2)} TND</span>
+                  </div>
+                )}
+                <div className="flex justify-between font-semibold">
+                  <span>Total</span>
+                  <span>{grandTotal.toFixed(2)} TND</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </ResponsiveSheet>
+
+      <POSCameraScanner
+        open={scannerOpen}
+        onOpenChange={setScannerOpen}
+        onBarcodeDetected={handleScan}
+        feedbackMessage={scanFeedback?.message}
+        feedbackType={scanFeedback?.type}
       />
     </>
   );

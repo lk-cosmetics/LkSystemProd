@@ -351,11 +351,19 @@ class BillOfMaterials(models.Model):
 
     def clean(self):
         from django.core.exceptions import ValidationError
+        from apps.products.models import Product
 
         super().clean()
         if self.finished_product and self.finished_product.is_pack:
             raise ValidationError({
                 'finished_product': 'Pack products cannot also use a manufacturing BOM.'
+            })
+        if (
+            self.finished_product_id
+            and self.finished_product.product_type != Product.ProductType.RESELL_PRODUCT
+        ):
+            raise ValidationError({
+                'finished_product': 'A BOM can only produce a resell_product (the sellable finished good).'
             })
 
 
@@ -420,8 +428,13 @@ class BillOfMaterialsItem(models.Model):
 
     def clean(self):
         from django.core.exceptions import ValidationError
+        from apps.products.models import Product
 
         super().clean()
+        if self.component_id and self.component.product_type != Product.ProductType.COMPONENT:
+            raise ValidationError({
+                'component': 'Only component-type products can be used in a Bill of Materials.'
+            })
         if self.bom_id and self.component_id:
             if self.component_id == self.bom.finished_product_id:
                 raise ValidationError({'component': 'A product cannot be a component of itself.'})

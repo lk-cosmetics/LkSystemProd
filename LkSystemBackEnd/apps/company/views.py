@@ -190,6 +190,18 @@ class CompanyViewSet(viewsets.ModelViewSet):
         if self.action in ('create', 'destroy'):
             return [IsAuthenticated(), _IsPlatformAdmin()]
         return [IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        """
+        Create the company, then provision its own editable copies of the
+        business roles (CEO, Manager, Brand Manager, Employee, Cashier).
+
+        Per-company roles guarantee tenant isolation: editing "Brand Manager"
+        for this company never touches the same-named role in another company.
+        """
+        company = serializer.save()
+        from apps.rbac.provisioning import provision_company_roles
+        provision_company_roles(company, created_by=self.request.user)
     
     @extend_schema(
         tags=['Companies'],

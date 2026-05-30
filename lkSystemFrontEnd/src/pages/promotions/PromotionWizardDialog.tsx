@@ -193,7 +193,7 @@ export function PromotionWizardDialog({
           name: m.product_name,
           barcode: m.product_barcode,
           image_url: m.product_image,
-          product_type: 'resell',
+          product_type: 'resell_product',
         },
         discount_type: m.discount_type,
         discount_value: String(m.discount_value ?? '0'),

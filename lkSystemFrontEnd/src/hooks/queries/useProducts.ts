@@ -12,6 +12,7 @@
     UpdateProductRequest,
     PaginatedResponse,
     ProductListItem,
+    ProductType,
   } from '@/types';
 
   // Query Keys
@@ -71,7 +72,7 @@
     search?: string;
     brand?: number;
     status?: 'publish' | 'draft' | 'pending' | 'private';
-    product_type?: 'resell' | 'packaging';
+    product_type?: ProductType;
     ordering?: string;
     enabled?: boolean;
   }) {
@@ -140,7 +141,8 @@
   export function useCreateProduct() {
     const queryClient = useQueryClient();
     return useMutation({
-      mutationFn: (data: CreateProductRequest) => productService.createProduct(data),
+      mutationFn: ({ imageFile, ...data }: CreateProductRequest & { imageFile?: File | null }) =>
+        productService.createProduct(data, imageFile),
       onSuccess: () => {
         queryClient.invalidateQueries({ queryKey: productsKeys.all });
       },
@@ -150,8 +152,8 @@
   export function useUpdateProduct() {
     const queryClient = useQueryClient();
     return useMutation({
-      mutationFn: ({ id, data }: { id: number; data: UpdateProductRequest }) =>
-        productService.updateProduct(id, data),
+      mutationFn: ({ id, data, imageFile }: { id: number; data: UpdateProductRequest; imageFile?: File | null }) =>
+        productService.updateProduct(id, data, imageFile),
       onSuccess: (_data, variables) => {
         queryClient.invalidateQueries({ queryKey: productsKeys.detail(variables.id) });
         queryClient.invalidateQueries({ queryKey: productsKeys.all });
@@ -162,8 +164,8 @@
   export function usePartialUpdateProduct() {
     const queryClient = useQueryClient();
     return useMutation({
-      mutationFn: ({ id, data }: { id: number; data: Partial<UpdateProductRequest> }) =>
-        productService.partialUpdateProduct(id, data),
+      mutationFn: ({ id, data, imageFile }: { id: number; data: Partial<UpdateProductRequest>; imageFile?: File | null }) =>
+        productService.partialUpdateProduct(id, data, imageFile),
       onSuccess: (_data, variables) => {
         queryClient.invalidateQueries({ queryKey: productsKeys.detail(variables.id) });
         queryClient.invalidateQueries({ queryKey: productsKeys.all });

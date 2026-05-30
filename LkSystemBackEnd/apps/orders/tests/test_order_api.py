@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
@@ -133,7 +135,7 @@ class OrderAPITests(TestCase):
             brand=self.brand,
             name='POS Product',
             barcode='POS-001',
-            product_type=Product.ProductType.FINISHED,
+            product_type=Product.ProductType.RESELL_PRODUCT,
             sales_price='25.00',
         )
         SalesChannelInventory.objects.create(
@@ -174,6 +176,152 @@ class OrderAPITests(TestCase):
         self.assertIsNotNone(order.pos_validated_at)
         self.assertEqual(order.pos_validated_by, self.user)
 
+    # ── Manual (Order Manager) order creation ────────────────────────────
+
+    def _manual_channel_and_product(self, code):
+        channel = SalesChannel.objects.create(
+            brand=self.brand,
+            name=f'Order Manager {code}',
+            code=code,
+            channel_type=SalesChannel.ChannelType.WOOCOMMERCE,
+        )
+        product = Product.objects.create(
+            brand=self.brand,
+            name=f'Manual Product {code}',
+            barcode=f'MAN-{code}',
+            product_type=Product.ProductType.RESELL_PRODUCT,
+            sales_price='50.00',
+        )
+        SalesChannelInventory.objects.create(
+            sales_channel=channel, product=product, quantity=10,
+        )
+        return channel, product
+
+    def test_manual_order_defaults_to_processing_without_pos_forcing(self):
+        channel, product = self._manual_channel_and_product('WEB-MAN1')
+
+        response = self.client.post(
+            '/api/v1/orders/manual/',
+            {
+                'sales_channel': channel.id,
+                'billing': {'first_name': 'Manual', 'last_name': 'Buyer'},
+                'line_items': [
+                    {
+                        'local_product_id': product.id,
+                        'name': product.name,
+                        'sku': product.barcode,
+                        'quantity': 2,
+                        'price': '50.00',
+                        'total': '100.00',
+                    },
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        order = Order.objects.get(pk=response.data['id'])
+        self.assertEqual(order.source, Order.Source.MANUAL)
+        self.assertEqual(order.status, Order.Status.PROCESSING)
+        # POS-only forcing must NOT happen for a back-office order.
+        self.assertEqual(order.outcome, Order.Outcome.NONE)
+        self.assertIsNone(order.pos_validated_at)
+        self.assertIsNone(order.pos_sales_channel_id)
+
+    def test_manual_order_applies_percentage_discount(self):
+        channel, product = self._manual_channel_and_product('WEB-MAN2')
+
+        response = self.client.post(
+            '/api/v1/orders/manual/',
+            {
+                'sales_channel': channel.id,
+                'billing': {'first_name': 'Discount', 'last_name': 'Buyer'},
+                'line_items': [
+                    {
+                        'local_product_id': product.id,
+                        'name': product.name,
+                        'sku': product.barcode,
+                        'quantity': 2,
+                        'price': '50.00',
+                        'total': '100.00',
+                    },
+                ],
+                'discount_type': 'PERCENTAGE',
+                'discount_value': '10',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        order = Order.objects.get(pk=response.data['id'])
+        self.assertEqual(order.discount_type, Order.DiscountType.PERCENTAGE)
+        self.assertEqual(order.discount_total, Decimal('10.00'))
+        self.assertEqual(order.total, Decimal('90.00'))
+
+    def test_manual_order_links_existing_client_by_derived_billing(self):
+        channel, product = self._manual_channel_and_product('WEB-MAN3')
+
+        response = self.client.post(
+            '/api/v1/orders/manual/',
+            {
+                'sales_channel': channel.id,
+                'client': self.client_record.id,
+                'line_items': [
+                    {
+                        'local_product_id': product.id,
+                        'name': product.name,
+                        'sku': product.barcode,
+                        'quantity': 1,
+                        'price': '50.00',
+                        'total': '50.00',
+                    },
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        order = Order.objects.get(pk=response.data['id'])
+        # Ingestion re-resolved the client from the server-derived billing block.
+        self.assertEqual(order.client_id, self.client_record.id)
+        self.assertEqual(order.billing_email, self.client_record.email)
+
+    def test_manual_order_rejects_cross_tenant_client(self):
+        channel, product = self._manual_channel_and_product('WEB-MAN4')
+        other_company = Company.objects.create(name='Other Co', abbreviation='OTH')
+        other_brand = Brand.objects.create(company=other_company, name='Other Brand')
+        foreign_client = Client.objects.create(
+            company=other_company,
+            brand=other_brand,
+            email='foreign@example.com',
+            first_name='Foreign',
+            last_name='Client',
+            phone='+21655000111',
+        )
+
+        response = self.client.post(
+            '/api/v1/orders/manual/',
+            {
+                'sales_channel': channel.id,
+                'client': foreign_client.id,
+                'line_items': [
+                    {
+                        'local_product_id': product.id,
+                        'name': product.name,
+                        'sku': product.barcode,
+                        'quantity': 1,
+                        'price': '50.00',
+                        'total': '50.00',
+                    },
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('client', response.data)
+        self.assertFalse(Order.objects.filter(client_id=foreign_client.id).exists())
+
     def test_pos_offline_ticket_sync_is_idempotent(self):
         pos_channel = SalesChannel.objects.create(
             brand=self.brand,
@@ -185,7 +333,7 @@ class OrderAPITests(TestCase):
             brand=self.brand,
             name='Offline POS Product',
             barcode='OFF-001',
-            product_type=Product.ProductType.FINISHED,
+            product_type=Product.ProductType.RESELL_PRODUCT,
             sales_price='25.00',
         )
         inventory = SalesChannelInventory.objects.create(
@@ -237,7 +385,7 @@ class OrderAPITests(TestCase):
             brand=self.brand,
             name='Sequence Product',
             barcode='SEQ-001',
-            product_type=Product.ProductType.FINISHED,
+            product_type=Product.ProductType.RESELL_PRODUCT,
             sales_price='10.00',
         )
         SalesChannelInventory.objects.create(
@@ -284,20 +432,20 @@ class OrderAPITests(TestCase):
             brand=self.brand,
             name='Creme reparatrice',
             barcode='COMP-A',
-            product_type=Product.ProductType.FINISHED,
+            product_type=Product.ProductType.RESELL_PRODUCT,
             sales_price='10.00',
         )
         component_b = Product.objects.create(
             brand=self.brand,
             name='Masque reparateur',
             barcode='COMP-B',
-            product_type=Product.ProductType.FINISHED,
+            product_type=Product.ProductType.RESELL_PRODUCT,
             sales_price='15.00',
         )
         pack = Product.objects.create(
             brand=self.brand,
             name='Pack Reparateur',
-            product_type=Product.ProductType.FINISHED,
+            product_type=Product.ProductType.RESELL_PRODUCT,
             is_pack=True,
             pack_items=[
                 {'product_id': component_a.id, 'quantity': 1},
@@ -363,13 +511,13 @@ class OrderAPITests(TestCase):
             brand=self.brand,
             name='Creme reparatrice',
             barcode='LOW-COMP',
-            product_type=Product.ProductType.FINISHED,
+            product_type=Product.ProductType.RESELL_PRODUCT,
             sales_price='10.00',
         )
         pack = Product.objects.create(
             brand=self.brand,
             name='Pack Reparateur',
-            product_type=Product.ProductType.FINISHED,
+            product_type=Product.ProductType.RESELL_PRODUCT,
             is_pack=True,
             pack_items=[{'product_id': component.id, 'quantity': 2}],
             sales_price='25.00',
@@ -412,7 +560,7 @@ class OrderAPITests(TestCase):
             name='Perfume Bottle',
             wc_product_id=404,
             barcode='BOT-404',
-            product_type=Product.ProductType.FINISHED,
+            product_type=Product.ProductType.RESELL_PRODUCT,
             sales_price='25.00',
         )
         pos_channel = SalesChannel.objects.create(

@@ -481,12 +481,15 @@ def _products_payload(
 
     Knobs:
       - ``ascending``: top vs bad ordering.
-      - ``resell_only``: restrict the population to ``product_type='resell'``.
+      - ``resell_only``: restrict the population to sellable products
+        (``product_type in {resell_product, pack}``) — i.e. exclude
+        components and packaging items.
       - ``require_revenue``: drop rows with revenue <= 0 (refunded / voided
         lines) — useful to keep the bad-products table to genuine slow-movers
         rather than zero-value noise.
     """
     from apps.orders.models import Order
+    from apps.products.models import Product
 
     rng = period_range(period, start_date=start_date, end_date=end_date)
     base_orders = _filter_orders(
@@ -497,7 +500,7 @@ def _products_payload(
 
     qs = _products_aggregate(base_orders)
     if resell_only:
-        qs = qs.filter(product__product_type='resell')
+        qs = qs.filter(product__product_type__in=Product.SELLABLE_TYPES)
     if require_revenue:
         qs = qs.filter(revenue__gt=0)
     qs = qs.order_by(
@@ -551,8 +554,9 @@ def bad_products(
     Worst-performing resell products in the period.
 
     Scope:
-      - Only ``product_type='resell'`` — packaging / raw-material / finished
-        goods are inventory lines, not a buyer's slow-mover problem.
+      - Only sellable products (``product_type in {resell_product, pack}``) —
+        components / packaging items are inventory lines, not a buyer's
+        slow-mover problem.
       - Only products that *did* sell (revenue > 0). A row with zero revenue
         usually means a refunded or 100%-discounted line and would be noise
         for someone trying to spot lines to promote or discontinue.

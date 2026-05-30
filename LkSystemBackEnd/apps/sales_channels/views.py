@@ -317,27 +317,11 @@ class ExpenseViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def _get_allowed_channel_ids(self):
-        user = self.request.user
-        if user.is_superuser:
-            return None
-        try:
-            from apps.rbac.services import PermissionService
-            scoped = set(
-                PermissionService.get_user_assignments(user)
-                .filter(sales_channel__isnull=False)
-                .values_list('sales_channel_id', flat=True)
-            )
-            if scoped:
-                return scoped
-        except Exception:
-            pass
-        if user.allowed_brands.exists():
-            return set(
-                SalesChannel.objects
-                .filter(brand__in=user.allowed_brands.all())
-                .values_list('id', flat=True)
-            )
-        return set()
+        # Single source of truth for channel scoping (workspace-aware): scopes
+        # a Super Admin to the selected company, narrows to the active brand,
+        # and honours channel/brand assignments. None = global (no filter).
+        from apps.rbac.services import visible_sales_channel_ids
+        return visible_sales_channel_ids(self.request.user)
 
     def get_queryset(self):
         qs = Expense.objects.select_related('sales_channel', 'sales_channel__brand', 'created_by')

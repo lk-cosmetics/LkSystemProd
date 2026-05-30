@@ -101,7 +101,7 @@ function orderLineToCartLine(order: OrderDetail, line: OrderLine): CartLine | nu
       image_url: line.product_image ?? '',
       product_link: '',
       barcode: line.barcode ?? '',
-      product_type: 'resell',
+      product_type: 'resell_product',
       status: 'publish',
       purchase_price: '0.00',
       sales_price: line.unit_price,
@@ -550,9 +550,14 @@ export default function POSPage() {
 
   const productQueryParams = useMemo(() => {
     if (!channelId || !selectedChannel || !isOnlineMode) return { enabled: false as const };
+    // No ``product_type`` filter here: the POS catalogue must surface every
+    // sellable item (``resell_product`` AND ``pack``). The backend list
+    // endpoint filters product_type by exact match, so we fetch the brand's
+    // published catalogue and narrow to sellable types client-side (see
+    // ``isSellable`` below). The primary offline path (``pos_cache``) is
+    // already scoped to SELLABLE_TYPES server-side.
     return {
       brand: selectedChannel.brand,
-      product_type: 'resell' as const,
       status: 'publish' as const,
       enabled: true as const,
     };
@@ -615,11 +620,15 @@ export default function POSPage() {
         return a.name.localeCompare(b.name);
       });
 
-    const isResell = (p: ProductListItem) => p.product_type === 'resell';
+    // Sellable = the two customer-facing types. Packs were historically stored
+    // as ``resell`` + ``is_pack``; after the taxonomy refactor they carry the
+    // canonical ``pack`` type, so both must be admitted here.
+    const isSellable = (p: ProductListItem) =>
+      p.product_type === 'resell_product' || p.product_type === 'pack';
 
     if (offlineProducts.length > 0) {
       const query = normalizeSearch(productSearch);
-      const base = offlineProducts.filter(isResell);
+      const base = offlineProducts.filter(isSellable);
       const rows = query
         ? base.filter(product => (
             product.name.toLowerCase().includes(query) ||
@@ -631,7 +640,7 @@ export default function POSPage() {
 
     if (!productsData?.pages) return [];
     return sortPromotionsFirst(
-      productsData.pages.flatMap(page => page?.results ?? []).filter(isResell),
+      productsData.pages.flatMap(page => page?.results ?? []).filter(isSellable),
     );
   }, [
     channelId,
@@ -1112,7 +1121,7 @@ export default function POSPage() {
     setReturningOrderId(order.id);
     setErrorMsg(null);
     try {
-      await orderService.processReturn(order.id, 'Returned from POS history');
+      await orderService.processReturn(order.id, { returnReason: 'Returned from POS history' });
       if (activeHistoryOrder?.id === order.id) {
         releaseHistoryOrder();
       }

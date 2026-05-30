@@ -10,17 +10,16 @@ function normalizeRoleName(role: string): string {
   return role.replace(/[\s_]+/g, '').toUpperCase();
 }
 
+/**
+ * Root access is granted only to Django superusers, signalled by the
+ * backend `is_superuser` boolean. Every other capability (including the
+ * dynamic "Super Admin" RBAC role) is resolved purely from the
+ * `permissions` array the backend sends, so there are no hardcoded role
+ * names anywhere in the access logic. A Super Admin's permission array
+ * already contains every codename, so permission checks pass naturally.
+ */
 function hasRootAccess(user: User | null): boolean {
-  if (!user) return false;
-  const userRoles = [
-    ...(user.roles ?? []),
-    ...(user.role ? [user.role] : []),
-  ].map(normalizeRoleName);
-  return userRoles.some(role =>
-    role === 'SUPERADMIN' ||
-    role === 'SUPERUSER' ||
-    role === 'ADMIN'
-  );
+  return user?.is_superuser === true;
 }
 
 /**
@@ -78,6 +77,23 @@ export function hasAllPermissions(
   permissions: string[]
 ): boolean {
   return permissions.every(permission => hasPermission(user, permission));
+}
+
+/**
+ * Platform owner (Django superuser). The single global root bypass — used to
+ * gate platform-only UI without referencing role names.
+ */
+export function isPlatformAdmin(user: User | null): boolean {
+  return user?.is_superuser === true;
+}
+
+/**
+ * A pure POS / cashier operator: can use the POS but has no back-office reach.
+ * Defined by permissions (not role names) so any custom role with the same
+ * shape behaves identically. A cashier has `use_pos` and lacks `view_dashboard`.
+ */
+export function isPosOnlyUser(user: User | null): boolean {
+  return hasPermission(user, 'use_pos') && !hasPermission(user, 'view_dashboard');
 }
 
 /**

@@ -2,7 +2,7 @@
  * ClientsPage - Customer management with phone-safe identity, governorate-first
  * location data, computed points, and linked order history.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   AlertTriangle,
@@ -308,8 +308,18 @@ function ClientEditDialog({ open, onOpenChange, client, brands, onSave, saving }
   const [form, setForm] = useState<Partial<CreateClientRequest>>({});
   const [error, setError] = useState('');
 
-  const handleOpen = useCallback((value: boolean) => {
-    if (value && client) {
+  // Hydrate the form whenever the dialog opens. This MUST key off the `open`
+  // and `client` props rather than the sheet's onOpenChange callback: the page
+  // opens this dialog by flipping the `open` prop directly, and Radix never
+  // fires onOpenChange for a prop-driven open — so tying initialisation to it
+  // left the edit form blank. On open we copy the selected client's current
+  // values in (edit), or seed sensible defaults (create). `editingClient` is
+  // captured once at open time and is not refreshed by background list
+  // refetches, so this won't clobber the user's in-progress edits.
+  useEffect(() => {
+    if (!open) return;
+    setError('');
+    if (client) {
       setForm({
         email: client.email,
         first_name: client.first_name ?? '',
@@ -324,12 +334,10 @@ function ClientEditDialog({ open, onOpenChange, client, brands, onSave, saving }
         brand: client.brand,
         notes: client.notes ?? '',
       });
-    } else if (value) {
+    } else {
       setForm({ client_type: 'PERSON', country: 'TN' });
     }
-    setError('');
-    onOpenChange(value);
-  }, [client, onOpenChange]);
+  }, [open, client]);
 
   const set = (field: keyof CreateClientRequest, value: string | number | null) => {
     setForm(prev => ({ ...prev, [field]: value }));
@@ -343,7 +351,7 @@ function ClientEditDialog({ open, onOpenChange, client, brands, onSave, saving }
     try {
       setError('');
       await onSave({ ...form, country: form.country || 'TN' }, client?.id);
-      handleOpen(false);
+      onOpenChange(false);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to save client.';
       setError(msg.includes('phone') ? 'This phone number is already registered.' : msg);
@@ -352,7 +360,7 @@ function ClientEditDialog({ open, onOpenChange, client, brands, onSave, saving }
 
   const footer = (
     <div className="grid w-full gap-2 sm:flex sm:justify-end">
-      <Button variant="outline" onClick={() => handleOpen(false)} disabled={saving}>Cancel</Button>
+      <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>Cancel</Button>
       <Button onClick={handleSubmit} disabled={saving || !form.email?.trim()} className="gap-1.5">
         {saving ? <><Loader2 className="size-4 animate-spin" /> Saving...</> : isEdit ? 'Save Changes' : 'Add Client'}
       </Button>
@@ -362,7 +370,7 @@ function ClientEditDialog({ open, onOpenChange, client, brands, onSave, saving }
   return (
     <ResponsiveSheet
       open={open}
-      onOpenChange={handleOpen}
+      onOpenChange={onOpenChange}
       title={isEdit ? 'Edit Client' : 'Add Client'}
       description="Phones are matched safely, so +21624512995 and 24512995 point to the same client."
       footer={footer}

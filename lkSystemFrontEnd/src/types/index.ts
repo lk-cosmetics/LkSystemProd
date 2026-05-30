@@ -99,9 +99,15 @@ export interface User {
   roles: string[];
   can_switch_brands?: boolean;
   company_id?: number;
+  /** Name of the active company, for the workspace indicator in the UI. */
+  company_name?: string | null;
+  /** Active brand workspace; null/undefined means whole-company focus. */
+  current_brand_id?: number | null;
   allowed_brand_ids?: number[];
   /** RBAC permission codenames (e.g. 'view_products', 'create_orders', 'use_pos'). */
   permissions: string[];
+  /** True only for the Django superuser (platform owner). Single root bypass. */
+  is_superuser?: boolean;
   // Computed properties for backwards compatibility
   firstName?: string;
   lastName?: string;
@@ -231,6 +237,7 @@ export interface AuthState {
   login: (credentials: LoginRequest) => Promise<void>;
   logout: () => void;
   refreshToken: () => Promise<void>;
+  switchWorkspace: (companyId: number | null, brandId: number | null) => Promise<void>;
   clearError: () => void;
 }
 
@@ -503,12 +510,21 @@ export interface AdminChangePasswordRequest {
 // PRODUCT TYPES
 // =============================================================================
 
+// Canonical product/item taxonomy (kept in sync with the backend
+// ``Product.ProductType`` enum):
+//   resell_product  – normal product bought & resold (perfume, cosmetic, any WC product)
+//   pack            – bundle/pack sold to customers (promo pack, gift pack)
+//   component       – used only in BOM/manufacturing (bottle, cap, label, liquid, raw material)
+//   packaging_item  – used only during order prep/delivery (shipping box, bag, thank-you card)
+// ``resell_product`` and ``pack`` are the only sellable types (may appear on an order).
 export type ProductType =
-  | 'resell'
-  | 'packaging'
-  | 'finished'
+  | 'resell_product'
+  | 'pack'
   | 'component'
-  | 'raw_material';
+  | 'packaging_item';
+
+/** Product types that may appear on a customer order (WooCommerce / POS sale lines). */
+export const SELLABLE_PRODUCT_TYPES: readonly ProductType[] = ['resell_product', 'pack'];
 export type ProductStatus = 'publish' | 'draft' | 'pending' | 'private';
 
 export interface PackItem {
@@ -538,6 +554,8 @@ export interface ProductListItem {
   stock_total?: number;
   name: string;
   image_url: string;
+  /** Locally-uploaded image URL (server media). Falls back to image_url when absent. */
+  image?: string | null;
   product_link: string;
   barcode: string;
   product_type: ProductType;
@@ -1204,6 +1222,7 @@ export interface CreateClientRequest {
   client_type?: 'PERSON' | 'COMPANY';
   date_of_birth?: string | null;
   address?: string;
+  city?: string;
   state?: string;
   postcode?: string;
   country?: string;
@@ -1255,6 +1274,40 @@ export type DeliveryStatus =
   | 'FAILED'
   | 'CANCELLED'
   | 'RETURNED';
+
+// Phase D — clean, derived top-layer status set (the single status the UI reads).
+// These are computed by the backend lifecycle service and are read-only.
+export type CleanOrderStatus =
+  | 'new'
+  | 'awaiting_confirmation'
+  | 'confirmed'
+  | 'delayed'
+  | 'not_answered'
+  | 'canceled'
+  | 'preparing'
+  | 'done'
+  | 'returned'
+  | 'exchanged';
+
+export type CleanConfirmationStatus =
+  | 'pending'
+  | 'accepted'
+  | 'delayed'
+  | 'canceled'
+  | 'no_answer';
+
+export type CleanDeliveryMethod = 'home_delivery' | 'pos_pickup';
+
+export type CleanStockStatus = 'in_stock' | 'partial_stock' | 'out_of_stock';
+
+export type CleanPriorityLevel = 'high' | 'medium' | 'low';
+
+export type CleanSyncStatus =
+  | 'imported'
+  | 'pending_sync'
+  | 'syncing'
+  | 'synced'
+  | 'sync_failed';
 
 export interface OrderLine {
   id: number;
@@ -1382,6 +1435,22 @@ export interface OrderListItem {
   edit_lock_heartbeat_at: string | null;
   edit_lock_expires_at: string | null;
   edit_lock_token: string;
+  // Phase D — clean derived top-layer status set (read-only; lifecycle service
+  // is the only writer). The single canonical status the UI surfaces.
+  order_status: CleanOrderStatus;
+  order_status_display: string;
+  confirmation_status: CleanConfirmationStatus;
+  confirmation_status_display: string;
+  delivery_method: CleanDeliveryMethod;
+  delivery_method_display: string;
+  stock_status: CleanStockStatus;
+  stock_status_display: string;
+  priority_level: CleanPriorityLevel;
+  priority_level_display: string;
+  sync_status: CleanSyncStatus;
+  sync_status_display: string;
+  sync_error_message: string;
+  last_sync_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1427,6 +1496,48 @@ export interface OrderStockCheck {
   }>;
 }
 
+export interface OrderChannelStockItem {
+  product_id: number;
+  product_name: string;
+  barcode: string;
+  required_quantity: number;
+  quantity: number;
+  reserved_quantity: number;
+  available_quantity: number;
+  is_sufficient: boolean;
+  shortfall: number;
+  has_inventory_row: boolean;
+}
+
+export interface OrderChannelStock {
+  sales_channel: {
+    id: number;
+    name: string;
+    code: string | null;
+    channel_type: ChannelType;
+    store_type: string;
+    is_active: boolean;
+  };
+  is_order_channel: boolean;
+  is_pos_channel: boolean;
+  can_fulfill: boolean;
+  has_unverifiable_lines: boolean;
+  items: OrderChannelStockItem[];
+}
+
+export interface OrderStockByChannel {
+  order_channel_id: number | null;
+  pos_channel_id: number | null;
+  tracked_product_count: number;
+  channels: OrderChannelStock[];
+  unlinked_lines: Array<{
+    line_id: number;
+    product_name: string;
+    required_quantity: number;
+    reason: string;
+  }>;
+}
+
 export interface OrderDetail extends OrderListItem {
   lines: OrderLine[];
   customer_lines?: OrderLine[];
@@ -1465,6 +1576,7 @@ export interface OrderDetail extends OrderListItem {
   deleted_by: number | null;
   delivery_response?: Record<string, unknown> | null;
   stock_check?: OrderStockCheck;
+  stock_by_channel?: OrderStockByChannel;
 }
 
 export interface OrderEditLineInput {
@@ -1547,6 +1659,20 @@ export interface POSOrderCreateRequest {
   total?: string;
 }
 
+// Phase D — KPI block computed from the clean ``order_status`` (genuinely
+// successful sales only; returns / exchanges / cancellations excluded).
+export interface OrderStatusKpis {
+  total_orders: number;
+  by_status: Partial<Record<CleanOrderStatus, number>>;
+  successful_sales: number;
+  revenue: string;
+  returned: number;
+  exchanged: number;
+  canceled: number;
+  in_confirmation: number;
+  in_fulfillment: number;
+}
+
 export interface OrderSummary {
   total_orders: number;
   pending: number;
@@ -1564,4 +1690,6 @@ export interface OrderSummary {
   flow_counts?: Record<string, number>;
   workflow_counts?: Record<string, number>;
   exchanged?: number;
+  // Phase D — additive clean-status KPI block.
+  order_status_kpis?: OrderStatusKpis;
 }

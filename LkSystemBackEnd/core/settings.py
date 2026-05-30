@@ -61,9 +61,14 @@ LOCAL_APPS = [
     'apps.orders',          # Order ingestion (WooCommerce + POS)
     'apps.rbac',            # Dynamic role-based access control
     'apps.bi',              # Business Intelligence dashboard
+    'apps.notifications',   # Role-based, user-targeted notifications
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
+
+# Notifications retention: rows older than this are deleted by the
+# ``cleanup_notifications`` management command / Celery task. Configurable.
+NOTIFICATION_RETENTION_DAYS = config('NOTIFICATION_RETENTION_DAYS', default=90, cast=int)
 
 # =============================================================================
 # MIDDLEWARE
@@ -285,6 +290,23 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = config('X_FRAME_OPTIONS', default='DENY')
 
 # =============================================================================
+# SYSTEM CHECK SILENCING
+# =============================================================================
+# ``manage.py check --deploy`` (run in CI with ``--fail-level WARNING``) also
+# evaluates drf-spectacular's schema-introspection advisories: SerializerMethod
+# getters without a return type hint (W001) and APIViews without a declared
+# ``serializer_class`` (W002). These only affect the *generated OpenAPI doc*
+# quality — never runtime or deploy safety — so they must not gate CI. They are
+# still visible when explicitly building the schema:
+#   ``manage.py spectacular --file schema.yml``
+# The genuine deploy checks (security.W004/W008/W009 etc.) are deliberately NOT
+# silenced — those are satisfied with real settings/env, not hidden.
+SILENCED_SYSTEM_CHECKS = [
+    'drf_spectacular.W001',
+    'drf_spectacular.W002',
+]
+
+# =============================================================================
 # DJANGO REST FRAMEWORK
 # =============================================================================
 
@@ -488,6 +510,19 @@ CELERY_TASK_DEFAULT_QUEUE = 'default'
 DELIVERY_API_URL     = config('DELIVERY_API_URL',     default='https://core.jax-delivery.com/api/user/colis/add')
 DELIVERY_API_TOKEN   = config('DELIVERY_API_TOKEN',   default='')
 DELIVERY_API_TIMEOUT = config('DELIVERY_API_TIMEOUT', default=15, cast=int)
+
+# =============================================================================
+# WOOCOMMERCE ORDER STATUS PUSH (local → WooCommerce)
+# =============================================================================
+
+# Local is ALWAYS the source of truth. When this gate is False (the default),
+# the system records the intended push and parks the order in ``pending_sync``
+# WITHOUT making any network call — so dev / test / not-yet-configured
+# environments never touch WooCommerce. Flip WC_ORDER_PUSH_ENABLED=true in .env
+# once the live store credentials are verified. A failed push never rolls back
+# the local status; it is recorded for a retry (see WooCommerceSyncService).
+WC_ORDER_PUSH_ENABLED = config('WC_ORDER_PUSH_ENABLED', default=False, cast=bool)
+WC_ORDER_PUSH_TIMEOUT = config('WC_ORDER_PUSH_TIMEOUT', default=30, cast=int)
 
 # =============================================================================
 # CUSTOM USER MODEL

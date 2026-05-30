@@ -95,13 +95,15 @@ class ProductService(BaseWooCommerceService[Product], WebhookHandlerMixin):
         remote_image = images[0].get('src', '') if images else ''
         local_image = self._download_primary_image(remote_image, wc_data.get('id'))
 
-        wc_type = wc_data.get('type', 'simple')
-
         return {
             'wc_product_id': wc_data['id'],
             'name': wc_data.get('name', ''),
             'barcode': wc_data.get('sku', ''),
-            'product_type': 'packaging' if wc_type == 'packaging' else 'resell',
+            # Every product imported from WooCommerce is a normal sellable good,
+            # so it defaults to RESELL_PRODUCT. The internal-only taxonomies
+            # (component for BOM parts, packaging_item for shipping supplies) are
+            # created locally and never originate from a WooCommerce sync.
+            'product_type': Product.ProductType.RESELL_PRODUCT,
             'status': wc_data.get('status', 'publish'),
             'brand': self.sales_channel.brand,
             'sales_price': regular_price,
@@ -137,11 +139,20 @@ class ProductService(BaseWooCommerceService[Product], WebhookHandlerMixin):
 
     # ── Local → WooCommerce ──────────────────────────────────────────────
 
+    # Map canonical local types back to the WooCommerce "type" wire value so the
+    # export contract is unchanged (WC historically received 'packaging' / 'resell').
+    _LOCAL_TO_WC_TYPE = {
+        Product.ProductType.PACKAGING_ITEM: 'packaging',
+        Product.ProductType.RESELL_PRODUCT: 'resell',
+        Product.ProductType.PACK: 'resell',
+        Product.ProductType.COMPONENT: 'component',
+    }
+
     def transform_to_wc(self, instance: Product) -> Dict[str, Any]:
         return {
             'name': instance.name,
             'sku': instance.barcode,
-            'type': instance.product_type,
+            'type': self._LOCAL_TO_WC_TYPE.get(instance.product_type, 'resell'),
             'status': instance.status,
             'regular_price': str(instance.sales_price),
         }
