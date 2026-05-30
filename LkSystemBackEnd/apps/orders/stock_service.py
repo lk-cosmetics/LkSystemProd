@@ -7,6 +7,7 @@ from typing import Any
 from apps.inventory.models import SalesChannelInventory
 from apps.orders.models import Order
 from apps.products.models import Product
+from apps.sales_channels.models import SalesChannel
 
 
 class OrderStockAvailabilityService:
@@ -187,3 +188,194 @@ class OrderStockAvailabilityService:
             stock_status = SS.IN_STOCK
 
         return {'stock_status': stock_status, 'mapping_required': mapping_required}
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Stock-gating helpers (delivery / POS) + per-channel breakdown
+    # ──────────────────────────────────────────────────────────────────────
+
+    @classmethod
+    def _required_customer_quantities(
+        cls, order: Order,
+    ) -> tuple[dict[int, int], dict[int, dict[str, Any]], list[dict[str, Any]]]:
+        """Aggregate required quantities for *stock-bearing* customer lines.
+
+        Returns ``(required, meta, unlinked)`` where:
+
+          * ``required``  -> ``{product_id: total_quantity}`` for LINKED, locally
+            mapped, non-packaging lines (the only lines that ever move stock).
+          * ``meta``      -> ``{product_id: {product_name, barcode}}`` for display.
+          * ``unlinked``  -> customer lines that cannot be stock-checked
+            (``is_linked == False`` or no local product). These are reported as
+            warnings but never block fulfilment — by design unlinked lines never
+            trigger stock movements (WooCommerce-import compatibility).
+        """
+        lines = list(
+            order.lines.filter(is_deleted=False)
+            .exclude(product__product_type=Product.ProductType.PACKAGING_ITEM)
+            .select_related('product')
+        )
+        required: dict[int, int] = {}
+        meta: dict[int, dict[str, Any]] = {}
+        unlinked: list[dict[str, Any]] = []
+
+        for line in lines:
+            if (not line.is_linked) or (not line.product_id):
+                unlinked.append({
+                    'line_id': line.id,
+                    'product_name': line.product_name,
+                    'required_quantity': line.quantity,
+                    'reason': line.unlinked_reason or 'not_linked',
+                })
+                continue
+            required[line.product_id] = required.get(line.product_id, 0) + line.quantity
+            if line.product_id not in meta:
+                meta[line.product_id] = {
+                    'product_name': line.product.name if line.product else line.product_name,
+                    'barcode': (line.product.barcode if line.product else line.barcode) or '',
+                }
+
+        return required, meta, unlinked
+
+    @classmethod
+    def shortfalls_for_channel(
+        cls, order: Order, sales_channel_id: int | None,
+    ) -> list[dict[str, Any]]:
+        """Linked products whose available stock is below the required quantity
+        in ``sales_channel_id``.
+
+        Used to *gate* delivery / POS submission. Unlinked lines are intentionally
+        ignored (they never deduct stock). Returns an empty list when there is
+        nothing to check or everything is sufficient.
+        """
+        required, meta, _unlinked = cls._required_customer_quantities(order)
+        if not required or not sales_channel_id:
+            return []
+
+        available = {
+            inv.product_id: inv.available_quantity
+            for inv in SalesChannelInventory.objects.filter(
+                sales_channel_id=sales_channel_id,
+                product_id__in=required.keys(),
+            )
+        }
+
+        shortfalls: list[dict[str, Any]] = []
+        for product_id, needed in required.items():
+            have = available.get(product_id, 0)
+            if have < needed:
+                info = meta.get(product_id, {})
+                shortfalls.append({
+                    'product_id': product_id,
+                    'product_name': info.get('product_name', ''),
+                    'required': needed,
+                    'available': have,
+                    'missing': needed - have,
+                })
+
+        shortfalls.sort(key=lambda s: (-s['missing'], (s['product_name'] or '').lower()))
+        return shortfalls
+
+    @classmethod
+    def channel_breakdown(cls, order: Order) -> dict[str, Any]:
+        """Per-sales-channel stock view for the order-detail screen.
+
+        Every channel in the order's brand becomes a tab, each listing the
+        required products and the channel's quantity / reserved / available /
+        sufficiency. The order's own channel is surfaced first, the routed POS
+        channel second, then the remaining channels alphabetically.
+        """
+        required, meta, unlinked = cls._required_customer_quantities(order)
+
+        brand_id = order.brand_id or (
+            order.sales_channel.brand_id if order.sales_channel_id else None
+        )
+
+        if brand_id:
+            channels = list(SalesChannel.objects.filter(brand_id=brand_id))
+        else:
+            ids = [cid for cid in (order.sales_channel_id, order.pos_sales_channel_id) if cid]
+            channels = list(SalesChannel.objects.filter(id__in=ids))
+
+        # Defensive: the order channel + routed POS channel must always appear,
+        # even if they somehow fall outside the brand filter.
+        present_ids = {c.id for c in channels}
+        for extra_id in (order.sales_channel_id, order.pos_sales_channel_id):
+            if extra_id and extra_id not in present_ids:
+                extra = SalesChannel.objects.filter(id=extra_id).first()
+                if extra:
+                    channels.append(extra)
+                    present_ids.add(extra_id)
+
+        channel_ids = [c.id for c in channels]
+        inventories: dict[tuple[int, int], SalesChannelInventory] = {}
+        if channel_ids and required:
+            inventories = {
+                (inv.sales_channel_id, inv.product_id): inv
+                for inv in SalesChannelInventory.objects.filter(
+                    sales_channel_id__in=channel_ids,
+                    product_id__in=required.keys(),
+                )
+            }
+
+        def sort_key(channel: SalesChannel) -> tuple[int, str]:
+            if channel.id == order.sales_channel_id:
+                return (0, '')
+            if order.pos_sales_channel_id and channel.id == order.pos_sales_channel_id:
+                return (1, '')
+            return (2, (channel.name or '').lower())
+
+        channels.sort(key=sort_key)
+
+        channel_payloads: list[dict[str, Any]] = []
+        for channel in channels:
+            items: list[dict[str, Any]] = []
+            can_fulfill = True
+            for product_id, needed in required.items():
+                inv = inventories.get((channel.id, product_id))
+                quantity = inv.quantity if inv else 0
+                reserved = inv.reserved_quantity if inv else 0
+                available = inv.available_quantity if inv else 0
+                is_sufficient = available >= needed
+                if not is_sufficient:
+                    can_fulfill = False
+                info = meta.get(product_id, {})
+                items.append({
+                    'product_id': product_id,
+                    'product_name': info.get('product_name', ''),
+                    'barcode': info.get('barcode', ''),
+                    'required_quantity': needed,
+                    'quantity': quantity,
+                    'reserved_quantity': reserved,
+                    'available_quantity': available,
+                    'is_sufficient': is_sufficient,
+                    'shortfall': max(0, needed - available),
+                    'has_inventory_row': inv is not None,
+                })
+
+            # Shortfalls float to the top so problems are visible first.
+            items.sort(key=lambda it: (it['is_sufficient'], (it['product_name'] or '').lower()))
+
+            channel_payloads.append({
+                'sales_channel': {
+                    'id': channel.id,
+                    'name': channel.name,
+                    'code': channel.code,
+                    'channel_type': channel.channel_type,
+                    'store_type': channel.store_type,
+                    'is_active': channel.is_active,
+                },
+                'is_order_channel': channel.id == order.sales_channel_id,
+                'is_pos_channel': bool(order.pos_sales_channel_id)
+                    and channel.id == order.pos_sales_channel_id,
+                'can_fulfill': can_fulfill,
+                'has_unverifiable_lines': bool(unlinked),
+                'items': items,
+            })
+
+        return {
+            'order_channel_id': order.sales_channel_id,
+            'pos_channel_id': order.pos_sales_channel_id,
+            'tracked_product_count': len(required),
+            'channels': channel_payloads,
+            'unlinked_lines': unlinked,
+        }

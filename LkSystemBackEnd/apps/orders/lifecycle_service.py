@@ -53,6 +53,49 @@ class OrderLifecycleService:
         if order.status == Order.Status.CANCELLED or order.outcome == Order.Outcome.CANCELLED:
             raise LifecycleError('Order is cancelled and cannot be processed.')
 
+    @classmethod
+    def _assert_stock_available(
+        cls,
+        order: Order,
+        *,
+        sales_channel_id: int | None,
+        context: str,
+        channel_label: str,
+    ) -> None:
+        """Hard-block a fulfilment transition when LINKED products lack stock in
+        the target channel.
+
+        ``context`` is ``'delivery'`` or ``'pos'`` (drives the message wording);
+        ``channel_label`` is the human-readable channel name. Unlinked lines are
+        never blocked — by design they don't move stock (WooCommerce-import
+        compatibility), so they cannot create a shortfall here.
+
+        Imported lazily to avoid any import-order coupling with stock_service.
+        """
+        from apps.orders.stock_service import OrderStockAvailabilityService
+
+        shortfalls = OrderStockAvailabilityService.shortfalls_for_channel(
+            order, sales_channel_id,
+        )
+        if not shortfalls:
+            return
+
+        shown = shortfalls[:6]
+        detail = '; '.join(
+            f"{s['product_name'] or ('product #' + str(s['product_id']))} "
+            f"(need {s['required']}, available {s['available']})"
+            for s in shown
+        )
+        remaining = len(shortfalls) - len(shown)
+        if remaining > 0:
+            detail += f"; and {remaining} more product(s)"
+
+        if context == 'pos':
+            message = f'Cannot send to POS — insufficient stock at {channel_label}: {detail}.'
+        else:
+            message = f'Cannot send to delivery — insufficient stock in {channel_label}: {detail}.'
+        raise LifecycleError(message)
+
     # ── Final-outcome recompute ──────────────────────────────────────────────
     # Single contract that determines Order.final_outcome from the current state
     # of every other status field. Called after every lifecycle transition so
@@ -703,6 +746,15 @@ class OrderLifecycleService:
         if pos_sales_channel.brand_id != order.sales_channel.brand_id:
             raise LifecycleError('Selected POS location must belong to the same brand as this order.')
 
+        # Stock gate: the selected POS location must physically hold enough of
+        # every linked product before we route the order there.
+        cls._assert_stock_available(
+            order,
+            sales_channel_id=pos_sales_channel.id,
+            context='pos',
+            channel_label=pos_sales_channel.name,
+        )
+
         order.in_store_pickup = True
         order.pos_sales_channel = pos_sales_channel
         order.delivery_status = Order.DeliveryStatus.NONE
@@ -1106,6 +1158,18 @@ class OrderLifecycleService:
                     f'Order is not eligible for delivery submission '
                     f'(status={locked.status}, delivery_status={locked.delivery_status}).'
                 )
+
+            # Stock gate: refuse to hand the order to the delivery API unless the
+            # fulfilling (order) channel holds enough of every linked product.
+            cls._assert_stock_available(
+                locked,
+                sales_channel_id=locked.sales_channel_id,
+                context='delivery',
+                channel_label=(
+                    locked.sales_channel.name
+                    if locked.sales_channel_id else 'the order channel'
+                ),
+            )
 
         service = DeliverySubmissionService()
         result = service.submit(order, actor=actor)

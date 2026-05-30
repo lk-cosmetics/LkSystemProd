@@ -12,7 +12,7 @@ import { useMemo, useState, useCallback, useRef, useEffect } from 'react';
 import {
   CheckCircle, XCircle, RefreshCw, Eye, History, Undo2,
   Trash2, Plus, Loader2, Pencil, Store, Globe, Check,
-  Package, AlertCircle, TrendingUp, Search, ChevronDown,
+  Package, Boxes, AlertCircle, TrendingUp, Search, ChevronDown,
   CreditCard, Calendar, User, MapPin, Percent, MessageSquare,
   Phone, MessageCircleMore, CalendarClock, Ban, ThumbsUp, Clock,
   ChevronLeft, ChevronRight, Truck, ShieldAlert, ScanLine,
@@ -51,7 +51,7 @@ import { OrderClientSelector } from './OrderClientSelector';
 import { CleanStatusBadge, SyncStatusBadge } from './orderStatusBadges';
 import type {
   OrderDetail, OrderLine, OrderEditRequest, OrderLogEntry, OrderDiscountType,
-  ProductListItem, SalesChannel, OrderStatus, OrderStockCheck,
+  ProductListItem, SalesChannel, OrderStatus, OrderStockByChannel,
   POSOrderCreateRequest, Client,
 } from '@/types';
 import type { OrderStatusFieldsPayload, WooCommerceOrderPreviewResponse } from '@/services/order.service';
@@ -221,89 +221,227 @@ function ProductImage({ src, alt, size = 'sm' }: { src?: string | null; alt: str
   );
 }
 
-function StockAvailabilityPanel({ stock }: { stock?: OrderStockCheck }) {
-  if (!stock) return null;
+function titleCase(value: string): string {
+  if (!value) return '';
+  return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
+}
 
-  const websiteOk = stock.can_fulfill_from_website;
-  const posOk = stock.can_fulfill_from_pos;
+/** Compact metric cell used by the mobile stock cards. */
+function StockStat({
+  label, value, tone = 'neutral',
+}: Readonly<{ label: string; value: number; tone?: 'neutral' | 'ok' | 'bad' }>) {
+  const color =
+    tone === 'ok' ? 'text-emerald-700' : tone === 'bad' ? 'text-red-700' : 'text-foreground';
+  return (
+    <div className="rounded-md bg-muted/40 px-1.5 py-1">
+      <p className="text-[9px] uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className={`text-xs font-semibold tabular-nums ${color}`}>{value}</p>
+    </div>
+  );
+}
+
+/**
+ * ChannelStockPanel — per-sales-channel stock breakdown.
+ * Each channel is a sub-tab (horizontally scrollable on small screens).
+ * Desktop renders a dense table; mobile renders stacked metric cards.
+ */
+function ChannelStockPanel({ data }: Readonly<{ data?: OrderStockByChannel }>) {
+  const channels = data?.channels ?? [];
+  const [active, setActive] = useState<string>(
+    () => (channels[0] ? String(channels[0].sales_channel.id) : ''),
+  );
+
+  // Keep the selected sub-tab valid if the payload changes (e.g. after a refetch).
+  useEffect(() => {
+    if (channels.length && !channels.some(c => String(c.sales_channel.id) === active)) {
+      setActive(String(channels[0].sales_channel.id));
+    }
+  }, [channels, active]);
+
+  if (!data || channels.length === 0) {
+    return (
+      <div className="rounded-lg border border-dashed p-8 text-center">
+        <Boxes className="mx-auto size-8 text-muted-foreground/40" />
+        <p className="mt-3 text-sm font-medium">No stock-tracked products</p>
+        <p className="mx-auto mt-1 max-w-sm text-xs text-muted-foreground">
+          This order has no linked products to check against channel inventory.
+          {data && data.unlinked_lines.length > 0 &&
+            ` ${data.unlinked_lines.length} unlinked line(s) are not stock-checked.`}
+        </p>
+      </div>
+    );
+  }
+
+  const hasUnlinked = data.unlinked_lines.length > 0;
 
   return (
-    <div className="rounded-lg border p-4 space-y-3">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Stock availability
-          </h4>
-          <p className="mt-1 text-sm font-medium">
-            {stock.has_warnings ? 'Stock warnings found' : 'All linked products have enough stock'}
+    <div className="space-y-3">
+      <div className="space-y-1">
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Stock by sales channel
+        </h4>
+        <p className="text-xs text-muted-foreground">
+          {data.tracked_product_count} product{data.tracked_product_count === 1 ? '' : 's'} checked
+          across {channels.length} channel{channels.length === 1 ? '' : 's'}. The order channel is
+          used for delivery; the assigned POS is used for in-store fulfilment.
+        </p>
+      </div>
+
+      {hasUnlinked && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
+          <AlertCircle className="mt-0.5 size-4 flex-shrink-0 text-amber-600" />
+          <p className="text-xs text-amber-800">
+            <span className="font-medium">
+              {data.unlinked_lines.length} line{data.unlinked_lines.length === 1 ? '' : 's'} not
+              stock-checked.
+            </span>{' '}
+            Unlinked products (no local match) never move stock and don&apos;t block fulfilment:{' '}
+            {data.unlinked_lines.map(l => l.product_name).join(', ')}
           </p>
         </div>
-        <div className="flex flex-wrap gap-1.5">
-          <Badge variant={websiteOk ? 'default' : 'destructive'} className="text-[10px]">
-            Website {websiteOk ? 'OK' : 'Warning'}
-          </Badge>
-          {posOk !== null && (
-            <Badge variant={posOk ? 'default' : 'destructive'} className="text-[10px]">
-              POS {posOk ? 'OK' : 'Warning'}
-            </Badge>
-          )}
-        </div>
-      </div>
+      )}
 
-      <div className="rounded-md border overflow-hidden">
-        <Table>
-          <TableHeader>
-            <TableRow className="hover:bg-transparent">
-              <TableHead className="h-8 text-xs">Product</TableHead>
-              <TableHead className="h-8 text-xs text-center w-14">Req</TableHead>
-              <TableHead className="h-8 text-xs text-center w-24">Website</TableHead>
-              {stock.pos_channel && <TableHead className="h-8 text-xs text-center w-24">POS</TableHead>}
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {stock.items.map(item => (
-              <TableRow key={item.product_id} className={item.has_warning ? 'bg-amber-50/50' : ''}>
-                <TableCell className="py-2">
+      <Tabs value={active} onValueChange={setActive} className="gap-3">
+        {/* Channel selector — scrolls horizontally when channels overflow. */}
+        <div className="-mx-1 overflow-x-auto px-1 pb-1">
+          <TabsList className="inline-flex h-auto w-max gap-1">
+            {channels.map(ch => {
+              const ChannelIcon = ch.sales_channel.channel_type === 'POS' ? Store : Globe;
+              return (
+                <TabsTrigger
+                  key={ch.sales_channel.id}
+                  value={String(ch.sales_channel.id)}
+                  className="gap-1.5 text-xs"
+                >
+                  <ChannelIcon className="size-3.5" />
+                  <span className="max-w-[120px] truncate">{ch.sales_channel.name}</span>
+                  <span
+                    className={`ml-0.5 inline-block size-2 rounded-full ${ch.can_fulfill ? 'bg-emerald-500' : 'bg-red-500'}`}
+                    aria-hidden
+                  />
+                </TabsTrigger>
+              );
+            })}
+          </TabsList>
+        </div>
+
+        {channels.map(ch => {
+          const ChannelIcon = ch.sales_channel.channel_type === 'POS' ? Store : Globe;
+          return (
+            <TabsContent key={ch.sales_channel.id} value={String(ch.sales_channel.id)} className="space-y-3">
+              {/* Channel header */}
+              <div className="flex flex-col gap-2 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-center gap-2">
+                  <div className={`flex size-9 flex-shrink-0 items-center justify-center rounded-lg ${ch.can_fulfill ? 'bg-emerald-600/10' : 'bg-red-600/10'}`}>
+                    <ChannelIcon className={`size-4 ${ch.can_fulfill ? 'text-emerald-600' : 'text-red-600'}`} />
+                  </div>
                   <div className="min-w-0">
-                    {/* Long product names wrap instead of truncating. */}
-                    <p className="text-xs font-medium whitespace-normal break-words leading-snug">{item.product_name}</p>
-                    {item.issues.length > 0 && (
-                      <p className="mt-0.5 text-[11px] text-amber-700">
-                        {item.issues.join(' ')}
-                      </p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <p className="truncate text-sm font-medium">{ch.sales_channel.name}</p>
+                      {ch.is_order_channel && (
+                        <Badge variant="secondary" className="text-[10px]">Order channel</Badge>
+                      )}
+                      {ch.is_pos_channel && (
+                        <Badge variant="secondary" className="text-[10px]">Assigned POS</Badge>
+                      )}
+                      {!ch.sales_channel.is_active && (
+                        <Badge variant="outline" className="text-[10px] text-muted-foreground">Inactive</Badge>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      {ch.sales_channel.channel_type}
+                      {ch.sales_channel.code ? ` · ${ch.sales_channel.code}` : ''}
+                      {ch.sales_channel.store_type ? ` · ${titleCase(ch.sales_channel.store_type)}` : ''}
+                    </p>
+                  </div>
+                </div>
+                <Badge variant={ch.can_fulfill ? 'default' : 'destructive'} className="w-fit gap-1 text-[11px]">
+                  {ch.can_fulfill ? <CheckCircle className="size-3" /> : <XCircle className="size-3" />}
+                  {ch.can_fulfill ? 'Can fulfil order' : 'Insufficient stock'}
+                </Badge>
+              </div>
+
+              {/* Desktop table */}
+              <div className="hidden overflow-hidden rounded-lg border sm:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead className="h-8 text-xs">Product</TableHead>
+                      <TableHead className="h-8 w-16 text-center text-xs">Required</TableHead>
+                      <TableHead className="h-8 w-16 text-center text-xs">On hand</TableHead>
+                      <TableHead className="h-8 w-16 text-center text-xs">Reserved</TableHead>
+                      <TableHead className="h-8 w-20 text-center text-xs">Sale stock</TableHead>
+                      <TableHead className="h-8 w-24 text-center text-xs">Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {ch.items.map(item => (
+                      <TableRow key={item.product_id} className={item.is_sufficient ? '' : 'bg-red-50/50'}>
+                        <TableCell className="py-2">
+                          <p className="break-words text-xs font-medium leading-snug">{item.product_name}</p>
+                          {item.barcode && (
+                            <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">{item.barcode}</p>
+                          )}
+                          {!item.has_inventory_row && (
+                            <p className="mt-0.5 text-[10px] text-amber-700">No inventory row in this channel</p>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-center text-xs tabular-nums">{item.required_quantity}</TableCell>
+                        <TableCell className="text-center text-xs tabular-nums">{item.quantity}</TableCell>
+                        <TableCell className="text-center text-xs tabular-nums text-muted-foreground">{item.reserved_quantity}</TableCell>
+                        <TableCell className={`text-center text-xs font-semibold tabular-nums ${item.is_sufficient ? 'text-emerald-700' : 'text-red-700'}`}>
+                          {item.available_quantity}
+                        </TableCell>
+                        <TableCell className="text-center">
+                          {item.is_sufficient ? (
+                            <Badge variant="outline" className="gap-1 border-emerald-200 text-[10px] text-emerald-700">
+                              <Check className="size-3" />OK
+                            </Badge>
+                          ) : (
+                            <Badge variant="destructive" className="text-[10px]">Short {item.shortfall}</Badge>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+
+              {/* Mobile cards */}
+              <div className="space-y-2 sm:hidden">
+                {ch.items.map(item => (
+                  <div key={item.product_id} className={`rounded-lg border p-3 ${item.is_sufficient ? '' : 'border-red-200 bg-red-50/50'}`}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="break-words text-xs font-medium leading-snug">{item.product_name}</p>
+                        {item.barcode && (
+                          <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">{item.barcode}</p>
+                        )}
+                      </div>
+                      {item.is_sufficient ? (
+                        <Badge variant="outline" className="gap-1 border-emerald-200 text-[10px] text-emerald-700">
+                          <Check className="size-3" />OK
+                        </Badge>
+                      ) : (
+                        <Badge variant="destructive" className="flex-shrink-0 text-[10px]">Short {item.shortfall}</Badge>
+                      )}
+                    </div>
+                    <div className="mt-2 grid grid-cols-4 gap-1 text-center">
+                      <StockStat label="Req" value={item.required_quantity} />
+                      <StockStat label="On hand" value={item.quantity} />
+                      <StockStat label="Reserved" value={item.reserved_quantity} />
+                      <StockStat label="Sale" value={item.available_quantity} tone={item.is_sufficient ? 'ok' : 'bad'} />
+                    </div>
+                    {!item.has_inventory_row && (
+                      <p className="mt-1.5 text-[10px] text-amber-700">No inventory row in this channel</p>
                     )}
                   </div>
-                </TableCell>
-                <TableCell className="text-center text-xs tabular-nums">{item.required_quantity}</TableCell>
-                <TableCell className="text-center text-xs tabular-nums">
-                  {item.website_available_quantity}
-                </TableCell>
-                {stock.pos_channel && (
-                  <TableCell className="text-center text-xs tabular-nums">
-                    {item.pos_available_quantity ?? 0}
-                  </TableCell>
-                )}
-              </TableRow>
-            ))}
-            {stock.unlinked_lines.map(line => (
-              <TableRow key={`unlinked-${line.line_id}`} className="bg-red-50/60">
-                <TableCell className="py-2 text-xs">
-                  <p className="font-medium">{line.product_name}</p>
-                  <p className="text-[11px] text-red-700">{line.issue}</p>
-                </TableCell>
-                <TableCell className="text-center text-xs">{line.required_quantity}</TableCell>
-                <TableCell className="text-center text-xs">-</TableCell>
-                {stock.pos_channel && <TableCell className="text-center text-xs">-</TableCell>}
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-
-      <p className="text-[11px] text-muted-foreground">
-        Website stock: {stock.website_channel?.name ?? 'Not configured'}
-        {stock.pos_channel ? ` · POS stock: ${stock.pos_channel.name}` : ''}
-      </p>
+                ))}
+              </div>
+            </TabsContent>
+          );
+        })}
+      </Tabs>
     </div>
   );
 }
@@ -449,6 +587,498 @@ interface OrderDialogPermissions {
   restore: boolean;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* PACKAGING ITEMS PICKER — shared between the detail dialog's Packaging tab    */
+/* and the dedicated PackagingDialog. Self-contained: tracks its own selection, */
+/* search and scanner state so it can be dropped in anywhere.                   */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+function PackagingItemsPicker({
+  order,
+  packagingProducts,
+  loadingPackagingProducts,
+  isLoading,
+  canPackage,
+  onPackageOrder,
+  onUnpackageOrder,
+}: Readonly<{
+  order: OrderDetail;
+  packagingProducts: ProductListItem[];
+  loadingPackagingProducts?: boolean;
+  isLoading?: boolean;
+  canPackage: boolean;
+  onPackageOrder: (items: Array<{ product_id: number; quantity: number }>, allowUpdate: boolean) => void;
+  onUnpackageOrder: () => void;
+}>) {
+  const packagingLines = order.packaging_lines ?? order.lines.filter(line => line.product_type === 'packaging_item');
+
+  // Multi-select packaging: product_id → quantity. Lets the user tick (or scan)
+  // several packaging products and Save them all in one shot.
+  const [packagingSelection, setPackagingSelection] = useState<Record<number, number>>({});
+  const [packagingSearch, setPackagingSearch] = useState('');
+  const [packagingScannerOpen, setPackagingScannerOpen] = useState(false);
+  const [packagingScanFeedback, setPackagingScanFeedback] =
+    useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const scanInputRef = useRef<HTMLInputElement>(null);
+
+  const filteredPackagingProducts = useMemo(() => {
+    const q = packagingSearch.trim().toLowerCase();
+    const base = q
+      ? packagingProducts.filter(
+          p => p.name.toLowerCase().includes(q) || (p.barcode?.toLowerCase().includes(q))
+        )
+      : packagingProducts;
+    return base.slice(0, 100);
+  }, [packagingProducts, packagingSearch]);
+
+  const selectedPackagingCount = Object.keys(packagingSelection).length;
+  const allFilteredSelected =
+    filteredPackagingProducts.length > 0 &&
+    filteredPackagingProducts.every(p => packagingSelection[p.id] !== undefined);
+
+  const addPackagingProduct = useCallback((productId: number, qty = 1) => {
+    setPackagingSelection(prev => ({ ...prev, [productId]: (prev[productId] ?? 0) + qty }));
+  }, []);
+
+  const togglePackagingProduct = useCallback((productId: number) => {
+    setPackagingSelection(prev => {
+      const next = { ...prev };
+      if (next[productId] !== undefined) delete next[productId];
+      else next[productId] = 1;
+      return next;
+    });
+  }, []);
+
+  const setPackagingProductQty = useCallback((productId: number, qty: number) => {
+    setPackagingSelection(prev => ({
+      ...prev,
+      [productId]: Number.isFinite(qty) && qty > 0 ? qty : 1,
+    }));
+  }, []);
+
+  const toggleSelectAllPackaging = useCallback(() => {
+    setPackagingSelection(prev => {
+      const everyFilteredSelected =
+        filteredPackagingProducts.length > 0 &&
+        filteredPackagingProducts.every(p => prev[p.id] !== undefined);
+      const next = { ...prev };
+      if (everyFilteredSelected) {
+        for (const p of filteredPackagingProducts) delete next[p.id];
+      } else {
+        for (const p of filteredPackagingProducts) {
+          if (next[p.id] === undefined) next[p.id] = 1;
+        }
+      }
+      return next;
+    });
+  }, [filteredPackagingProducts]);
+
+  // Camera scan → exact barcode match adds +1.
+  const handlePackagingScan = useCallback((rawCode: string) => {
+    const code = rawCode.trim();
+    if (!code) return;
+    const match = packagingProducts.find(
+      p => p.barcode && p.barcode.toLowerCase() === code.toLowerCase()
+    );
+    if (!match) {
+      setPackagingScanFeedback({ message: `No packaging product matches "${code}"`, type: 'error' });
+      return;
+    }
+    addPackagingProduct(match.id);
+    setPackagingScanFeedback({ message: `Added ${match.name}`, type: 'success' });
+  }, [packagingProducts, addPackagingProduct]);
+
+  // Smart search/scan box. A hardware barcode reader types the full code then
+  // fires Enter; pressing Enter adds an exact barcode match (the scanner case)
+  // or the single remaining filtered product, otherwise it just narrows the
+  // list. This keeps one field for both "scan with a reader" and "type to find".
+  const handleSearchEnter = useCallback(() => {
+    const code = packagingSearch.trim();
+    if (!code) return;
+    const exact = packagingProducts.find(
+      p => p.barcode && p.barcode.toLowerCase() === code.toLowerCase()
+    );
+    if (exact) {
+      addPackagingProduct(exact.id);
+      setPackagingScanFeedback({ message: `Added ${exact.name}`, type: 'success' });
+      setPackagingSearch('');
+      return;
+    }
+    if (filteredPackagingProducts.length === 1) {
+      const only = filteredPackagingProducts[0];
+      addPackagingProduct(only.id);
+      setPackagingScanFeedback({ message: `Added ${only.name}`, type: 'success' });
+      setPackagingSearch('');
+      return;
+    }
+    if (filteredPackagingProducts.length === 0) {
+      setPackagingScanFeedback({ message: `No packaging product matches "${code}"`, type: 'error' });
+    }
+  }, [packagingSearch, packagingProducts, filteredPackagingProducts, addPackagingProduct]);
+
+  const submitPackaging = useCallback(() => {
+    if (selectedPackagingCount === 0) return;
+    // Merge the selected packaging products onto whatever is already on the
+    // order, so Save stays additive (matches the previous one-at-a-time flow).
+    const merged = new Map<number, number>();
+    for (const line of packagingLines) {
+      if (line.product_id) merged.set(Number(line.product_id), Number(line.quantity));
+    }
+    for (const [productId, qty] of Object.entries(packagingSelection)) {
+      const id = Number(productId);
+      const quantity = Number(qty) > 0 ? Number(qty) : 1;
+      merged.set(id, (merged.get(id) ?? 0) + quantity);
+    }
+    const items = Array.from(merged.entries()).map(([product_id, quantity]) => ({ product_id, quantity }));
+    if (items.length === 0) return;
+    onPackageOrder(items, packagingLines.length > 0 || order.packaging_status !== 'NOT_PACKAGED');
+    setPackagingSelection({});
+    setPackagingSearch('');
+    setPackagingScanFeedback(null);
+    // Keep focus on the scan box so a hardware reader can fire the next code.
+    scanInputRef.current?.focus();
+  }, [
+    onPackageOrder,
+    order.packaging_status,
+    packagingLines,
+    packagingSelection,
+    selectedPackagingCount,
+  ]);
+
+  return (
+    <div className="space-y-4">
+      {/* Status summary */}
+      <div className="rounded-lg border bg-muted/20 p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Packaging step</p>
+            <p className="mt-1 text-sm font-medium">{order.packaging_status.replace('_', ' ')}</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Packaging affects packaging/store stock only. When saved, this order is marked done locally.
+            </p>
+            {order.packaged_at && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Packaged {new Date(order.packaged_at).toLocaleString('en-GB')}
+                {order.packaged_by_name ? ` by ${order.packaged_by_name}` : ''}
+              </p>
+            )}
+          </div>
+          <Badge variant={order.packaging_status === 'NOT_PACKAGED' ? 'outline' : 'default'} className="w-fit">
+            {order.packaging_status === 'NOT_PACKAGED' ? 'Waiting packaging' : 'Packaged'}
+          </Badge>
+        </div>
+      </div>
+
+      {/* Current packaging items on the order */}
+      <div className="rounded-lg border overflow-hidden">
+        <Table>
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <TableHead className="h-9 text-xs font-medium">Packaging item</TableHead>
+              <TableHead className="h-9 text-xs font-medium text-center w-20">Qty</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {packagingLines.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={2} className="py-8 text-center text-sm text-muted-foreground">
+                  No packaging items added yet.
+                </TableCell>
+              </TableRow>
+            ) : packagingLines.map(line => (
+              <TableRow key={line.id}>
+                <TableCell className="py-2.5">
+                  <div className="flex items-center gap-2.5">
+                    <ProductImage src={line.product_image} alt={line.product_name} size="md" />
+                    <div className="min-w-0">
+                      <p className="max-w-[34rem] whitespace-normal break-words text-sm font-medium leading-snug">{line.product_name}</p>
+                      {line.barcode && <p className="text-[11px] text-muted-foreground font-mono">{line.barcode}</p>}
+                    </div>
+                  </div>
+                </TableCell>
+                <TableCell className="text-center tabular-nums text-sm">{line.quantity}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+
+      {canPackage && !order.is_deleted && (
+        <div className="rounded-lg border p-4 space-y-3">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Add packaging items</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Scan with a barcode reader (type / scan then press Enter), use the camera, or tick the
+                packaging products — set each quantity, then Save.
+              </p>
+            </div>
+            {selectedPackagingCount > 0 && (
+              <Badge variant="secondary" className="w-fit">{selectedPackagingCount} selected</Badge>
+            )}
+          </div>
+
+          {/* Smart search + barcode reader (Enter) + camera scan */}
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="relative flex-1">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
+              <Input
+                ref={scanInputRef}
+                value={packagingSearch}
+                onChange={event => { setPackagingSearch(event.target.value); setPackagingScanFeedback(null); }}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') { event.preventDefault(); handleSearchEnter(); }
+                }}
+                placeholder="Scan barcode or search packaging products..."
+                className="h-9 pl-8"
+                autoFocus
+              />
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-9 gap-1.5"
+              onClick={() => { setPackagingScanFeedback(null); setPackagingScannerOpen(true); }}
+            >
+              <ScanLine className="size-3.5" />
+              Camera
+            </Button>
+          </div>
+
+          {packagingScanFeedback && (
+            <p className={`text-xs ${packagingScanFeedback.type === 'success' ? 'text-emerald-600' : 'text-red-600'}`}>
+              {packagingScanFeedback.message}
+            </p>
+          )}
+
+          {/* Select-all toggle */}
+          <label className="flex items-center justify-between rounded-md border bg-muted/20 px-3 py-2 cursor-pointer">
+            <span className="flex items-center gap-2 text-sm font-medium">
+              <Checkbox
+                checked={allFilteredSelected}
+                onCheckedChange={toggleSelectAllPackaging}
+                disabled={filteredPackagingProducts.length === 0}
+              />
+              Select all{packagingSearch.trim() ? ' matching' : ''}
+            </span>
+            <span className="text-xs text-muted-foreground">
+              {filteredPackagingProducts.length} product{filteredPackagingProducts.length === 1 ? '' : 's'}
+            </span>
+          </label>
+
+          {/* Product checklist */}
+          <div className="max-h-72 divide-y overflow-y-auto rounded-md border">
+            {loadingPackagingProducts ? (
+              <div className="flex items-center justify-center gap-2 py-8">
+                <Loader2 className="size-4 animate-spin text-muted-foreground" />
+                <span className="text-xs text-muted-foreground">Loading packaging products...</span>
+              </div>
+            ) : filteredPackagingProducts.length === 0 ? (
+              <div className="py-8 text-center text-sm text-muted-foreground">
+                No packaging products found.
+              </div>
+            ) : filteredPackagingProducts.map(product => {
+              const selectedQty = packagingSelection[product.id];
+              const isSelected = selectedQty !== undefined;
+              return (
+                <div
+                  key={product.id}
+                  className={`flex items-center gap-2.5 px-3 py-2 ${isSelected ? 'bg-primary/5' : 'hover:bg-muted/30'}`}
+                >
+                  <Checkbox
+                    checked={isSelected}
+                    onCheckedChange={() => togglePackagingProduct(product.id)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => togglePackagingProduct(product.id)}
+                    className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+                  >
+                    <ProductImage src={product.image_url} alt={product.name} size="md" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[13px] font-medium leading-snug whitespace-normal break-words">{product.name}</p>
+                      <p className="text-[11px] text-muted-foreground font-mono">{product.barcode || 'No barcode'}</p>
+                    </div>
+                  </button>
+                  {isSelected && (
+                    <Input
+                      value={selectedQty}
+                      onChange={event => setPackagingProductQty(product.id, Number(event.target.value))}
+                      type="number"
+                      min={1}
+                      className="h-8 w-16 text-center"
+                      aria-label={`Quantity for ${product.name}`}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Actions */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              className="h-9 gap-1.5"
+              onClick={submitPackaging}
+              disabled={isLoading || selectedPackagingCount === 0}
+            >
+              {isLoading ? <Loader2 className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
+              Save{selectedPackagingCount > 0 ? ` (${selectedPackagingCount})` : ''}
+            </Button>
+            {packagingLines.length > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-9 gap-1.5 text-red-700 border-red-200 hover:bg-red-50"
+                onClick={onUnpackageOrder}
+                disabled={isLoading}
+              >
+                <Undo2 className="size-3.5" />
+                Reverse packaging stock
+              </Button>
+            )}
+          </div>
+
+          <POSCameraScanner
+            open={packagingScannerOpen}
+            onOpenChange={setPackagingScannerOpen}
+            onBarcodeDetected={handlePackagingScan}
+            feedbackMessage={packagingScanFeedback?.message}
+            feedbackType={packagingScanFeedback?.type}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* PACKAGING DIALOG — focused popup (mirrors the return flow). Opens from the   */
+/* "Scan Packaging" lookup and automatically after an order is sent to delivery.*/
+/* Shows what to pack + the packaging products to add, scan and Save.           */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+export function PackagingDialog({
+  open,
+  onOpenChange,
+  order,
+  packagingProducts,
+  loadingPackagingProducts,
+  isLoading,
+  canPackage,
+  warnings,
+  onPackageOrder,
+  onUnpackageOrder,
+}: Readonly<{
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  order: OrderDetail | null;
+  packagingProducts: ProductListItem[];
+  loadingPackagingProducts?: boolean;
+  isLoading?: boolean;
+  canPackage: boolean;
+  warnings?: string[];
+  onPackageOrder: (items: Array<{ product_id: number; quantity: number }>, allowUpdate: boolean) => void;
+  onUnpackageOrder: () => void;
+}>) {
+  const customerLines = order
+    ? (order.customer_lines ?? order.lines.filter(line => line.product_type !== 'packaging_item'))
+    : [];
+  const title = order ? `Pack order ${order.order_number}` : 'Packaging';
+  const desc = order
+    ? (order.delivery_code
+        ? `Delivery code ${order.delivery_code}`
+        : (order.delivery_reference ? `Delivery ref ${order.delivery_reference}` : undefined))
+    : undefined;
+
+  return (
+    <ResponsiveSheet open={open} onOpenChange={onOpenChange} title={title} description={desc} wide>
+      {!order ? null : (
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] lg:items-start lg:gap-6">
+          {/* ── LEFT COLUMN · context + read-only items to pack ───────────── */}
+          <div className="space-y-4">
+            {/* Delivery context */}
+            {(order.delivery_code || order.delivery_reference || order.sent_to_pos_at) && (
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2">
+                <Truck className="size-4 text-muted-foreground" />
+                <span className="text-sm font-medium">
+                  {order.sent_to_pos_at ? 'Sent to POS' : 'Sent to delivery'}
+                </span>
+                {order.delivery_code && <Badge variant="secondary" className="font-mono">{order.delivery_code}</Badge>}
+                {order.delivery_reference && <Badge variant="outline">Ref {order.delivery_reference}</Badge>}
+              </div>
+            )}
+
+            {/* Lookup warnings (e.g. order not yet dispatched) */}
+            {warnings && warnings.length > 0 && (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800 text-sm">
+                <AlertCircle className="size-4 mt-0.5 flex-shrink-0" />
+                <div className="space-y-0.5">
+                  {warnings.map((w, i) => <p key={i}>{w}</p>)}
+                </div>
+              </div>
+            )}
+
+            {/* What the customer ordered — read-only checklist of items to pack */}
+            <div className="rounded-lg border overflow-hidden">
+              <div className="border-b bg-muted/20 px-3 py-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Items to pack ({customerLines.length})
+                </p>
+              </div>
+              <Table>
+                <TableHeader>
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead className="h-9 text-xs font-medium">Product</TableHead>
+                    <TableHead className="h-9 text-xs font-medium text-center w-16">Qty</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {customerLines.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={2} className="py-6 text-center text-sm text-muted-foreground">
+                        No items on this order.
+                      </TableCell>
+                    </TableRow>
+                  ) : customerLines.map(line => (
+                    <TableRow key={line.id}>
+                      <TableCell className="py-2.5">
+                        <div className="flex items-center gap-2.5">
+                          <ProductImage src={line.product_image} alt={line.product_name} size="md" />
+                          <div className="min-w-0">
+                            <p className="whitespace-normal break-words text-sm font-medium leading-snug">{line.product_name}</p>
+                            {line.barcode && <p className="text-[11px] text-muted-foreground font-mono">{line.barcode}</p>}
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-center tabular-nums text-sm font-semibold">{line.quantity}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+
+          {/* ── RIGHT COLUMN · scan / add / save packaging ────────────────── */}
+          <PackagingItemsPicker
+            order={order}
+            packagingProducts={packagingProducts}
+            loadingPackagingProducts={loadingPackagingProducts}
+            isLoading={isLoading}
+            canPackage={canPackage}
+            onPackageOrder={onPackageOrder}
+            onUnpackageOrder={onUnpackageOrder}
+          />
+        </div>
+      )}
+    </ResponsiveSheet>
+  );
+}
+
 function OrderViewMode({
   order,
   onStatusChange,
@@ -495,109 +1125,18 @@ function OrderViewMode({
     ...(parseFloat(order.discount_total) > 0 ? [{ label: 'Discount', value: `-${order.discount_total}` }] : []),
   ], [order]);
   const customerLines = order.customer_lines ?? order.lines.filter(line => line.product_type !== 'packaging_item');
-  const packagingLines = order.packaging_lines ?? order.lines.filter(line => line.product_type === 'packaging_item');
-  // Multi-select packaging: product_id → quantity. Lets the user tick (or scan)
-  // several packaging products and Save them all in one shot.
-  const [packagingSelection, setPackagingSelection] = useState<Record<number, number>>({});
-  const [packagingSearch, setPackagingSearch] = useState('');
-  const [packagingScannerOpen, setPackagingScannerOpen] = useState(false);
-  const [packagingScanFeedback, setPackagingScanFeedback] =
-    useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const packagingCount = (order.packaging_lines ?? order.lines.filter(line => line.product_type === 'packaging_item')).length;
   const notAnsweredAttempts = order.not_answered_attempts ?? 0;
   const canEscalateNoAnswer = notAnsweredAttempts > 3 || order.outcome === 'DELAYED';
   const isDelayed = order.outcome === 'DELAYED' || order.contact_status === 'DELAYED';
   const canProcessAfterDone = order.final_outcome === 'SUCCESSFUL_SALE' || order.workflow_status === 'done';
 
-  const filteredPackagingProducts = useMemo(() => {
-    const q = packagingSearch.trim().toLowerCase();
-    const base = q
-      ? packagingProducts.filter(
-          p => p.name.toLowerCase().includes(q) || (p.barcode?.toLowerCase().includes(q))
-        )
-      : packagingProducts;
-    return base.slice(0, 100);
-  }, [packagingProducts, packagingSearch]);
-
-  const selectedPackagingCount = Object.keys(packagingSelection).length;
-  const allFilteredSelected =
-    filteredPackagingProducts.length > 0 &&
-    filteredPackagingProducts.every(p => packagingSelection[p.id] !== undefined);
-
-  const togglePackagingProduct = useCallback((productId: number) => {
-    setPackagingSelection(prev => {
-      const next = { ...prev };
-      if (next[productId] !== undefined) delete next[productId];
-      else next[productId] = 1;
-      return next;
-    });
-  }, []);
-
-  const setPackagingProductQty = useCallback((productId: number, qty: number) => {
-    setPackagingSelection(prev => ({
-      ...prev,
-      [productId]: Number.isFinite(qty) && qty > 0 ? qty : 1,
-    }));
-  }, []);
-
-  const toggleSelectAllPackaging = useCallback(() => {
-    setPackagingSelection(prev => {
-      const everyFilteredSelected =
-        filteredPackagingProducts.length > 0 &&
-        filteredPackagingProducts.every(p => prev[p.id] !== undefined);
-      const next = { ...prev };
-      if (everyFilteredSelected) {
-        // Deselect every currently-filtered product.
-        for (const p of filteredPackagingProducts) delete next[p.id];
-      } else {
-        // Select every currently-filtered product (keep existing quantities).
-        for (const p of filteredPackagingProducts) {
-          if (next[p.id] === undefined) next[p.id] = 1;
-        }
-      }
-      return next;
-    });
-  }, [filteredPackagingProducts]);
-
-  const handlePackagingScan = useCallback((rawCode: string) => {
-    const code = rawCode.trim();
-    if (!code) return;
-    const match = packagingProducts.find(
-      p => p.barcode && p.barcode.toLowerCase() === code.toLowerCase()
-    );
-    if (!match) {
-      setPackagingScanFeedback({ message: `No packaging product matches "${code}"`, type: 'error' });
-      return;
-    }
-    setPackagingSelection(prev => ({ ...prev, [match.id]: (prev[match.id] ?? 0) + 1 }));
-    setPackagingScanFeedback({ message: `Added ${match.name}`, type: 'success' });
-  }, [packagingProducts]);
-
-  const submitPackaging = useCallback(() => {
-    if (selectedPackagingCount === 0) return;
-    // Merge the selected packaging products onto whatever is already on the
-    // order, so Save stays additive (matches the previous one-at-a-time flow).
-    const merged = new Map<number, number>();
-    for (const line of packagingLines) {
-      if (line.product_id) merged.set(Number(line.product_id), Number(line.quantity));
-    }
-    for (const [productId, qty] of Object.entries(packagingSelection)) {
-      const id = Number(productId);
-      const quantity = Number(qty) > 0 ? Number(qty) : 1;
-      merged.set(id, (merged.get(id) ?? 0) + quantity);
-    }
-    const items = Array.from(merged.entries()).map(([product_id, quantity]) => ({ product_id, quantity }));
-    if (items.length === 0) return;
-    onPackageOrder(items, packagingLines.length > 0 || order.packaging_status !== 'NOT_PACKAGED');
-    setPackagingSelection({});
-    setPackagingSearch('');
-    setPackagingScanFeedback(null);
-  }, [
-    onPackageOrder,
-    order.packaging_status,
-    packagingLines,
-    packagingSelection,
-    selectedPackagingCount,
-  ]);
+  // Fulfilment-channel stock flag — drives the warning dot on the Stock tab.
+  const stockByChannel = order.stock_by_channel;
+  const orderChannelStock = stockByChannel?.channels.find(c => c.is_order_channel) ?? null;
+  const posChannelStock = stockByChannel?.channels.find(c => c.is_pos_channel) ?? null;
+  const fulfilmentChannelStock = order.pos_sales_channel_name ? posChannelStock : orderChannelStock;
+  const stockBlocked = fulfilmentChannelStock ? !fulfilmentChannelStock.can_fulfill : false;
 
   return (
     <div className="space-y-6">
@@ -613,7 +1152,13 @@ function OrderViewMode({
               <Package className="size-3.5" /> Customer ({customerLines.length})
             </TabsTrigger>
             <TabsTrigger value="packaging" className="text-xs gap-1.5">
-              <Package className="size-3.5" /> Packaging ({packagingLines.length})
+              <Package className="size-3.5" /> Packaging ({packagingCount})
+            </TabsTrigger>
+            <TabsTrigger value="stock" className="text-xs gap-1.5">
+              <Boxes className="size-3.5" /> Stock
+              {stockBlocked && (
+                <span className="ml-0.5 inline-block size-1.5 rounded-full bg-red-500" aria-hidden />
+              )}
             </TabsTrigger>
             {(order.customer_note || order.internal_note) && (
               <TabsTrigger value="notes" className="text-xs gap-1.5">
@@ -759,8 +1304,12 @@ function OrderViewMode({
                 )}
               </div>
 
-              <StockAvailabilityPanel stock={order.stock_check} />
             </div>
+          </TabsContent>
+
+          {/* Tab: Stock by sales channel */}
+          <TabsContent value="stock">
+            <ChannelStockPanel data={order.stock_by_channel} />
           </TabsContent>
 
           {/* Tab: Line Items */}
@@ -799,200 +1348,15 @@ function OrderViewMode({
 
           {/* Tab: Packaging */}
           <TabsContent value="packaging">
-            <div className="space-y-4">
-              <div className="rounded-lg border bg-muted/20 p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Packaging step</p>
-                    <p className="mt-1 text-sm font-medium">{order.packaging_status.replace('_', ' ')}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Packaging affects packaging/store stock only. When saved, this order is marked done locally.
-                    </p>
-                    {order.packaged_at && (
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Packaged {new Date(order.packaged_at).toLocaleString('en-GB')}
-                        {order.packaged_by_name ? ` by ${order.packaged_by_name}` : ''}
-                      </p>
-                    )}
-                  </div>
-                  <Badge variant={order.packaging_status === 'NOT_PACKAGED' ? 'outline' : 'default'} className="w-fit">
-                    {order.packaging_status === 'NOT_PACKAGED' ? 'Waiting packaging' : 'Packaged'}
-                  </Badge>
-                </div>
-              </div>
-
-              <div className="rounded-lg border overflow-hidden">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="hover:bg-transparent">
-                      <TableHead className="h-9 text-xs font-medium">Packaging item</TableHead>
-                      <TableHead className="h-9 text-xs font-medium text-center w-20">Qty</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {packagingLines.length === 0 ? (
-                      <TableRow>
-                        <TableCell colSpan={2} className="py-8 text-center text-sm text-muted-foreground">
-                          No packaging items added yet.
-                        </TableCell>
-                      </TableRow>
-                    ) : packagingLines.map(line => (
-                      <TableRow key={line.id}>
-                        <TableCell className="py-2.5">
-                          <div className="flex items-center gap-2.5">
-                            <ProductImage src={line.product_image} alt={line.product_name} size="md" />
-                            <div className="min-w-0">
-                              <p className="max-w-[34rem] whitespace-normal break-words text-sm font-medium leading-snug">{line.product_name}</p>
-                              {line.barcode && <p className="text-[11px] text-muted-foreground font-mono">{line.barcode}</p>}
-                            </div>
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-center tabular-nums text-sm">{line.quantity}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-
-              {permissions?.packageOrder && !order.is_deleted && (
-                <div className="rounded-lg border p-4 space-y-3">
-                  <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Add packaging items</p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Tick the packaging/store products (box, card, bag, sticker, sample) — or scan their
-                        barcodes — then Save once.
-                      </p>
-                    </div>
-                    {selectedPackagingCount > 0 && (
-                      <Badge variant="secondary" className="w-fit">{selectedPackagingCount} selected</Badge>
-                    )}
-                  </div>
-
-                  {/* Search + barcode scan */}
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                    <div className="relative flex-1">
-                      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
-                      <Input
-                        value={packagingSearch}
-                        onChange={event => setPackagingSearch(event.target.value)}
-                        placeholder="Search packaging products or barcode..."
-                        className="h-9 pl-8"
-                      />
-                    </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-9 gap-1.5"
-                      onClick={() => { setPackagingScanFeedback(null); setPackagingScannerOpen(true); }}
-                    >
-                      <ScanLine className="size-3.5" />
-                      Scan
-                    </Button>
-                  </div>
-
-                  {/* Select-all toggle */}
-                  <label className="flex items-center justify-between rounded-md border bg-muted/20 px-3 py-2 cursor-pointer">
-                    <span className="flex items-center gap-2 text-sm font-medium">
-                      <Checkbox
-                        checked={allFilteredSelected}
-                        onCheckedChange={toggleSelectAllPackaging}
-                        disabled={filteredPackagingProducts.length === 0}
-                      />
-                      Select all{packagingSearch.trim() ? ' matching' : ''}
-                    </span>
-                    <span className="text-xs text-muted-foreground">
-                      {filteredPackagingProducts.length} product{filteredPackagingProducts.length === 1 ? '' : 's'}
-                    </span>
-                  </label>
-
-                  {/* Product checklist */}
-                  <div className="max-h-72 divide-y overflow-y-auto rounded-md border">
-                    {loadingPackagingProducts ? (
-                      <div className="flex items-center justify-center gap-2 py-8">
-                        <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                        <span className="text-xs text-muted-foreground">Loading packaging products...</span>
-                      </div>
-                    ) : filteredPackagingProducts.length === 0 ? (
-                      <div className="py-8 text-center text-sm text-muted-foreground">
-                        No packaging products found.
-                      </div>
-                    ) : filteredPackagingProducts.map(product => {
-                      const selectedQty = packagingSelection[product.id];
-                      const isSelected = selectedQty !== undefined;
-                      return (
-                        <div
-                          key={product.id}
-                          className={`flex items-center gap-2.5 px-3 py-2 ${isSelected ? 'bg-primary/5' : 'hover:bg-muted/30'}`}
-                        >
-                          <Checkbox
-                            checked={isSelected}
-                            onCheckedChange={() => togglePackagingProduct(product.id)}
-                          />
-                          <button
-                            type="button"
-                            onClick={() => togglePackagingProduct(product.id)}
-                            className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
-                          >
-                            <ProductImage src={product.image_url} alt={product.name} size="md" />
-                            <div className="min-w-0 flex-1">
-                              <p className="text-[13px] font-medium leading-snug whitespace-normal break-words">{product.name}</p>
-                              <p className="text-[11px] text-muted-foreground">{product.barcode || '—'} · {product.sales_price} TND</p>
-                            </div>
-                          </button>
-                          {isSelected && (
-                            <Input
-                              value={selectedQty}
-                              onChange={event => setPackagingProductQty(product.id, Number(event.target.value))}
-                              type="number"
-                              min={1}
-                              className="h-8 w-16 text-center"
-                              aria-label={`Quantity for ${product.name}`}
-                            />
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* Actions */}
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Button
-                      type="button"
-                      size="sm"
-                      className="h-9 gap-1.5"
-                      onClick={submitPackaging}
-                      disabled={isLoading || selectedPackagingCount === 0}
-                    >
-                      {isLoading ? <Loader2 className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
-                      Save{selectedPackagingCount > 0 ? ` (${selectedPackagingCount})` : ''}
-                    </Button>
-                    {packagingLines.length > 0 && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-9 gap-1.5 text-red-700 border-red-200 hover:bg-red-50"
-                        onClick={onUnpackageOrder}
-                        disabled={isLoading}
-                      >
-                        <Undo2 className="size-3.5" />
-                        Reverse packaging stock
-                      </Button>
-                    )}
-                  </div>
-
-                  <POSCameraScanner
-                    open={packagingScannerOpen}
-                    onOpenChange={setPackagingScannerOpen}
-                    onBarcodeDetected={handlePackagingScan}
-                    feedbackMessage={packagingScanFeedback?.message}
-                    feedbackType={packagingScanFeedback?.type}
-                  />
-                </div>
-              )}
-            </div>
+            <PackagingItemsPicker
+              order={order}
+              packagingProducts={packagingProducts}
+              loadingPackagingProducts={loadingPackagingProducts}
+              isLoading={isLoading}
+              canPackage={!!permissions?.packageOrder}
+              onPackageOrder={onPackageOrder}
+              onUnpackageOrder={onUnpackageOrder}
+            />
           </TabsContent>
 
           {/* Tab: Notes */}

@@ -56,6 +56,7 @@ import type { OrderStatusFieldsPayload, OrderSyncEvent, WooCommerceOrderPreviewR
 import {
   OrderDetailDialog, SyncDialog, PreviewDialog, LogsDialog, MessageAlert,
   SendToPOSDialog, ReturnLookupDialog, ReturnDialog, CreateOrderDialog,
+  PackagingDialog,
 } from './components/OrderDialogs';
 import { CleanStatusBadge, SyncStatusBadge, cleanStatusLabel } from './components/orderStatusBadges';
 
@@ -305,6 +306,14 @@ export default function OrdersPage() {
   const [returnLookupDialog, setReturnLookupDialog] = useState(false);
   const [returnLookupLoading, setReturnLookupLoading] = useState(false);
   const [lookupMode, setLookupMode] = useState<'return' | 'packaging'>('return');
+  // Focused packaging popup — opens from the "Scan Packaging" lookup and
+  // automatically after an order is dispatched to the delivery API. It loads
+  // its own packaging products so it works independently of the detail dialog.
+  const [packagingDialogOpen, setPackagingDialogOpen] = useState(false);
+  const [packagingDialogOrder, setPackagingDialogOrder] = useState<OrderDetail | null>(null);
+  const [packagingDialogWarnings, setPackagingDialogWarnings] = useState<string[]>([]);
+  const [packagingDialogProducts, setPackagingDialogProducts] = useState<ProductListItem[]>([]);
+  const [loadingPackagingDialogProducts, setLoadingPackagingDialogProducts] = useState(false);
   // Per-item return / exchange disposition (back to stock vs damaged vs missing).
   const [returnOrder, setReturnOrder] = useState<OrderDetail | null>(null);
   const [returnDialogOpen, setReturnDialogOpen] = useState(false);
@@ -662,6 +671,30 @@ export default function OrdersPage() {
       .finally(() => setLoadingPackagingProducts(false));
   }, [viewOrder?.id, viewOrder?.brand, viewOrder?.sales_channel, channels]);
 
+  // Packaging products for the dedicated packaging popup (independent of the
+  // detail dialog's order, since the popup can be opened straight from a lookup
+  // or right after dispatching to delivery).
+  useEffect(() => {
+    if (!packagingDialogOrder) {
+      setPackagingDialogProducts([]);
+      return;
+    }
+    const brandId = packagingDialogOrder.brand
+      ?? channels.find(c => c.id === packagingDialogOrder.sales_channel)?.brand;
+    if (!brandId) {
+      setPackagingDialogProducts([]);
+      return;
+    }
+    setLoadingPackagingDialogProducts(true);
+    productService.getAllProducts({ brand: brandId, product_type: 'packaging_item', page_size: 500 })
+      .then(products => setPackagingDialogProducts(products || []))
+      .catch(err => {
+        console.error('Failed to load packaging products:', err);
+        setPackagingDialogProducts([]);
+      })
+      .finally(() => setLoadingPackagingDialogProducts(false));
+  }, [packagingDialogOrder?.id, packagingDialogOrder?.brand, packagingDialogOrder?.sales_channel, channels]);
+
   // Load products when entering edit mode
   useEffect(() => {
     if (!editMode || !viewOrder) { 
@@ -1015,11 +1048,87 @@ export default function OrdersPage() {
   };
 
   const handleSubmitDelivery = async (id: number) => {
-    await runLifecycleAction(
-      () => orderService.submitDelivery(id),
-      'Order sent to delivery and response saved.',
-      true,
-    );
+    setMutatingOrder(true);
+    try {
+      await orderService.submitDelivery(id);
+      // Pull the fresh detail (now carrying the delivery reference/code) so the
+      // packaging popup can show the dispatch context.
+      const detail = await orderService.getById(id);
+      if (viewOrder?.id === id) setViewOrder(detail);
+      await fetchData();
+      if (canPackageOrders) {
+        // The order is dispatched — surface the focused packaging popup so the
+        // operator can scan/add packaging items and mark it done. Close the
+        // detail sheet first so the packaging popup is the only modal on screen.
+        if (viewOrder?.id === id && editLockToken) {
+          orderService.releaseEditLock(id, editLockToken).catch(() => undefined);
+          setEditLockToken('');
+        }
+        setViewOrder(null);
+        setDetailLoading(false);
+        setEditMode(false);
+        setPackagingDialogWarnings([]);
+        setPackagingDialogOrder(detail);
+        setPackagingDialogOpen(true);
+      } else {
+        setSuccessMessage('Order sent to delivery and response saved.');
+        setSuccessDialog(true);
+      }
+    } catch (err) {
+      setErrorMessage(extractErrorMessage(err, 'Failed to send the order to delivery.'));
+      setErrorDialog(true);
+    } finally {
+      setMutatingOrder(false);
+    }
+  };
+
+  // Save from the focused packaging popup: persist, mark the order done, refresh
+  // the list, then close the popup and confirm.
+  const handlePackageFromDialog = async (
+    items: Array<{ product_id: number; quantity: number }>,
+    allowUpdate: boolean,
+  ) => {
+    if (!packagingDialogOrder) return;
+    const targetId = packagingDialogOrder.id;
+    setMutatingOrder(true);
+    try {
+      const updated = await orderService.packageOrder(targetId, {
+        packaging_items: items,
+        allow_update: allowUpdate,
+      });
+      if (viewOrder?.id === targetId) setViewOrder(updated);
+      await fetchData();
+      setPackagingDialogOpen(false);
+      setPackagingDialogOrder(null);
+      setPackagingDialogWarnings([]);
+      setSuccessMessage('Packaging saved, packaging stock adjusted, and order marked done.');
+      setSuccessDialog(true);
+    } catch (err) {
+      setErrorMessage(extractErrorMessage(err, 'Could not save packaging.'));
+      setErrorDialog(true);
+    } finally {
+      setMutatingOrder(false);
+    }
+  };
+
+  // Reverse packaging from the focused popup; keep it open showing the restored
+  // (un-packaged) state so the operator can re-pack if needed.
+  const handleUnpackageFromDialog = async () => {
+    if (!packagingDialogOrder) return;
+    if (!window.confirm('Reverse packaging stock movements for this order?')) return;
+    const targetId = packagingDialogOrder.id;
+    setMutatingOrder(true);
+    try {
+      const updated = await orderService.unpackageOrder(targetId);
+      if (viewOrder?.id === targetId) setViewOrder(updated);
+      setPackagingDialogOrder(updated);
+      await fetchData();
+    } catch (err) {
+      setErrorMessage(extractErrorMessage(err, 'Could not reverse packaging.'));
+      setErrorDialog(true);
+    } finally {
+      setMutatingOrder(false);
+    }
   };
 
   // Open the per-item return dialog. We need the full detail (with lines), so
@@ -1076,14 +1185,11 @@ export default function OrdersPage() {
       if (lookupMode === 'packaging') {
         const result = await orderService.packagingLookup(query);
         setReturnLookupDialog(false);
-        setViewOrder(result.order);
-        setEditMode(false);
-        setSuccessMessage(
-          result.warnings?.length
-            ? `Order found. ${result.warnings.join(' ')}`
-            : 'Packaging order found.',
-        );
-        setSuccessDialog(true);
+        // Open the focused packaging popup directly on the matched order — the
+        // operator scans the order ticket, then scans/adds packaging items here.
+        setPackagingDialogWarnings(result.warnings ?? []);
+        setPackagingDialogOrder(result.order);
+        setPackagingDialogOpen(true);
       } else {
         // Return mode: open the return-processing popup directly on the matched
         // order so the operator can classify each item and save the return.
@@ -1791,10 +1897,29 @@ export default function OrdersPage() {
         title={lookupMode === 'packaging' ? 'Scan Packaging Order' : 'Find Returned Order'}
         description={
           lookupMode === 'packaging'
-            ? 'Scan the ticket, delivery code, internal order code, or WooCommerce order ID to open the order for packaging.'
+            ? 'Scan or type the delivery code (e.g. SID188370591574) to open the order for packaging. Ticket ID, internal order code, or WooCommerce order ID also work.'
             : 'Scan a barcode or QR code, or type a ticket ID, WooCommerce order ID, internal order code, or delivery code.'
         }
-        placeholder={lookupMode === 'packaging' ? 'Delivery code, ticket ID, WC ID...' : 'Ticket ID, WC ID, delivery code...'}
+        placeholder={lookupMode === 'packaging' ? 'Delivery code, e.g. SID188370591574' : 'Ticket ID, WC ID, delivery code...'}
+      />
+
+      <PackagingDialog
+        open={packagingDialogOpen}
+        onOpenChange={(open) => {
+          setPackagingDialogOpen(open);
+          if (!open) {
+            setPackagingDialogOrder(null);
+            setPackagingDialogWarnings([]);
+          }
+        }}
+        order={packagingDialogOrder}
+        packagingProducts={packagingDialogProducts}
+        loadingPackagingProducts={loadingPackagingDialogProducts}
+        isLoading={mutatingOrder}
+        canPackage={canPackageOrders}
+        warnings={packagingDialogWarnings}
+        onPackageOrder={handlePackageFromDialog}
+        onUnpackageOrder={handleUnpackageFromDialog}
       />
 
       <ReturnDialog

@@ -1,5 +1,16 @@
 import { useState } from 'react';
-import { Bell, Check, Trash2, CheckCheck, Filter } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import {
+  Bell,
+  Check,
+  CheckCheck,
+  ChevronLeft,
+  ChevronRight,
+  Filter,
+  Loader2,
+  AlertTriangle,
+} from 'lucide-react';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -10,143 +21,194 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import notificationsData from '@/data/notifications.json';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import {
+  useNotifications,
+  useUnreadCount,
+  useMarkAllNotificationsRead,
+  useMarkNotificationRead,
+} from '@/hooks/queries/useNotifications';
+import type {
+  NotificationCategory,
+  NotificationItem,
+  NotificationListParams,
+  NotificationPriority,
+} from '@/services/notification.service';
 
-// Mock notification types
-type NotificationType = 'user' | 'system' | 'alert' | 'info';
+const PAGE_SIZE = 20;
 
-interface Notification {
-  id: number;
-  type: NotificationType;
-  title: string;
-  message: string;
-  time: string;
-  read: boolean;
-  date: string;
+type ReadFilter = 'all' | 'unread' | 'read';
+
+const CATEGORY_META: Record<
+  NotificationCategory,
+  { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }
+> = {
+  order: { label: 'Order', variant: 'default' },
+  sync: { label: 'Sync', variant: 'secondary' },
+  stock: { label: 'Stock', variant: 'destructive' },
+  return: { label: 'Return', variant: 'outline' },
+  exchange: { label: 'Exchange', variant: 'outline' },
+  system: { label: 'System', variant: 'secondary' },
+};
+
+const PRIORITY_DOT: Record<NotificationPriority, string> = {
+  urgent: 'bg-red-500',
+  high: 'bg-amber-500',
+  normal: 'bg-primary',
+  low: 'bg-l-bg-3 dark:bg-d-bg-3',
+};
+
+/** Dependency-free relative time ("just now", "5m ago", "3d ago", or a date). */
+function formatRelativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '';
+  const sec = Math.round((Date.now() - then) / 1000);
+  if (sec < 60) return 'just now';
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  if (day < 7) return `${day}d ago`;
+  return new Date(iso).toLocaleDateString();
 }
 
 export default function NotificationsPage() {
-  // Load notifications from JSON file
-  const [notifications, setNotifications] = useState<Notification[]>(
-    notificationsData as Notification[]
-  );
+  const navigate = useNavigate();
 
-  const [filterType, setFilterType] = useState<string>('all');
+  const [readFilter, setReadFilter] = useState<ReadFilter>('all');
+  const [category, setCategory] = useState<NotificationCategory | 'all'>('all');
+  const [page, setPage] = useState(1);
 
-  const unreadCount = notifications.filter(n => !n.read).length;
-
-  // Filter notifications
-  const filteredNotifications =
-    filterType === 'all'
-      ? notifications
-      : notifications.filter(n => n.type === filterType);
-
-  const unreadNotifications = filteredNotifications.filter(n => !n.read);
-  const readNotifications = filteredNotifications.filter(n => n.read);
-
-  // Mark notification as read
-  const markAsRead = (id: number) => {
-    setNotifications(
-      notifications.map(n => (n.id === id ? { ...n, read: true } : n))
-    );
+  const listParams: NotificationListParams = {
+    page,
+    page_size: PAGE_SIZE,
+    ...(readFilter === 'all' ? {} : { is_read: readFilter === 'read' }),
+    ...(category === 'all' ? {} : { category }),
   };
 
-  // Mark all as read
-  const markAllAsRead = () => {
-    setNotifications(notifications.map(n => ({ ...n, read: true })));
+  const {
+    data,
+    isLoading,
+    isError,
+    isFetching,
+    isPlaceholderData,
+    refetch,
+  } = useNotifications(listParams);
+  const { data: unreadCount = 0 } = useUnreadCount();
+  const markRead = useMarkNotificationRead();
+  const markAllRead = useMarkAllNotificationsRead();
+
+  const notifications = data?.results ?? [];
+  const totalCount = data?.count ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const hasNext = Boolean(data?.next);
+  const hasPrevious = Boolean(data?.previous);
+
+  // Changing a filter should always restart at the first page.
+  const changeReadFilter = (value: string) => {
+    setReadFilter(value as ReadFilter);
+    setPage(1);
+  };
+  const changeCategory = (value: string) => {
+    setCategory(value as NotificationCategory | 'all');
+    setPage(1);
   };
 
-  // Delete notification
-  const deleteNotification = (id: number) => {
-    setNotifications(notifications.filter(n => n.id !== id));
+  const handleMarkRead = (id: number) => {
+    markRead.mutate(id, {
+      onError: () => toast.error('Could not mark the notification as read.'),
+    });
   };
 
-  // Clear all read notifications
-  const clearAllRead = () => {
-    setNotifications(notifications.filter(n => !n.read));
+  const handleMarkAllRead = () => {
+    markAllRead.mutate(undefined, {
+      onSuccess: result =>
+        toast.success(
+          result.updated > 0
+            ? `Marked ${result.updated} notification${result.updated === 1 ? '' : 's'} as read.`
+            : 'No unread notifications.'
+        ),
+      onError: () => toast.error('Could not mark all notifications as read.'),
+    });
   };
 
-  // Get notification type badge variant
-  const getTypeBadge = (type: NotificationType) => {
-    switch (type) {
-      case 'user':
-        return { variant: 'default' as const, label: 'User' };
-      case 'system':
-        return { variant: 'secondary' as const, label: 'System' };
-      case 'alert':
-        return { variant: 'destructive' as const, label: 'Alert' };
-      case 'info':
-        return { variant: 'outline' as const, label: 'Info' };
-      default:
-        return { variant: 'default' as const, label: 'Other' };
-    }
+  const handleOpen = (notification: NotificationItem) => {
+    if (!notification.is_read) handleMarkRead(notification.id);
+    if (notification.link_url) navigate(notification.link_url);
   };
 
-  // Notification card component
   const NotificationCard = ({
     notification,
   }: {
-    notification: Notification;
+    notification: NotificationItem;
   }) => {
-    const typeBadge = getTypeBadge(notification.type);
+    const meta = CATEGORY_META[notification.category] ?? {
+      label: notification.category,
+      variant: 'secondary' as const,
+    };
+    const clickable = Boolean(notification.link_url);
 
     return (
       <Card
+        onClick={clickable ? () => handleOpen(notification) : undefined}
         className={`p-4 transition-all hover:shadow-md ${
-          notification.read ? 'opacity-60' : 'border-primary/50'
-        }`}
+          notification.is_read ? 'opacity-60' : 'border-primary/50'
+        } ${clickable ? 'cursor-pointer' : ''}`}
       >
         <div className="flex items-start gap-4">
-          {/* Unread indicator */}
-          {notification.read ? (
-            <div className="size-2 mt-2 rounded-full bg-l-bg-3 dark:bg-d-bg-3" />
-          ) : (
-            <div className="size-2 mt-2 rounded-full bg-primary animate-pulse" />
-          )}
+          {/* Unread indicator (coloured by priority) */}
+          <div
+            className={`size-2 mt-2 rounded-full ${
+              notification.is_read
+                ? 'bg-l-bg-3 dark:bg-d-bg-3'
+                : `${PRIORITY_DOT[notification.priority] ?? 'bg-primary'} animate-pulse`
+            }`}
+          />
 
           {/* Content */}
           <div className="flex-1 min-w-0">
             <div className="flex items-start justify-between gap-2 mb-2">
               <div className="flex items-center gap-2 flex-wrap">
-                <h3 className="font-semibold text-base">
-                  {notification.title}
-                </h3>
-                <Badge variant={typeBadge.variant} className="text-xs">
-                  {typeBadge.label}
+                <h3 className="font-semibold text-base">{notification.title}</h3>
+                <Badge variant={meta.variant} className="text-xs">
+                  {meta.label}
                 </Badge>
+                {(notification.priority === 'urgent' ||
+                  notification.priority === 'high') && (
+                  <Badge variant="destructive" className="text-xs capitalize">
+                    {notification.priority}
+                  </Badge>
+                )}
               </div>
               <span className="text-xs text-l-text-3 dark:text-d-text-3 whitespace-nowrap">
-                {notification.time}
+                {formatRelativeTime(notification.created_at)}
               </span>
             </div>
-            <p className="text-sm text-l-text-2 dark:text-d-text-2 mb-3">
-              {notification.message}
-            </p>
+            {notification.body && (
+              <p className="text-sm text-l-text-2 dark:text-d-text-2 mb-3">
+                {notification.body}
+              </p>
+            )}
 
             {/* Actions */}
-            <div className="flex items-center gap-2">
-              {!notification.read && (
+            {!notification.is_read && (
+              <div className="flex items-center gap-2">
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => markAsRead(notification.id)}
+                  onClick={e => {
+                    e.stopPropagation();
+                    handleMarkRead(notification.id);
+                  }}
+                  disabled={markRead.isPending}
                   className="h-8 text-xs gap-1"
                 >
                   <Check className="size-3" />
                   Mark as read
                 </Button>
-              )}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => deleteNotification(notification.id)}
-                className="h-8 text-xs gap-1 text-destructive hover:text-destructive"
-              >
-                <Trash2 className="size-3" />
-                Delete
-              </Button>
-            </div>
+              </div>
+            )}
           </div>
         </div>
       </Card>
@@ -177,126 +239,140 @@ export default function NotificationsPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={markAllAsRead}
-            disabled={unreadCount === 0}
+            onClick={handleMarkAllRead}
+            disabled={unreadCount === 0 || markAllRead.isPending}
             className="gap-2"
           >
-            <CheckCheck className="size-4" />
+            {markAllRead.isPending ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <CheckCheck className="size-4" />
+            )}
             Mark all read
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={clearAllRead}
-            disabled={readNotifications.length === 0}
-            className="gap-2"
-          >
-            <Trash2 className="size-4" />
-            Clear read
           </Button>
         </div>
       </div>
 
       {/* Filters */}
       <Card className="p-4">
-        <div className="flex items-center gap-4">
+        <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-2">
             <Filter className="size-4 text-l-text-3 dark:text-d-text-3" />
             <span className="text-sm font-medium">Filter by type:</span>
           </div>
-          <Select value={filterType} onValueChange={setFilterType}>
+          <Select value={category} onValueChange={changeCategory}>
             <SelectTrigger className="w-40">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All Types</SelectItem>
-              <SelectItem value="user">User</SelectItem>
+              <SelectItem value="order">Order</SelectItem>
+              <SelectItem value="sync">Synchronization</SelectItem>
+              <SelectItem value="stock">Stock</SelectItem>
+              <SelectItem value="return">Return</SelectItem>
+              <SelectItem value="exchange">Exchange</SelectItem>
               <SelectItem value="system">System</SelectItem>
-              <SelectItem value="alert">Alert</SelectItem>
-              <SelectItem value="info">Info</SelectItem>
             </SelectContent>
           </Select>
           <div className="text-sm text-l-text-3 dark:text-d-text-3">
-            Showing {filteredNotifications.length} notification
-            {filteredNotifications.length === 1 ? '' : 's'}
+            {totalCount} notification{totalCount === 1 ? '' : 's'}
           </div>
+          {isFetching && (
+            <Loader2 className="size-4 animate-spin text-l-text-3 dark:text-d-text-3" />
+          )}
         </div>
       </Card>
 
-      {/* Notifications Tabs */}
-      <Tabs defaultValue="all" className="w-full">
+      {/* Read-state filter (drives the `is_read` query param) */}
+      <Tabs value={readFilter} onValueChange={changeReadFilter} className="w-full">
         <TabsList className="grid w-full max-w-md grid-cols-3">
-          <TabsTrigger value="all">
-            All ({filteredNotifications.length})
-          </TabsTrigger>
+          <TabsTrigger value="all">All</TabsTrigger>
           <TabsTrigger value="unread">
-            Unread ({unreadNotifications.length})
+            Unread{unreadCount > 0 ? ` (${unreadCount})` : ''}
           </TabsTrigger>
-          <TabsTrigger value="read">
-            Read ({readNotifications.length})
-          </TabsTrigger>
+          <TabsTrigger value="read">Read</TabsTrigger>
         </TabsList>
-
-        {/* All Notifications */}
-        <TabsContent value="all" className="space-y-4 mt-6">
-          {filteredNotifications.length > 0 ? (
-            filteredNotifications.map(notification => (
-              <NotificationCard
-                key={notification.id}
-                notification={notification}
-              />
-            ))
-          ) : (
-            <Card className="p-12 text-center">
-              <Bell className="size-12 mx-auto mb-4 text-l-text-3 dark:text-d-text-3" />
-              <p className="text-l-text-2 dark:text-d-text-2">
-                No notifications found
-              </p>
-            </Card>
-          )}
-        </TabsContent>
-
-        {/* Unread Notifications */}
-        <TabsContent value="unread" className="space-y-4 mt-6">
-          {unreadNotifications.length > 0 ? (
-            unreadNotifications.map(notification => (
-              <NotificationCard
-                key={notification.id}
-                notification={notification}
-              />
-            ))
-          ) : (
-            <Card className="p-12 text-center">
-              <CheckCheck className="size-12 mx-auto mb-4 text-green-500" />
-              <p className="text-l-text-2 dark:text-d-text-2 font-medium mb-2">
-                All caught up!
-              </p>
-              <p className="text-sm text-l-text-3 dark:text-d-text-3">
-                You have no unread notifications
-              </p>
-            </Card>
-          )}
-        </TabsContent>
-
-        {/* Read Notifications */}
-        <TabsContent value="read" className="space-y-4 mt-6">
-          {readNotifications.length > 0 ? (
-            readNotifications.map(notification => (
-              <NotificationCard
-                key={notification.id}
-                notification={notification}
-              />
-            ))
-          ) : (
-            <Card className="p-12 text-center">
-              <Bell className="size-12 mx-auto mb-4 text-l-text-3 dark:text-d-text-3" />
-              <p className="text-l-text-2 dark:text-d-text-2">
-                No read notifications
-              </p>
-            </Card>
-          )}
-        </TabsContent>
       </Tabs>
+
+      {/* List */}
+      <div
+        className={`space-y-4 ${isPlaceholderData ? 'opacity-60' : ''}`}
+        aria-busy={isFetching}
+      >
+        {isLoading ? (
+          <Card className="p-12 text-center">
+            <Loader2 className="size-10 mx-auto mb-4 animate-spin text-primary" />
+            <p className="text-l-text-2 dark:text-d-text-2">
+              Loading notifications…
+            </p>
+          </Card>
+        ) : isError ? (
+          <Card className="p-12 text-center">
+            <AlertTriangle className="size-12 mx-auto mb-4 text-destructive" />
+            <p className="text-l-text-2 dark:text-d-text-2 font-medium mb-2">
+              Could not load notifications
+            </p>
+            <Button variant="outline" size="sm" onClick={() => refetch()}>
+              Try again
+            </Button>
+          </Card>
+        ) : notifications.length > 0 ? (
+          notifications.map(notification => (
+            <NotificationCard
+              key={notification.id}
+              notification={notification}
+            />
+          ))
+        ) : readFilter === 'unread' ? (
+          <Card className="p-12 text-center">
+            <CheckCheck className="size-12 mx-auto mb-4 text-green-500" />
+            <p className="text-l-text-2 dark:text-d-text-2 font-medium mb-2">
+              All caught up!
+            </p>
+            <p className="text-sm text-l-text-3 dark:text-d-text-3">
+              You have no unread notifications
+            </p>
+          </Card>
+        ) : (
+          <Card className="p-12 text-center">
+            <Bell className="size-12 mx-auto mb-4 text-l-text-3 dark:text-d-text-3" />
+            <p className="text-l-text-2 dark:text-d-text-2">
+              No notifications found
+            </p>
+          </Card>
+        )}
+      </div>
+
+      {/* Pagination */}
+      {!isLoading && !isError && totalCount > PAGE_SIZE && (
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-l-text-3 dark:text-d-text-3">
+            Page {page} of {totalPages}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPage(p => Math.max(1, p - 1))}
+              disabled={!hasPrevious || isFetching}
+              className="gap-1"
+            >
+              <ChevronLeft className="size-4" />
+              Previous
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPage(p => p + 1)}
+              disabled={!hasNext || isFetching}
+              className="gap-1"
+            >
+              Next
+              <ChevronRight className="size-4" />
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

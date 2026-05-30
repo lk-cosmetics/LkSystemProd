@@ -213,6 +213,7 @@ class OrderDetailSerializer(OrderListSerializer):
     billing_address  = serializers.SerializerMethodField()
     shipping_address = serializers.SerializerMethodField()
     stock_check      = serializers.SerializerMethodField()
+    stock_by_channel = serializers.SerializerMethodField()
 
     class Meta(OrderListSerializer.Meta):
         fields = OrderListSerializer.Meta.fields + [
@@ -236,6 +237,7 @@ class OrderDetailSerializer(OrderListSerializer):
             # Delivery full detail
             'delivery_response',
             'stock_check',
+            'stock_by_channel',
             # Audit
             'created_by', 'created_by_name',
             'deleted_at', 'deleted_by',
@@ -292,6 +294,11 @@ class OrderDetailSerializer(OrderListSerializer):
         from .stock_service import OrderStockAvailabilityService
 
         return OrderStockAvailabilityService.build(obj)
+
+    def get_stock_by_channel(self, obj):
+        from .stock_service import OrderStockAvailabilityService
+
+        return OrderStockAvailabilityService.channel_breakdown(obj)
 
 
 class OrderPickupSerializer(serializers.Serializer):

@@ -62,6 +62,7 @@ def root_view(request):
             'clients': '/api/v1/clients/',
             'orders': '/api/v1/orders/',
             'dashboard': '/api/v1/dashboard/',
+            'notifications': '/api/v1/notifications/',
             'webhooks': '/api/v1/webhooks/',
         }
     })
@@ -111,6 +112,7 @@ urlpatterns = [
     path('api/v1/orders/', include('apps.orders.urls')),  # Order management
     path('api/v1/rbac/', include('apps.rbac.urls')),  # RBAC management
     path('api/v1/dashboard/', include('apps.bi.urls')),  # BI dashboard
+    path('api/v1/notifications/', include('apps.notifications.urls')),  # Notifications
     
     # Centralized Webhook System (recommended for new integrations)
     path('api/v1/webhooks/', include('core.webhooks.urls')),  # Unified WooCommerce webhooks

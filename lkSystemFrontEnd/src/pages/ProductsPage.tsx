@@ -575,22 +575,23 @@ function PackBuilder({
                   {meta?.barcode && <p className="text-[11px] text-muted-foreground font-mono truncate">{meta.barcode}</p>}
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
-                  <Button type="button" variant="ghost" size="icon" className="size-6"
+                  <Button aria-label="Decrease quantity" type="button" variant="ghost" size="icon" className="size-6"
                     onClick={() => updateQty(item.product_id, item.quantity - 1)}
                     disabled={item.quantity <= 1}>
                     <span className="text-sm font-bold">−</span>
                   </Button>
                   <Input
                     type="number" min={1} value={item.quantity}
+                    aria-label="Quantity"
                     onChange={e => updateQty(item.product_id, parseInt(e.target.value) || 1)}
                     className="w-12 h-7 text-center text-sm p-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                   />
-                  <Button type="button" variant="ghost" size="icon" className="size-6"
+                  <Button aria-label="Increase quantity" type="button" variant="ghost" size="icon" className="size-6"
                     onClick={() => updateQty(item.product_id, item.quantity + 1)}>
                     <span className="text-sm font-bold">+</span>
                   </Button>
                 </div>
-                <Button type="button" variant="ghost" size="icon" className="size-7 text-destructive hover:text-destructive shrink-0"
+                <Button aria-label="Remove item" type="button" variant="ghost" size="icon" className="size-7 text-destructive hover:text-destructive shrink-0"
                   onClick={() => removeItem(item.product_id)}>
                   <X className="size-3.5" />
                 </Button>
@@ -1819,17 +1820,17 @@ export default function ProductsPage() {
             Page {page} of {totalPages} · {total} total
           </p>
           <div className="flex gap-1">
-            <Button variant="outline" size="icon" className="size-8" onClick={() => setPage(1)} disabled={page === 1}>
+            <Button aria-label="First page" variant="outline" size="icon" className="size-8" onClick={() => setPage(1)} disabled={page === 1}>
               <ChevronsLeft className="size-4" />
             </Button>
-            <Button variant="outline" size="icon" className="size-8" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>
+            <Button aria-label="Previous page" variant="outline" size="icon" className="size-8" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>
               <ChevronLeft className="size-4" />
             </Button>
             <span className="flex items-center px-3 text-sm font-medium tabular-nums">{page}</span>
-            <Button variant="outline" size="icon" className="size-8" onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}>
+            <Button aria-label="Next page" variant="outline" size="icon" className="size-8" onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}>
               <ChevronRight className="size-4" />
             </Button>
-            <Button variant="outline" size="icon" className="size-8" onClick={() => setPage(totalPages)} disabled={page === totalPages}>
+            <Button aria-label="Last page" variant="outline" size="icon" className="size-8" onClick={() => setPage(totalPages)} disabled={page === totalPages}>
               <ChevronsRight className="size-4" />
             </Button>
           </div>

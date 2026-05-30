@@ -61,9 +61,14 @@ LOCAL_APPS = [
     'apps.orders',          # Order ingestion (WooCommerce + POS)
     'apps.rbac',            # Dynamic role-based access control
     'apps.bi',              # Business Intelligence dashboard
+    'apps.notifications',   # Role-based, user-targeted notifications
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
+
+# Notifications retention: rows older than this are deleted by the
+# ``cleanup_notifications`` management command / Celery task. Configurable.
+NOTIFICATION_RETENTION_DAYS = config('NOTIFICATION_RETENTION_DAYS', default=90, cast=int)
 
 # =============================================================================
 # MIDDLEWARE

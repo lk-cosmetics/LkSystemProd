@@ -1,37 +1,44 @@
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from '@/components/layout/Layout';
-import HomePage from '@/pages/HomePage';
 import DashbordLayout from '@/components/dashboardLayout/pageDashbord';
-import LoginPage from '@/pages/login';
-import ForgotPasswordPage from '@/pages/ForgotPasswordPage';
-import ResetPasswordPage from '@/pages/ResetPasswordPage';
-import AcceptInvitationPage from '@/pages/AcceptInvitationPage';
-import NotFoundPage from '@/pages/NotFoundPage';
-import StatisticsPage from '@/pages/StatisticsPage';
-import AddUserPageNew from '@/pages/AddUserPageNew';
-import UsersPageNew from '@/pages/UsersPageNew';
-import UserDetailsPage from '@/pages/UserDetailsPage';
-import EditUserPage from '@/pages/EditUserPage';
-import RolesPage from '@/pages/RolesPage';
-import ProfilePage from '@/pages/ProfilePage';
-import CompaniesPage from '@/pages/CompaniesPage';
-import AddCompanyPage from '@/pages/AddCompanyPage';
-import BrandsPage from '@/pages/BrandsPage';
-import SalesChannelsPage from '@/pages/SalesChannelsPage';
-import ProductsPage from '@/pages/ProductsPage';
-import InventoryPage from '@/pages/InventoryPage';
-import ManufacturingPage from '@/pages/ManufacturingPage';
-import CategoriesPage from '@/pages/CategoriesPage';
-import PromotionsPage from '@/pages/PromotionsPage';
-import OrdersPage from '@/pages/OrdersPage';
-import ClientsPage from '@/pages/ClientsPage';
-import POSPage from '@/pages/POSPage';
-import NotificationsPage from '@/pages/NotificationsPage';
-import SettingsPage from '@/pages/SettingsPage';
 import ProtectedRoute from '@/components/ProtectedRoute';
 import RoleGuard from '@/components/RoleGuard';
+import PageLoader from '@/components/PageLoader';
 import { useAuthStore } from '@/store/authStore';
 import { isPosOnlyUser } from '@/hooks/useAuth';
+
+// Route-level code splitting: each page becomes its own chunk that is
+// fetched on demand. This keeps the initial bundle small (the router,
+// guards and shared layouts ship eagerly; everything else streams in
+// behind the <Suspense> boundary below).
+const HomePage = lazy(() => import('@/pages/HomePage'));
+const LoginPage = lazy(() => import('@/pages/login'));
+const ForgotPasswordPage = lazy(() => import('@/pages/ForgotPasswordPage'));
+const ResetPasswordPage = lazy(() => import('@/pages/ResetPasswordPage'));
+const AcceptInvitationPage = lazy(() => import('@/pages/AcceptInvitationPage'));
+const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
+const StatisticsPage = lazy(() => import('@/pages/StatisticsPage'));
+const AddUserPageNew = lazy(() => import('@/pages/AddUserPageNew'));
+const UsersPageNew = lazy(() => import('@/pages/UsersPageNew'));
+const UserDetailsPage = lazy(() => import('@/pages/UserDetailsPage'));
+const EditUserPage = lazy(() => import('@/pages/EditUserPage'));
+const RolesPage = lazy(() => import('@/pages/RolesPage'));
+const ProfilePage = lazy(() => import('@/pages/ProfilePage'));
+const CompaniesPage = lazy(() => import('@/pages/CompaniesPage'));
+const AddCompanyPage = lazy(() => import('@/pages/AddCompanyPage'));
+const BrandsPage = lazy(() => import('@/pages/BrandsPage'));
+const SalesChannelsPage = lazy(() => import('@/pages/SalesChannelsPage'));
+const ProductsPage = lazy(() => import('@/pages/ProductsPage'));
+const InventoryPage = lazy(() => import('@/pages/InventoryPage'));
+const ManufacturingPage = lazy(() => import('@/pages/ManufacturingPage'));
+const CategoriesPage = lazy(() => import('@/pages/CategoriesPage'));
+const PromotionsPage = lazy(() => import('@/pages/PromotionsPage'));
+const OrdersPage = lazy(() => import('@/pages/OrdersPage'));
+const ClientsPage = lazy(() => import('@/pages/ClientsPage'));
+const POSPage = lazy(() => import('@/pages/POSPage'));
+const NotificationsPage = lazy(() => import('@/pages/NotificationsPage'));
+const SettingsPage = lazy(() => import('@/pages/SettingsPage'));
 
 function DashboardIndexRedirect() {
   const user = useAuthStore(state => state.user);
@@ -46,7 +53,8 @@ function DashboardIndexRedirect() {
 export function AppRouter() {
   return (
     <BrowserRouter>
-      <Routes>
+      <Suspense fallback={<PageLoader />}>
+        <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<HomePage />} />
         </Route>
@@ -254,7 +262,8 @@ export function AppRouter() {
 
         {/* 404 Page - catches all unmatched routes */}
         <Route path="*" element={<NotFoundPage />} />
-      </Routes>
+        </Routes>
+      </Suspense>
     </BrowserRouter>
   );
 }

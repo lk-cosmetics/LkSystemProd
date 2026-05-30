@@ -1496,6 +1496,48 @@ export interface OrderStockCheck {
   }>;
 }
 
+export interface OrderChannelStockItem {
+  product_id: number;
+  product_name: string;
+  barcode: string;
+  required_quantity: number;
+  quantity: number;
+  reserved_quantity: number;
+  available_quantity: number;
+  is_sufficient: boolean;
+  shortfall: number;
+  has_inventory_row: boolean;
+}
+
+export interface OrderChannelStock {
+  sales_channel: {
+    id: number;
+    name: string;
+    code: string | null;
+    channel_type: ChannelType;
+    store_type: string;
+    is_active: boolean;
+  };
+  is_order_channel: boolean;
+  is_pos_channel: boolean;
+  can_fulfill: boolean;
+  has_unverifiable_lines: boolean;
+  items: OrderChannelStockItem[];
+}
+
+export interface OrderStockByChannel {
+  order_channel_id: number | null;
+  pos_channel_id: number | null;
+  tracked_product_count: number;
+  channels: OrderChannelStock[];
+  unlinked_lines: Array<{
+    line_id: number;
+    product_name: string;
+    required_quantity: number;
+    reason: string;
+  }>;
+}
+
 export interface OrderDetail extends OrderListItem {
   lines: OrderLine[];
   customer_lines?: OrderLine[];
@@ -1534,6 +1576,7 @@ export interface OrderDetail extends OrderListItem {
   deleted_by: number | null;
   delivery_response?: Record<string, unknown> | null;
   stock_check?: OrderStockCheck;
+  stock_by_channel?: OrderStockByChannel;
 }
 
 export interface OrderEditLineInput {
