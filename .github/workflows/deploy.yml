@@ -98,17 +98,16 @@ jobs:
             git reset --hard origin/main
 
             echo "── Building & restarting containers ──────────────────────"
-            # Run as root via sudo, invoked through ``bash`` (so it never
-            # depends on the script's executable bit). deploy-production.sh
-            # reads the TLS cert under /etc/letsencrypt/live (root-only) and
-            # drives docker compose — the unprivileged SSH user can't, which is
-            # why the manual ``sudo bash ./deploy/deploy-production.sh`` works
-            # but the Action did not. Requires passwordless sudo for the deploy
-            # user (or SSH as root); ``sudo`` is a no-op if already root.
-            sudo bash deploy/deploy-production.sh
+            # No sudo: runs as the (docker-group) deploy user. deploy-production.sh
+            # skips its root-only TLS pre-flight when not root, and nginx still
+            # gets the cert via the root Docker daemon's bind-mount of
+            # /etc/letsencrypt (see docker-compose.prod.yml). DOMAIN mirrors the
+            # working manual run and feeds compose interpolation (cert path,
+            # ALLOWED_HOSTS, …). Requires the deploy user to be in the docker group.
+            DOMAIN="${{ secrets.PRODUCTION_DOMAIN }}" bash deploy/deploy-production.sh
 
             echo "── Pruning dangling images ───────────────────────────────"
-            sudo docker image prune -f
+            docker image prune -f
 
       - name: Health check
         # Probe the public domain over HTTPS. Retry a few times to ride out
