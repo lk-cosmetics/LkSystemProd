@@ -16,7 +16,14 @@ export LKSYSTEM_ENV_FILE="$ENV_FILE"
 set +a
 
 DOMAIN="${DOMAIN:-lksystem.therapybylk.com}"
-if [[ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]]; then
+# The cert lives under /etc/letsencrypt/{live,archive}, which certbot keeps
+# root-only. nginx still receives it via the root Docker daemon's bind-mount of
+# /etc/letsencrypt (see docker-compose.prod.yml), so this script works fine when
+# run by an unprivileged docker-group user — e.g. the CI deploy over SSH.
+# Only enforce the fail-fast existence check when we are root and can actually
+# read the path; a non-root run would false-negative here. A genuinely missing
+# cert still surfaces via the post-deploy health check.
+if [[ "$(id -u)" -eq 0 && ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]]; then
   echo "Missing certificate for $DOMAIN."
   echo "Run: sudo LETSENCRYPT_EMAIL=you@example.com DOMAIN=$DOMAIN ./deploy/install-ssl-certificate.sh"
   exit 1
