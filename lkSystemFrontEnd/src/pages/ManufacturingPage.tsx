@@ -16,6 +16,7 @@ import {
   PackagePlus,
   Pencil,
   RefreshCw,
+  ScanLine,
   Search,
   Send,
   Trash2,
@@ -75,6 +76,7 @@ import {
   storeInventoryService,
 } from '@/services/inventory.service';
 import { productService } from '@/services/product.service';
+import { POSCameraScanner } from '@/pages/pos/POSCameraScanner';
 import { salesChannelService } from '@/services/salesChannel.service';
 import type {
   BillOfMaterials,
@@ -324,6 +326,8 @@ function ProductSearchSelect({
   emptyMessage?: string;
 }) {
   const [query, setQuery] = useState('');
+  const [scanOpen, setScanOpen] = useState(false);
+  const [scanFeedback, setScanFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const selected = products.find(product => String(product.id) === value);
   const filtered = useMemo(() => {
     const clean = query.trim().toLowerCase();
@@ -342,26 +346,57 @@ function ProductSearchSelect({
     setQuery('');
   };
 
+  // Match a scanned (camera) or typed (USB barcode reader) code to a product
+  // and auto-select it; show inline feedback in the scanner on a miss.
+  const handleScannedBarcode = (raw: string) => {
+    const code = raw.trim().toLowerCase();
+    if (!code) return;
+    const match = products.find(product => (product.barcode || '').toLowerCase() === code);
+    if (match) {
+      selectProduct(match);
+      setScanFeedback({ message: `Selected: ${match.name}`, type: 'success' });
+      window.setTimeout(() => {
+        setScanOpen(false);
+        setScanFeedback(null);
+      }, 800);
+    } else {
+      setScanFeedback({ message: `No product matches barcode "${raw.trim()}"`, type: 'error' });
+    }
+  };
+
   return (
     <div className="space-y-2">
-      <div className="relative">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          className="pl-9"
+      <div className="flex gap-2">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            className="pl-9"
+            disabled={disabled}
+            value={query}
+            onChange={event => setQuery(event.target.value)}
+            onKeyDown={event => {
+              if (event.key !== 'Enter') return;
+              event.preventDefault();
+              const exactBarcode = products.find(
+                product => (product.barcode || '').toLowerCase() === query.trim().toLowerCase()
+              );
+              if (exactBarcode) selectProduct(exactBarcode);
+              else if (filtered.length === 1) selectProduct(filtered[0]);
+            }}
+            placeholder={placeholder}
+          />
+        </div>
+        <Button
+          type="button"
+          variant="outline"
           disabled={disabled}
-          value={query}
-          onChange={event => setQuery(event.target.value)}
-          onKeyDown={event => {
-            if (event.key !== 'Enter') return;
-            event.preventDefault();
-            const exactBarcode = products.find(
-              product => (product.barcode || '').toLowerCase() === query.trim().toLowerCase()
-            );
-            if (exactBarcode) selectProduct(exactBarcode);
-            else if (filtered.length === 1) selectProduct(filtered[0]);
-          }}
-          placeholder={placeholder}
-        />
+          onClick={() => { setScanFeedback(null); setScanOpen(true); }}
+          className="shrink-0 gap-1.5"
+          title="Scan a barcode with the camera"
+        >
+          <ScanLine className="size-4" />
+          <span className="hidden sm:inline">Scan</span>
+        </Button>
       </div>
 
       {selected && (
@@ -417,6 +452,17 @@ function ProductSearchSelect({
           )}
         </div>
       )}
+
+      <POSCameraScanner
+        open={scanOpen}
+        onOpenChange={open => {
+          setScanOpen(open);
+          if (!open) setScanFeedback(null);
+        }}
+        onBarcodeDetected={handleScannedBarcode}
+        feedbackMessage={scanFeedback?.message ?? null}
+        feedbackType={scanFeedback?.type ?? null}
+      />
     </div>
   );
 }
@@ -520,6 +566,12 @@ export default function ManufacturingPage() {
   );
 
   const activeBoms = useMemo(() => boms.filter(bom => bom.is_active), [boms]);
+  // Real product rows for finished products that have an active BOM — passed to
+  // the scan-enabled ProductSearchSelect in the "New Production Order" dialog.
+  const activeBomProducts = useMemo(() => {
+    const ids = new Set(activeBoms.map(bom => String(bom.finished_product)));
+    return products.filter(product => ids.has(String(product.id)));
+  }, [activeBoms, products]);
 
   const selectedBomFinishedProduct = useMemo(
     () => products.find(product => product.id === Number(bomForm.finished_product)),
@@ -1648,18 +1700,15 @@ export default function ManufacturingPage() {
             </div>
             <div>
               <Label>Finished product with active BOM</Label>
-              <Select value={sendForm.finished_product} onValueChange={value => void handleSendProductChange(value)}>
-                <SelectTrigger className="mt-1">
-                  <SelectValue placeholder="Choose BOM product" />
-                </SelectTrigger>
-                <SelectContent>
-                  {activeBoms.map(bom => (
-                    <SelectItem key={bom.id} value={String(bom.finished_product)}>
-                      {bom.finished_product_name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="mt-1">
+                <ProductSearchSelect
+                  products={activeBomProducts}
+                  value={sendForm.finished_product}
+                  onChange={value => void handleSendProductChange(value)}
+                  placeholder="Search or scan a finished product…"
+                  emptyMessage="No product with an active BOM"
+                />
+              </div>
             </div>
             {sendBomLoading && (
               <div className="rounded-lg border p-4 text-sm text-muted-foreground">

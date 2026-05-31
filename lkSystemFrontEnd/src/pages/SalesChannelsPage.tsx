@@ -225,32 +225,34 @@ function WooFields({ form, onChange, webhookToken, onRegenerateWebhook, regenera
         </div>
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="woo-ck">Consumer Key *</Label>
-        <div className="relative">
-          <Key className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-          <Input
-            id="woo-ck"
-            value={form.wc_consumer_key}
-            onChange={e => onChange('wc_consumer_key', e.target.value)}
-            className="pl-10 font-mono text-sm"
-            placeholder="ck_xxxxxxxxxxxxxxxxxxxxxxxx"
-          />
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-2 min-w-0">
+          <Label htmlFor="woo-ck">Consumer Key *</Label>
+          <div className="relative">
+            <Key className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+            <Input
+              id="woo-ck"
+              value={form.wc_consumer_key}
+              onChange={e => onChange('wc_consumer_key', e.target.value)}
+              className="pl-10 font-mono text-sm"
+              placeholder="ck_xxxxxxxxxxxxxxxxxxxxxxxx"
+            />
+          </div>
         </div>
-      </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="woo-cs">Consumer Secret *</Label>
-        <div className="relative">
-          <Key className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-          <Input
-            id="woo-cs"
-            type="password"
-            value={form.wc_consumer_secret}
-            onChange={e => onChange('wc_consumer_secret', e.target.value)}
-            className="pl-10 font-mono text-sm"
-            placeholder="cs_xxxxxxxxxxxxxxxxxxxxxxxx"
-          />
+        <div className="space-y-2 min-w-0">
+          <Label htmlFor="woo-cs">Consumer Secret *</Label>
+          <div className="relative">
+            <Key className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+            <Input
+              id="woo-cs"
+              type="password"
+              value={form.wc_consumer_secret}
+              onChange={e => onChange('wc_consumer_secret', e.target.value)}
+              className="pl-10 font-mono text-sm"
+              placeholder="cs_xxxxxxxxxxxxxxxxxxxxxxxx"
+            />
+          </div>
         </div>
       </div>
 
@@ -262,7 +264,7 @@ function WooFields({ form, onChange, webhookToken, onRegenerateWebhook, regenera
             id="woo-delivery-key"
             value={form.delivery_api_key}
             onChange={e => onChange('delivery_api_key', e.target.value)}
-            className="min-h-24 pl-10 font-mono text-xs"
+            className="min-h-24 pl-10 font-mono text-xs resize-none break-all"
             placeholder="Paste the full JAX JWT token here"
           />
         </div>
@@ -279,7 +281,7 @@ function WooFields({ form, onChange, webhookToken, onRegenerateWebhook, regenera
             <Input
               readOnly
               value={webhookToken ?? 'No token generated'}
-              className="flex-1 font-mono text-xs bg-muted"
+              className="flex-1 min-w-0 font-mono text-xs bg-muted"
             />
             <Button
               type="button"
@@ -926,7 +928,7 @@ export default function SalesChannelsPage() {
 
       {/* ── Edit Dialog ───────────────────────────────────────────────────────── */}
       <Dialog open={editDialog} onOpenChange={setEditDialog}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className="w-[calc(100%-1.5rem)] sm:max-w-2xl max-h-[90vh] overflow-y-auto overflow-x-hidden">
           <DialogHeader>
             <DialogTitle>Edit Sales Channel</DialogTitle>
             <DialogDescription>Update channel information</DialogDescription>
@@ -934,23 +936,25 @@ export default function SalesChannelsPage() {
 
           {editForm && (
             <div className="space-y-4">
-              <div className="space-y-2">
-                <Label>Channel Name *</Label>
-                <div className="relative">
-                  <Store className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-                  <Input value={editForm.name} onChange={e => updateEdit('name', e.target.value)} className="pl-10" placeholder="Channel name" />
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2 min-w-0">
+                  <Label>Channel Name *</Label>
+                  <div className="relative">
+                    <Store className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+                    <Input value={editForm.name} onChange={e => updateEdit('name', e.target.value)} className="pl-10" placeholder="Channel name" />
+                  </div>
                 </div>
-              </div>
 
-              {brands.length > 0 && (
-                <div className="space-y-2">
-                  <Label>Brand *</Label>
-                  <Select value={editForm.brand} onValueChange={v => updateEdit('brand', v)}>
-                    <SelectTrigger><SelectValue placeholder="Select a brand" /></SelectTrigger>
-                    <SelectContent>{brands.map(b => <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>)}</SelectContent>
-                  </Select>
-                </div>
-              )}
+                {brands.length > 0 && (
+                  <div className="space-y-2 min-w-0">
+                    <Label>Brand *</Label>
+                    <Select value={editForm.brand} onValueChange={v => updateEdit('brand', v)}>
+                      <SelectTrigger><SelectValue placeholder="Select a brand" /></SelectTrigger>
+                      <SelectContent>{brands.map(b => <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>)}</SelectContent>
+                    </Select>
+                  </div>
+                )}
+              </div>
 
               <div className="space-y-2">
                 <Label>Status</Label>
@@ -981,7 +985,7 @@ export default function SalesChannelsPage() {
                 />
               )}
 
-              <div className="flex gap-3 pt-4 border-t">
+              <div className="flex flex-col sm:flex-row gap-3 pt-4 border-t">
                 <Button onClick={handleSaveEdit} disabled={updateMutation.isPending} className="flex-1 gap-2">
                   <Pencil className="size-4" />
                   {updateMutation.isPending ? 'Saving…' : 'Save Changes'}
@@ -995,30 +999,32 @@ export default function SalesChannelsPage() {
 
       {/* ── Add Dialog ────────────────────────────────────────────────────────── */}
       <Dialog open={addDialog} onOpenChange={open => { setAddDialog(open); if (!open) setAddForm(EMPTY_FORM); }}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className="w-[calc(100%-1.5rem)] sm:max-w-2xl max-h-[90vh] overflow-y-auto overflow-x-hidden">
           <DialogHeader>
             <DialogTitle>Add New Sales Channel</DialogTitle>
             <DialogDescription>Create a WooCommerce, POS, or Web channel</DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4">
-            <div className="space-y-2">
-              <Label>Channel Name *</Label>
-              <div className="relative">
-                <Store className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-                <Input value={addForm.name} onChange={e => updateAdd('name', e.target.value)} className="pl-10" placeholder="Enter channel name" />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2 min-w-0">
+                <Label>Channel Name *</Label>
+                <div className="relative">
+                  <Store className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+                  <Input value={addForm.name} onChange={e => updateAdd('name', e.target.value)} className="pl-10" placeholder="Enter channel name" />
+                </div>
               </div>
-            </div>
 
-            {brands.length > 0 && (
-              <div className="space-y-2">
-                <Label>Brand *</Label>
-                <Select value={addForm.brand} onValueChange={v => updateAdd('brand', v)}>
-                  <SelectTrigger><SelectValue placeholder="Select a brand" /></SelectTrigger>
-                  <SelectContent>{brands.map(b => <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>)}</SelectContent>
-                </Select>
-              </div>
-            )}
+              {brands.length > 0 && (
+                <div className="space-y-2 min-w-0">
+                  <Label>Brand *</Label>
+                  <Select value={addForm.brand} onValueChange={v => updateAdd('brand', v)}>
+                    <SelectTrigger><SelectValue placeholder="Select a brand" /></SelectTrigger>
+                    <SelectContent>{brands.map(b => <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>)}</SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
 
             <div className="space-y-2">
               <Label>Channel Type *</Label>
@@ -1050,7 +1056,7 @@ export default function SalesChannelsPage() {
               />
             )}
 
-            <div className="flex gap-3 pt-4 border-t">
+            <div className="flex flex-col sm:flex-row gap-3 pt-4 border-t">
               <Button onClick={handleAddChannel} disabled={createMutation.isPending} className="flex-1 gap-2">
                 <Plus className="size-4" />
                 {createMutation.isPending ? 'Creating…' : 'Create Channel'}
