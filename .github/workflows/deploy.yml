@@ -98,13 +98,17 @@ jobs:
             git reset --hard origin/main
 
             echo "── Building & restarting containers ──────────────────────"
-            # Run via ``bash`` so the deploy never depends on the script's
-            # executable bit (repo is Windows-authored, core.fileMode=false).
-            # The script is also chmod +x in git as belt-and-braces.
-            bash deploy/deploy-production.sh
+            # Run as root via sudo, invoked through ``bash`` (so it never
+            # depends on the script's executable bit). deploy-production.sh
+            # reads the TLS cert under /etc/letsencrypt/live (root-only) and
+            # drives docker compose — the unprivileged SSH user can't, which is
+            # why the manual ``sudo bash ./deploy/deploy-production.sh`` works
+            # but the Action did not. Requires passwordless sudo for the deploy
+            # user (or SSH as root); ``sudo`` is a no-op if already root.
+            sudo bash deploy/deploy-production.sh
 
             echo "── Pruning dangling images ───────────────────────────────"
-            docker image prune -f
+            sudo docker image prune -f
 
       - name: Health check
         # Probe the public domain over HTTPS. Retry a few times to ride out
