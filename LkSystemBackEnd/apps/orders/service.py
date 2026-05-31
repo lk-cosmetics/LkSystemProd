@@ -524,6 +524,8 @@ class OrderIngestionService:
         sales_channel: SalesChannel,
         source: str,
     ) -> Optional[Client]:
+        # Local import avoids any import cycle with delivery_service.
+        from apps.orders.delivery_service import canonical_governorate_name
         email = (billing.get('email') or '').strip().lower() or None
         phone = (billing.get('phone') or '').strip() or None
         phone_normalized = normalize_tunisian_phone(phone)
@@ -553,13 +555,18 @@ class OrderIngestionService:
                 'last_name': billing.get('last_name', ''),
                 'phone': phone,
                 'address': billing.get('address_1', ''),
-                'state': billing.get('state', ''),
+                'state': canonical_governorate_name(billing.get('state', '')),
                 'postcode': billing.get('postcode', ''),
                 'country': billing.get('country', 'TN'),
             }.items():
                 if value and not getattr(client, field):
                     setattr(client, field, value)
                     update_fields.append(field)
+            # Backfill the brand from the order's sales channel when missing —
+            # WooCommerce-imported clients previously had no brand attributed.
+            if getattr(sales_channel, 'brand_id', None) and not client.brand_id:
+                client.brand = sales_channel.brand
+                update_fields.append('brand')
             if update_fields:
                 client.save(update_fields=[*update_fields, 'phone_normalized', 'updated_at'])
             if email:
@@ -573,11 +580,14 @@ class OrderIngestionService:
             'phone':         phone,
             'address':       billing.get('address_1', ''),
             'city':          '',
-            'state':         billing.get('state', ''),
+            'state':         canonical_governorate_name(billing.get('state', '')),
             'postcode':      billing.get('postcode', ''),
             'country':       billing.get('country', 'TN'),
             'source':        OrderIngestionService._map_client_source(source),
             'sales_channel': sales_channel,
+            # Attribute the client to the order's brand (was previously unset
+            # for WooCommerce imports).
+            'brand':         sales_channel.brand,
         }
         
         # ─── Generate default email if missing ────────────────────────────────

@@ -58,6 +58,7 @@ class Command(BaseCommand):
         self._seed_permissions()
         self._cleanup_legacy_permissions()
         self._seed_roles()
+        self._sync_company_role_copies()
         self._ensure_superusers_have_rbac_role()
 
         self.stdout.write(self.style.SUCCESS('RBAC seed complete.'))
@@ -143,6 +144,56 @@ class Command(BaseCommand):
             self.stdout.write(
                 f'  Role "{role_name}": {action} '
                 f'(now has {role.permissions.count()} permissions)'
+            )
+
+    # ── Per-company role copies ─────────────────────────────────────────
+
+    def _sync_company_role_copies(self):
+        """Floor per-company role copies with their template's permissions.
+
+        Per-company roles (``Role.company`` set) are editable copies of the
+        business-role templates, created once by ``provision_company_roles`` and
+        then frozen. A permission added to a template later (e.g.
+        ``view_manufacturing``) therefore never reaches copies that already
+        exist — so an older "Brand Manager" silently lacks access to a
+        newly-added module. Mirror the system-role behaviour:
+
+          * default  → UNION any missing template permissions onto each copy
+                       (additive: custom edits/additions are preserved, nothing
+                       is removed).
+          * --reset  → force the copy back to the exact template set.
+
+        Copies whose name does not match a template (CEO-created custom roles)
+        are left untouched, so this never overrides bespoke roles.
+        """
+        all_perms = {p.codename: p for p in AppPermission.objects.all()}
+        company_roles = Role.objects.filter(company__isnull=False)
+        additive = 0
+        reset = 0
+        for role in company_roles:
+            cfg = SYSTEM_ROLES.get(role.name)
+            if not cfg:
+                continue  # custom role with no template — leave alone
+            if cfg['permissions'] == '__all__':
+                desired = list(all_perms.values())
+            else:
+                desired = [all_perms[code] for code in cfg['permissions'] if code in all_perms]
+
+            if self._reset:
+                role.permissions.set(desired)
+                reset += 1
+            else:
+                existing_ids = set(role.permissions.values_list('id', flat=True))
+                missing = [p for p in desired if p.id not in existing_ids]
+                if missing:
+                    role.permissions.add(*missing)
+                    additive += 1
+
+        if self._reset:
+            self.stdout.write(f'  Company role copies: reset {reset} to template.')
+        else:
+            self.stdout.write(
+                f'  Company role copies: floored {additive} role(s) with missing template perm(s).'
             )
 
     # ── Ensure superusers have RBAC role ─────────────────────────────
