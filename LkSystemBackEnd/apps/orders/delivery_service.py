@@ -160,6 +160,48 @@ GOVERNORATE_ALIASES = {
 }
 
 
+# Canonical display names — kept in sync with the frontend list in
+# src/constants/tunisia.ts so an imported governorate matches the governorate
+# <select> options exactly.
+GOVERNORATE_DISPLAY_NAMES = [
+    'Nabeul', 'Gafsa', 'Sfax', 'Tunis', 'Bizerte', 'Jendouba', 'Tozeur',
+    'Tataouine', 'Kef', 'Sidi Bouzid', 'Manouba', 'Beja', 'Gabès', 'Zaghouan',
+    'Ariana', 'Kairouan', 'Monastir', 'Mahdia', 'Siliana', 'Ben Arous',
+    'Medenine', 'Kasserine', 'Sousse', 'Kebili',
+]
+
+
+def _gov_key(value: str) -> str:
+    """Accent-insensitive, lowercase, space-collapsed key for matching."""
+    normalized = unicodedata.normalize('NFKD', value or '')
+    ascii_text = ''.join(ch for ch in normalized if not unicodedata.combining(ch))
+    return ' '.join(ascii_text.lower().replace('-', ' ').split())
+
+
+_GOVERNORATE_DISPLAY_BY_KEY = {_gov_key(n): n for n in GOVERNORATE_DISPLAY_NAMES}
+
+
+def canonical_governorate_name(value):
+    """Map a raw WooCommerce ``billing.state`` — a 2-letter code (``NB``), an
+    ISO code (``TN-21``) or a name — to the canonical display governorate name
+    (``Nabeul``). Returns the original value unchanged when it cannot be
+    recognised, so unknown inputs are never corrupted.
+    """
+    if not value:
+        return value
+    text = str(value).strip()
+    key = _gov_key(text)
+    if key in _GOVERNORATE_DISPLAY_BY_KEY:
+        return _GOVERNORATE_DISPLAY_BY_KEY[key]
+    compact = key.replace(' ', '')
+    alias = GOVERNORATE_ALIASES.get(key) or GOVERNORATE_ALIASES.get(compact)
+    if not alias and compact.startswith('tn') and len(compact) == 4:
+        alias = GOVERNORATE_ALIASES.get(f'tn {compact[2:]}')
+    if alias:
+        return _GOVERNORATE_DISPLAY_BY_KEY.get(alias, alias.title())
+    return text
+
+
 class DeliveryError(Exception):
     """Raised when the delivery provider rejects or fails to process a submission."""
 
