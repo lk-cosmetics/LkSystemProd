@@ -315,7 +315,11 @@ SYSTEM_ROLES: dict[str, dict] = {
         'scope_type': 'brand',
         'permissions': [
             'view_dashboard',
-            'view_brands',
+            # Brand Manager is brand-scoped: no access to the company-wide
+            # Brands admin page (no 'view_brands'). They still operate within
+            # their assigned brand(s) — e.g. creating sales channels — via the
+            # brand-scoped APIs (BrandViewSet.get_queryset is IsAuthenticated
+            # and filters to allowed_brands).
             'view_sales_channels', 'create_sales_channels', 'edit_sales_channels', 'delete_sales_channels',
             'view_products', 'create_products', 'edit_products', 'delete_products',
             'view_categories', 'create_categories', 'edit_categories',

@@ -74,14 +74,16 @@ class BrandViewSet(viewsets.ModelViewSet):
         Scope brands per role.
 
         * Superuser or platform-scoped RBAC role → every brand.
-        * Anyone else → the union of:
-            - explicit ``allowed_brands`` (legacy per-user override that
-              an admin may have set up), AND
-            - every brand belonging to the user's ``current_company`` —
-              this is what makes the CEO role work without an explicit
-              ``allowed_brands`` row per brand.
-        * Falls back to empty when the user has neither a current_company
-          nor any ``allowed_brands``.
+        * Company-scoped role (CEO, Manager) → every brand in the user's
+          ``current_company`` (plus any explicit ``allowed_brands``). This is
+          what makes the CEO role work without a per-brand row.
+        * Brand/channel-scoped role (Brand Manager, Cashier) → ONLY their
+          explicit ``allowed_brands``. They must never see sibling brands of
+          the company, otherwise a brand manager could list or pick another
+          brand's data. Scope is driven by the role's ``scope_type`` — never a
+          hard-coded role name.
+        * Falls back to empty when a non-company-scoped user has no
+          ``allowed_brands`` (fail closed).
         """
         from django.db.models import Q
 
@@ -104,13 +106,20 @@ class BrandViewSet(viewsets.ModelViewSet):
                 return queryset.filter(company_id=user.current_company_id)
             return queryset
 
+        # Only company-scoped (or higher) roles get the company-wide widening.
+        # Brand/channel-scoped roles stay confined to their allowed_brands so
+        # they can't see sibling brands of the company.
+        is_company_scoped = user.user_roles.filter(
+            role__scope_type='company'
+        ).exists()
+
         scope_q = Q()
         has_any_scope = False
         if user.allowed_brands.exists():
             scope_q |= Q(pk__in=user.allowed_brands.values_list('id', flat=True))
             has_any_scope = True
         current_company_id = getattr(user, 'current_company_id', None)
-        if current_company_id:
+        if is_company_scoped and current_company_id:
             scope_q |= Q(company_id=current_company_id)
             has_any_scope = True
         if not has_any_scope:
