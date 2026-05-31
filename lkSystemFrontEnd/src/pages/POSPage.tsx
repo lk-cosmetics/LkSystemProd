@@ -143,32 +143,74 @@ const readSelectedChannelId = (): string => {
   return window.localStorage.getItem(POS_SELECTED_CHANNEL_KEY) || '';
 };
 
+const GENERIC_AXIOS_RE = /^request failed with status code/i;
+
+/**
+ * Turn any thrown request error into a human-readable message. Handles DRF
+ * shapes ({detail}, {message}, {non_field_errors}, field-error dicts, plain
+ * strings / lists) plus our custom {pack_errors}. Falls back to ``fallback``
+ * rather than leaking the generic "Request failed with status code 400" that
+ * axios puts on the Error — so the cashier sees the real reason (e.g. the
+ * insufficient-stock detail) instead of a status code.
+ */
 const describeRequestError = (err: unknown, fallback: string): string => {
-  const data = (err as {
-    response?: {
-      data?: {
-        detail?: string;
-        message?: string;
-        pack_errors?: Array<{ message?: string; component_name?: string; required?: number; available?: number }>;
-      };
-    };
-  })?.response?.data;
-  if (data?.pack_errors?.length) {
-    const lines = data.pack_errors
-      .map(problem => {
-        if (problem.message) return problem.message;
-        if (problem.component_name) {
-          return `Le produit ${problem.component_name} est insuffisant dans ce pack.`;
-        }
+  const data = (err as { response?: { data?: unknown } })?.response?.data;
+
+  // Plain string body (ignore HTML error pages).
+  if (typeof data === 'string') {
+    const trimmed = data.trim();
+    if (trimmed && !trimmed.startsWith('<')) return trimmed;
+  }
+
+  // Top-level list body: ["message", …]
+  if (Array.isArray(data) && typeof data[0] === 'string') {
+    return data.join(' ');
+  }
+
+  if (data && typeof data === 'object') {
+    const obj = data as Record<string, unknown>;
+
+    // Custom pack-component shortfalls.
+    const packErrors = obj.pack_errors as
+      | Array<{ message?: string; component_name?: string }>
+      | undefined;
+    if (Array.isArray(packErrors) && packErrors.length) {
+      const lines = packErrors
+        .map(p =>
+          p.message ||
+          (p.component_name ? `Le produit ${p.component_name} est insuffisant dans ce pack.` : null)
+        )
+        .filter(Boolean);
+      const head =
+        typeof obj.message === 'string' ? obj.message
+        : typeof obj.detail === 'string' ? obj.detail
+        : null;
+      return [head, ...lines].filter(Boolean).join('\n');
+    }
+
+    // Common single-message keys (string or string[]).
+    for (const key of ['detail', 'message', 'error', 'non_field_errors'] as const) {
+      const val = obj[key];
+      if (typeof val === 'string' && val.trim()) return val.trim();
+      if (Array.isArray(val) && typeof val[0] === 'string') return val.join(' ');
+    }
+
+    // Generic DRF field-error dict: { field: ["msg", …] }.
+    const fieldLines = Object.entries(obj)
+      .map(([field, val]) => {
+        if (Array.isArray(val) && typeof val[0] === 'string') return `${field}: ${val.join(' ')}`;
+        if (typeof val === 'string' && val.trim()) return `${field}: ${val.trim()}`;
         return null;
       })
       .filter(Boolean);
-    return [data.message || data.detail, ...lines].filter(Boolean).join('\n');
+    if (fieldLines.length) return fieldLines.join('\n');
   }
-  const responseDetail = data?.detail || data?.message;
-  if (responseDetail) return responseDetail;
-  if (err instanceof Error && err.message) return err.message;
-  return responseDetail || fallback;
+
+  // Last resort — the JS error text, unless it's the generic axios noise.
+  if (err instanceof Error && err.message && !GENERIC_AXIOS_RE.test(err.message)) {
+    return err.message;
+  }
+  return fallback;
 };
 
 export default function POSPage() {
@@ -1385,8 +1427,7 @@ export default function POSPage() {
         notifyCaisseStatsChanged();
         if (isMobile) setCartDrawerOpen(false);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'Failed to validate pickup order.';
-        setErrorMsg(msg);
+        setErrorMsg(describeRequestError(err, 'Could not complete this pickup order.'));
       } finally {
         setSubmitting(false);
       }
@@ -1462,8 +1503,7 @@ export default function POSPage() {
         notifyCaisseStatsChanged();
         if (isMobile) setCartDrawerOpen(false);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'Failed to update POS order.';
-        setErrorMsg(msg);
+        setErrorMsg(describeRequestError(err, 'Could not update this order.'));
       } finally {
         setSubmitting(false);
       }
@@ -1744,8 +1784,7 @@ export default function POSPage() {
       notifyCaisseStatsChanged();
       if (isMobile) setCartDrawerOpen(false);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      setErrorMsg(msg);
+      setErrorMsg(describeRequestError(err, 'Could not place the order. Please try again.'));
     } finally {
       setSubmitting(false);
     }
