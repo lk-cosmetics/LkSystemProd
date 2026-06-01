@@ -282,6 +282,46 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             return OrderDetailSerializer
         return OrderListSerializer
 
+    # Per-order write actions that must respect the edit lock. The lock is the
+    # source of truth for "who is handling this order", so once another user
+    # takes it over the previous holder's in-flight requests fail here instead
+    # of racing the new holder's changes. Read actions and the lock-management
+    # actions (acquire / heartbeat / release) are intentionally excluded.
+    _LOCK_ENFORCED_ACTIONS = frozenset({
+        'update_status', 'edit_order', 'soft_delete', 'restore',
+        'submit_delivery', 'update_delivery_status', 'confirm_order',
+        'not_answered', 'restore_delayed', 'delay_order', 'cancel_outcome',
+        'package_order', 'unpackage_order', 'mark_pickup', 'send_to_pos',
+        'validate_pos', 'process_return', 'restore_return_stock',
+        'manual_transition', 'retry_sync',
+    })
+
+    def get_object(self):
+        obj = super().get_object()
+        if getattr(self, 'action', None) in self._LOCK_ENFORCED_ACTIONS:
+            self._assert_lock_available(obj)
+        return obj
+
+    def _assert_lock_available(self, order):
+        """Reject a write (409) when another user holds an active edit lock."""
+        now = timezone.now()
+        held_by_other = (
+            order.edit_locked_by_id
+            and order.edit_locked_by_id != self.request.user.id
+            and order.edit_lock_expires_at
+            and order.edit_lock_expires_at > now
+        )
+        if held_by_other:
+            from rest_framework.exceptions import APIException
+            holder = order.edit_locked_by
+            name = holder.get_full_name() or holder.get_username()
+            exc = APIException({
+                'detail': f'This order is being handled by {name}. Your action was not applied.',
+                'lock': self._lock_payload(order),
+            })
+            exc.status_code = status.HTTP_409_CONFLICT
+            raise exc
+
     def get_queryset(self):
         include_deleted = (
             self.request.query_params.get('include_deleted', '').lower() == 'true'
