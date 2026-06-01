@@ -751,7 +751,16 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         serializer.is_valid(raise_exception=True)
 
         with transaction.atomic():
-            locked = Order.all_objects.select_for_update().select_related('edit_locked_by').get(pk=order.pk)
+            # of=('self',) locks ONLY the sales_order row. Without it, the
+            # select_related('edit_locked_by') LEFT OUTER JOIN (the FK is
+            # nullable) makes Postgres reject the lock: "FOR UPDATE cannot be
+            # applied to the nullable side of an outer join".
+            locked = (
+                Order.all_objects
+                .select_for_update(of=('self',))
+                .select_related('edit_locked_by')
+                .get(pk=order.pk)
+            )
             now = timezone.now()
             active_other = (
                 locked.edit_locked_by_id
@@ -804,7 +813,16 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         token = serializer.validated_data.get('token', '')
 
         with transaction.atomic():
-            locked = Order.all_objects.select_for_update().select_related('edit_locked_by').get(pk=order.pk)
+            # of=('self',) locks ONLY the sales_order row. Without it, the
+            # select_related('edit_locked_by') LEFT OUTER JOIN (the FK is
+            # nullable) makes Postgres reject the lock: "FOR UPDATE cannot be
+            # applied to the nullable side of an outer join".
+            locked = (
+                Order.all_objects
+                .select_for_update(of=('self',))
+                .select_related('edit_locked_by')
+                .get(pk=order.pk)
+            )
             if locked.edit_locked_by_id != request.user.id or (token and locked.edit_lock_token != token):
                 return Response(
                     {'detail': 'Another user is editing this order.', 'lock': self._lock_payload(locked)},
@@ -825,7 +843,16 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         token = serializer.validated_data.get('token', '')
 
         with transaction.atomic():
-            locked = Order.all_objects.select_for_update().select_related('edit_locked_by').get(pk=order.pk)
+            # of=('self',) locks ONLY the sales_order row. Without it, the
+            # select_related('edit_locked_by') LEFT OUTER JOIN (the FK is
+            # nullable) makes Postgres reject the lock: "FOR UPDATE cannot be
+            # applied to the nullable side of an outer join".
+            locked = (
+                Order.all_objects
+                .select_for_update(of=('self',))
+                .select_related('edit_locked_by')
+                .get(pk=order.pk)
+            )
             if locked.edit_locked_by_id == request.user.id and (not token or locked.edit_lock_token == token):
                 locked.edit_locked_by = None
                 locked.edit_locked_at = None
