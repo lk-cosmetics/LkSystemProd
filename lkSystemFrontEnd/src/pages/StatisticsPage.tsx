@@ -27,5 +27,5 @@ export default function StatisticsPage() {
   if (hasPermission(user, 'view_orders')) {
     return <Navigate to="/dashboard/orders" replace />;
   }
-  return <Navigate to="/dashboard/profile" replace />;
+  return <Navigate to="/dashboard/settings" replace />;
 }

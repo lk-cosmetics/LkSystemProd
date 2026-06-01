@@ -346,13 +346,21 @@ class ProductViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # Channel access must honour company scope, not just the per-user
+        # allowed_brands M2M. A CEO / Manager is company-scoped and typically
+        # has NO allowed_brands row, yet reaches every brand of their company
+        # (same rule as BrandViewSet.get_queryset). The previous
+        # allowed_brands-only check therefore wrongly returned 403 for a CEO.
+        # visible_brand_ids() centralises the scope rule (None = unrestricted)
+        # so no role name is ever hard-coded here.
         user = request.user
-        if not user.is_superuser:
-            if not user.allowed_brands.filter(pk=sales_channel.brand_id).exists():
-                return None, Response(
-                    {'detail': 'You do not have access to this sales channel.'},
-                    status=status.HTTP_403_FORBIDDEN,
-                )
+        from apps.rbac.services import visible_brand_ids
+        allowed_brand_ids = visible_brand_ids(user)
+        if allowed_brand_ids is not None and sales_channel.brand_id not in allowed_brand_ids:
+            return None, Response(
+                {'detail': 'You do not have access to this sales channel.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         if sales_channel.channel_type != SalesChannel.ChannelType.WOOCOMMERCE:
             return None, Response(

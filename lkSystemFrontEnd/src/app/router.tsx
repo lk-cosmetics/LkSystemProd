@@ -24,7 +24,6 @@ const UsersPageNew = lazy(() => import('@/pages/UsersPageNew'));
 const UserDetailsPage = lazy(() => import('@/pages/UserDetailsPage'));
 const EditUserPage = lazy(() => import('@/pages/EditUserPage'));
 const RolesPage = lazy(() => import('@/pages/RolesPage'));
-const ProfilePage = lazy(() => import('@/pages/ProfilePage'));
 const CompaniesPage = lazy(() => import('@/pages/CompaniesPage'));
 const AddCompanyPage = lazy(() => import('@/pages/AddCompanyPage'));
 const BrandsPage = lazy(() => import('@/pages/BrandsPage'));
@@ -111,15 +110,6 @@ export function AppRouter() {
               element={
                 <RoleGuard requiredPermission="view_roles">
                   <RolesPage />
-                </RoleGuard>
-              }
-            />
-            {/* Profile */}
-            <Route
-              path="profile"
-              element={
-                <RoleGuard requiredPermission="view_dashboard">
-                  <ProfilePage />
                 </RoleGuard>
               }
             />
