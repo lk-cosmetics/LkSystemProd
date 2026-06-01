@@ -104,15 +104,27 @@ class Command(BaseCommand):
         }
 
         for role_name, cfg in SYSTEM_ROLES.items():
-            role, created = Role.objects.get_or_create(
-                name=role_name,
-                company=None,  # System roles are platform-wide
-                defaults={
-                    'description': cfg['description'],
-                    'scope_type': cfg['scope_type'],
-                    'is_system': True,
-                },
+            # Defensive get-or-create: if a duplicate system role with this name
+            # somehow exists (legacy data), use the oldest one instead of
+            # crashing the entire deploy with MultipleObjectsReturned. Migration
+            # 0010_dedupe_system_roles merges and removes such duplicates; this
+            # guard makes seeding resilient even if one ever reappears.
+            role = (
+                Role.objects.filter(name=role_name, company__isnull=True)
+                .order_by('pk')
+                .first()
             )
+            if role is None:
+                role = Role.objects.create(
+                    name=role_name,
+                    company=None,  # System roles are platform-wide
+                    description=cfg['description'],
+                    scope_type=cfg['scope_type'],
+                    is_system=True,
+                )
+                created = True
+            else:
+                created = False
 
             # Seed behaviour for existing roles:
             #   * default     → UNION new perms in (additive). Admins keep

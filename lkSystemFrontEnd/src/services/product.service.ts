@@ -360,6 +360,10 @@ class ProductService {
       salesChannelId
         ? { sales_channel: salesChannelId, default_product_type: 'resell_product' }
         : { default_product_type: 'resell_product' },
+      // A full WooCommerce catalogue sync runs synchronously and can take a
+      // couple of minutes; override the global 10s axios timeout so the client
+      // waits for the result instead of aborting (the products still synced).
+      { timeout: 240_000 },
     );
     return response.data;
   }
@@ -368,6 +372,7 @@ class ProductService {
     const response = await apiClient.post<WooCommercePreviewResponse>(
       `${PRODUCT_ENDPOINT}preview/`,
       { sales_channel: salesChannelId },
+      { timeout: 240_000 },
     );
     return response.data;
   }
@@ -380,6 +385,7 @@ class ProductService {
         wc_product_ids: wcProductIds,
         default_product_type: 'resell_product',
       },
+      { timeout: 240_000 },
     );
     return response.data;
   }

@@ -27,7 +27,6 @@ const PAGE_TITLES: Record<string, string> = {
   'users/add': 'Add User',
   'add-user': 'Add User',
   roles: 'Roles',
-  profile: 'Profile',
   companies: 'Companies',
   'add-company': 'Add Company',
   brands: 'Brands',

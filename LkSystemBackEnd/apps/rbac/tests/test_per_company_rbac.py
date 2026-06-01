@@ -79,12 +79,12 @@ class PerCompanyProvisioningTests(TestCase):
         self.assertEqual(b_perms_before, b_perms_after)
         self.assertGreater(len(b_perms_after), 0)
 
-    def test_manager_role_grants_financial_reports(self):
-        """Company Managers can see revenue: the Manager template now grants
-        ``can_view_financial_reports`` (alongside Super Admin and CEO)."""
+    def test_manager_role_excludes_financial_reports(self):
+        """Company Managers must NOT see revenue: the Manager template does not
+        grant ``can_view_financial_reports`` (only Super Admin and CEO do)."""
         provision_company_roles(self.company_a)
         manager = Role.objects.get(name='Manager', company=self.company_a)
-        self.assertIn(
+        self.assertNotIn(
             'can_view_financial_reports',
             set(manager.permissions.values_list('codename', flat=True)),
         )

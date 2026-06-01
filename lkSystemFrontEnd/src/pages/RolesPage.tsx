@@ -26,6 +26,7 @@ import {
   MoreHorizontal,
   CheckCircle2,
   Info,
+  Copy,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -276,12 +277,14 @@ function MobileRoleCard({
   role,
   onView,
   onEdit,
+  onClone,
   onAssign,
   onDelete,
 }: {
   role: RBACRole;
   onView: () => void;
   onEdit: () => void;
+  onClone: () => void;
   onAssign: () => void;
   onDelete: () => void;
 }) {
@@ -321,6 +324,9 @@ function MobileRoleCard({
             </DropdownMenuItem>
             <DropdownMenuItem onClick={onEdit}>
               <Pencil className="size-4 mr-2" /> Edit
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={onClone}>
+              <Copy className="size-4 mr-2" /> Clone
             </DropdownMenuItem>
             <DropdownMenuItem onClick={onAssign}>
               <UserPlus className="size-4 mr-2" /> Assign User
@@ -931,6 +937,23 @@ export default function RolesPage() {
     }
   };
 
+  const openCloneDialog = async (role: RBACRole) => {
+    try {
+      const detail = await rbacService.getRole(role.id);
+      // Clone = create a NEW role pre-filled from the source. editingRole stays
+      // null so handleSaveRole() POSTs a new role; the backend still enforces
+      // the privilege ceiling (you can only grant permissions you hold).
+      setEditingRole(null);
+      setFormName(`Copy of ${detail.name}`);
+      setFormDescription(detail.description);
+      setFormScopeType(detail.scope_type);
+      setFormPermissions(new Set(detail.permissions));
+      setRoleDialogOpen(true);
+    } catch {
+      toast.error('Failed to load role to clone');
+    }
+  };
+
   const openDetailSheet = async (role: RBACRole) => {
     try {
       const [detail, allAssignments] = await Promise.all([
@@ -1237,6 +1260,9 @@ export default function RolesPage() {
                           <DropdownMenuItem onClick={() => openEditDialog(role)}>
                             <Pencil className="size-4 mr-2" /> Edit
                           </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => openCloneDialog(role)}>
+                            <Copy className="size-4 mr-2" /> Clone
+                          </DropdownMenuItem>
                           <DropdownMenuItem onClick={() => openAssignDialog(role)}>
                             <UserPlus className="size-4 mr-2" /> Assign User
                           </DropdownMenuItem>
@@ -1305,6 +1331,7 @@ export default function RolesPage() {
                 role={role}
                 onView={() => openDetailSheet(role)}
                 onEdit={() => openEditDialog(role)}
+                onClone={() => openCloneDialog(role)}
                 onAssign={() => openAssignDialog(role)}
                 onDelete={() => {
                   setRoleToDelete(role);

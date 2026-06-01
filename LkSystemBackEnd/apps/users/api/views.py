@@ -284,7 +284,75 @@ class UserViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(current_company_id=user.current_company_id)
 
         return queryset
-    
+
+    # ── Authorization for destructive / privileged actions on OTHER users ──
+    def _authz_manage_user(self, actor, target, *, codename, allow_self):
+        """Authorize ``actor`` deleting / admin-editing ``target``.
+
+        Permission- AND privilege-based, never role-name hard-coded:
+          1. the actor must hold ``codename`` at a scope covering the target
+             (the target's company, or a brand they both share);
+          2. the actor may never act on a user more privileged than themselves —
+             a platform admin/superuser, or anyone whose effective permission
+             set is not a subset of the actor's. This is what stops a company
+             Manager (or any lower role) from deleting / deactivating the CEO,
+             derived purely from permissions + scope_type, with no role names.
+        """
+        from rest_framework.exceptions import PermissionDenied
+        from apps.rbac.services import PermissionService
+
+        if actor.id == target.id:
+            if allow_self:
+                return
+            raise PermissionDenied('You cannot perform this action on your own account.')
+
+        if actor.is_superuser:
+            return
+
+        # (1) Scope-aware permission: the target's company, or a shared brand.
+        target_company = getattr(target, 'current_company', None)
+        has_perm = bool(
+            target_company
+            and PermissionService.has_permission(actor, codename, company=target_company)
+        )
+        if not has_perm:
+            target_brand_ids = set(target.allowed_brands.values_list('id', flat=True))
+            if target_brand_ids:
+                from apps.brands.models import Brand
+                shared = target_brand_ids & set(actor.allowed_brands.values_list('id', flat=True))
+                for brand in Brand.objects.filter(pk__in=shared):
+                    if PermissionService.has_permission(actor, codename, brand=brand):
+                        has_perm = True
+                        break
+        if not has_perm:
+            raise PermissionDenied('You do not have permission to manage this user.')
+
+        # (2) Privilege guard — never act on someone more privileged than you.
+        if PermissionService.is_platform_admin(target):
+            raise PermissionDenied('You cannot manage a platform administrator.')
+        actor_perms = PermissionService.get_user_permissions(actor)
+        target_perms = PermissionService.get_user_permissions(target)
+        if not target_perms <= actor_perms:
+            raise PermissionDenied(
+                'You cannot manage a user whose permissions exceed your own.'
+            )
+
+    def destroy(self, request, *args, **kwargs):
+        """Delete/deactivate a user — gated by ``delete_users`` + privilege guard."""
+        self._authz_manage_user(
+            request.user, self.get_object(),
+            codename='delete_users', allow_self=False,
+        )
+        return super().destroy(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        """Admin-edit another user (PUT/PATCH) — gated by ``edit_users`` + privilege guard."""
+        self._authz_manage_user(
+            request.user, self.get_object(),
+            codename='edit_users', allow_self=True,
+        )
+        return super().update(request, *args, **kwargs)
+
     @extend_schema(
         tags=['Users'],
         summary='Get or update current user',

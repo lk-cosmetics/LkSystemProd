@@ -55,7 +55,7 @@ import { Separator } from '@/components/ui/separator';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { useDebounce } from '@/hooks/useDebounce';
 import { useAuthStore } from '@/store/authStore';
-import { isPlatformAdmin } from '@/hooks/useAuth';
+import { isPlatformAdmin, hasPermission } from '@/hooks/useAuth';
 import { getMediaUrl } from '@/utils/helpers';
 import { productService } from '@/services/product.service';
 import {
@@ -859,6 +859,10 @@ export default function ProductsPage() {
   const { data: allProducts = [] } = useProducts(needAllProducts);
 
   const isSuperAdmin = isPlatformAdmin(user);
+  // Anyone who can manage products may sync the catalogue from a WooCommerce
+  // channel (CEO, Manager, Brand Manager…) — gated by permission, not the
+  // platform-admin flag, so company-scoped users see the Sync button too.
+  const canSyncProducts = isSuperAdmin || hasPermission(user, 'create_products');
   const wcCh = useMemo(() => salesChannels.filter(c => c.channel_type === 'WOOCOMMERCE'), [salesChannels]);
 
   // ── Auto-clear toasts ──
@@ -1554,7 +1558,7 @@ export default function ProductsPage() {
           >
             <Trash2 className="size-4" />{!isMobile && ' Deleted'}
           </Button>
-          {isSuperAdmin && wcCh.length > 0 && (
+          {canSyncProducts && wcCh.length > 0 && (
             <Button variant="outline" size="sm" onClick={() => setSyncOpen(true)} className="gap-1.5">
               <Globe className="size-4" />{!isMobile && ' Sync'}
             </Button>

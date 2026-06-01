@@ -300,9 +300,17 @@ SYSTEM_ROLES: dict[str, dict] = {
             'use_pos',
             'view_clients', 'create_clients', 'edit_clients', 'delete_clients',
             'view_promotions', 'create_promotions', 'edit_promotions', 'delete_promotions',
-            'view_users', 'create_users', 'edit_users',
+            # Manager can manage staff incl. delete/deactivate. The UserViewSet
+            # privilege guard still blocks deleting a more-privileged user
+            # (the CEO or a platform Super Admin) — permission- AND privilege-
+            # bounded, never a blanket grant.
+            'view_users', 'create_users', 'edit_users', 'delete_users',
             'view_roles',
-            'view_reports', 'export_data', 'can_view_financial_reports',
+            # Company Manager has NO access to revenue / financial numbers:
+            # no 'can_view_financial_reports' (gates the order /summary revenue
+            # aggregates) and no 'view_bi_dashboard' (gates the BI dashboard).
+            # Operational reporting only.
+            'view_reports', 'export_data',
             'can_invite_users', 'can_assign_roles',
         ],
     },
