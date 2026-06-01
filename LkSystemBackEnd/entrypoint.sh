@@ -29,9 +29,15 @@ if [ "$RUN_STARTUP_TASKS" = "True" ] || [ "$RUN_STARTUP_TASKS" = "true" ]; then
     echo "Running migrations..."
     python manage.py migrate --noinput
 
-    # Collect static files
+    # Collect static files. Non-fatal on purpose: the REST API and the "/"
+    # health endpoint do not depend on collected static, so a static glitch
+    # (e.g. a permission/disk issue on the persisted static volume during a
+    # container recreate) must NOT abort the container and fail the whole
+    # deploy. We also drop --clear to avoid a delete-permission failure on the
+    # already-populated static volume.
     echo "Collecting static files..."
-    python manage.py collectstatic --noinput --clear
+    python manage.py collectstatic --noinput \
+        || echo "WARNING: collectstatic failed — continuing so the app can serve (static assets may be stale)."
 
     # Auto-create default SUPERADMIN if no superuser exists
     AUTO_CREATE_DEFAULT_ADMIN=${AUTO_CREATE_DEFAULT_ADMIN:-True}
