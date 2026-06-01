@@ -30,7 +30,16 @@ if [[ "$(id -u)" -eq 0 && ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]];
 fi
 
 docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml build
-docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml up -d
+# If a container never becomes healthy, `up -d` exits non-zero with only
+# "dependency ... is unhealthy". Dump the backend logs so the REAL startup
+# error (traceback, failed migration, etc.) is visible in the deploy output.
+if ! docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml up -d; then
+  echo "──────────────────────────────────────────────────────────────"
+  echo "Startup failed (a container did not become healthy). Backend logs:"
+  echo "──────────────────────────────────────────────────────────────"
+  docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml logs --tail=200 backend || true
+  exit 1
+fi
 docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml exec -T backend python manage.py check
 docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml exec -T backend python manage.py seed_rbac
 
