@@ -349,10 +349,15 @@ export default function OrdersPage() {
   // Cross-brand order filter is for users who span multiple brands
   // (company-scoped roles hold switch_brands; superuser bypasses).
   const canFilterByBrand = hasPermission(user, 'switch_brands');
-  // Revenue aggregates are sensitive financial data — only Super Admin / CEO /
-  // company Manager (anyone holding can_view_financial_reports) sees them. The
-  // backend strips these fields too; this just hides the cards client-side.
+  // Revenue aggregates are sensitive financial data — only Super Admin / CEO
+  // (anyone holding can_view_financial_reports) sees them. The backend strips
+  // the figures for everyone else, so a revenue card renders ONLY when the
+  // value is actually present. That presence is the authoritative gate and
+  // also avoids a stale permission cache rendering "TND undefined".
   const canViewRevenue = hasPermission(user, 'can_view_financial_reports');
+  const showRevenue = canViewRevenue && summary?.revenue != null;
+  const showNetRevenue =
+    canViewRevenue && summary?.order_status_kpis?.revenue != null;
   const canImportOrders = hasPermission(user, 'import_orders');
   const canCreateOrders = hasPermission(user, 'create_orders');
   const canUpdateUnconfirmedOrders = hasPermission(user, 'update_unconfirmed_orders');
@@ -1405,12 +1410,12 @@ export default function OrdersPage() {
       {/* ── KPIs ─── */}
       {summary && (
         <div className="space-y-3">
-          <div className={`grid grid-cols-2 gap-3 ${canViewRevenue ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
+          <div className={`grid grid-cols-2 gap-3 ${showRevenue ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
             <KpiCard title="Total" value={summary.total_orders} icon={<ShoppingCart className="size-3" />} />
             <KpiCard title="Pending" value={summary.pending} tone="text-amber-600" icon={<Clock className="size-3" />} />
             <KpiCard title="Processing" value={summary.processing} tone="text-blue-600" icon={<Package className="size-3" />} />
             <KpiCard title="Completed" value={summary.completed} tone="text-emerald-600" icon={<CheckCircle className="size-3" />} />
-            {canViewRevenue && (
+            {showRevenue && (
               <KpiCard title="Revenue" value={`TND ${summary.revenue}`} tone="text-emerald-600" icon={<TrendingUp className="size-3" />} />
             )}
           </div>
@@ -1421,9 +1426,9 @@ export default function OrdersPage() {
           </div>
           {/* Phase D — clean order_status KPIs (genuinely successful sales only). */}
           {summary.order_status_kpis && (
-            <div className={`grid grid-cols-2 gap-3 ${canViewRevenue ? 'md:grid-cols-6' : 'md:grid-cols-5'}`}>
+            <div className={`grid grid-cols-2 gap-3 ${showNetRevenue ? 'md:grid-cols-6' : 'md:grid-cols-5'}`}>
               <KpiCard title="Successful Sales" value={summary.order_status_kpis.successful_sales} tone="text-emerald-600" icon={<CheckCircle className="size-3" />} />
-              {canViewRevenue && (
+              {showNetRevenue && (
                 <KpiCard title="Net Revenue" value={`TND ${summary.order_status_kpis.revenue}`} tone="text-emerald-600" icon={<TrendingUp className="size-3" />} />
               )}
               <KpiCard title="In Confirmation" value={summary.order_status_kpis.in_confirmation} tone="text-amber-600" icon={<Phone className="size-3" />} />
