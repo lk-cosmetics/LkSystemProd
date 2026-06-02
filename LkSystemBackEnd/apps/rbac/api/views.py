@@ -467,3 +467,93 @@ class AssignmentViewSet(viewsets.ViewSet):
 
         assignment.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=False, methods=['post'], url_path='set-role')
+    def set_role(self, request):
+        """Replace a user's role with a single new one (Edit User → Role).
+
+        Removes the target's existing assignable (company-owned, non-platform)
+        role assignments and creates the new role at the scope it implies
+        (company / brand / channel), reusing the same authorisation guards as
+        ``assign_role`` plus a privilege guard so a user more powerful than the
+        actor can never be re-roled.
+        """
+        from rest_framework.exceptions import PermissionDenied
+        from django.db import transaction
+        from apps.rbac.services import scope_kwargs_for_role
+
+        actor = request.user
+        self._require_assign_permission(actor)
+
+        try:
+            target = User.objects.get(id=request.data.get('user_id'))
+            role = Role.objects.get(id=request.data.get('role_id'))
+        except (User.DoesNotExist, Role.DoesNotExist):
+            return Response({'detail': 'User or role not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        self._assert_target_in_company(actor, target)
+        self._assert_role_assignable(actor, role)
+        if not PermissionService.is_platform_admin(actor):
+            from apps.rbac.provisioning import assert_within_ceiling
+            # Cannot grant a role more powerful than the actor holds.
+            assert_within_ceiling(actor, role.permissions.values_list('codename', flat=True))
+            # Cannot re-role a user whose privileges already exceed the actor's.
+            if PermissionService.is_platform_admin(target):
+                raise PermissionDenied("You cannot change a platform administrator's role.")
+            if not (PermissionService.get_user_permissions(target)
+                    <= PermissionService.get_user_permissions(actor)):
+                raise PermissionDenied(
+                    'You cannot change the role of a user whose permissions exceed your own.'
+                )
+
+        # Resolve scope ingredients from the role + the target's own data so the
+        # caller need not re-pick a brand/sales-point that the user already has.
+        company = target.current_company
+        scope = (role.scope_type or '').lower()
+        brands = list(target.allowed_brands.all()) if scope in ('brand', 'channel') else []
+        sales_channel = getattr(target, 'assigned_sales_channel', None) if scope == 'channel' else None
+        if scope == 'brand' and not brands:
+            return Response(
+                {'detail': f'{role.name} is brand-scoped — give the user brand access first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if scope == 'channel' and not sales_channel:
+            return Response(
+                {'detail': f'{role.name} works at a single sales point — assign the user a sales point first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            # Clear the target's current assignable roles so they end with
+            # exactly the new one. A non-platform actor only touches roles owned
+            # by their company and never platform-level assignments.
+            existing = UserRole.objects.filter(user=target).exclude(
+                role__scope_type='platform'
+            )
+            if not PermissionService.is_platform_admin(actor):
+                # The user's effective role lives either as a per-company copy in
+                # the actor's company or as a global business template; replace
+                # both, but never another tenant's or a platform assignment.
+                from django.db.models import Q
+                existing = existing.filter(
+                    Q(role__company_id=actor.current_company_id)
+                    | Q(role__company__isnull=True)
+                )
+            existing.delete()
+
+            if scope == 'brand' and len(brands) > 1:
+                for brand in brands:
+                    UserRole.objects.create(
+                        user=target, role=role, company=company, brand=brand,
+                        assigned_by=actor,
+                    )
+            else:
+                kwargs = scope_kwargs_for_role(
+                    role, company=company, brands=brands, sales_channel=sales_channel,
+                )
+                UserRole.objects.create(user=target, role=role, assigned_by=actor, **kwargs)
+
+        return Response({
+            'detail': 'Role updated.',
+            'roles': sorted(PermissionService.get_user_role_names(target)),
+        })

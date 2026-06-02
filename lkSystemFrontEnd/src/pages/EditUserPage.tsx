@@ -47,6 +47,7 @@ import { userService } from '@/services/user.service';
 import { profileService } from '@/services/profile.service';
 import { companyService } from '@/services/company.service';
 import { brandService } from '@/services/brand.service';
+import { rbacService, type RBACRole } from '@/services/rbac.service';
 import type { UserDetails, CompanyListItem, Brand } from '@/types';
 import { toast } from 'sonner';
 
@@ -107,6 +108,9 @@ export default function EditUserPage() {
   const [brands, setBrands] = useState<Brand[]>([]);
   const [filteredBrands, setFilteredBrands] = useState<Brand[]>([]);
   const [selectedBrands, setSelectedBrands] = useState<number[]>([]);
+  const [roles, setRoles] = useState<RBACRole[]>([]);
+  const [selectedRoleId, setSelectedRoleId] = useState<string>('');
+  const [initialRoleId, setInitialRoleId] = useState<string>('');
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [activeTab, setActiveTab] = useState('basic');
@@ -140,6 +144,26 @@ export default function EditUserPage() {
   });
 
   const selectedCompany = watch('current_company');
+
+  // Load the roles the logged-in user is allowed to assign for the selected
+  // company (backend filters by the caller's permission ceiling).
+  useEffect(() => {
+    if (!selectedCompany) { setRoles([]); return; }
+    rbacService
+      .getRoles({ company: selectedCompany, assignable: true })
+      .then(setRoles)
+      .catch(() => setRoles([]));
+  }, [selectedCompany]);
+
+  // Initialise the role dropdown from the user's current role once both load.
+  useEffect(() => {
+    if (!user || roles.length === 0 || initialRoleId) return;
+    const current = roles.find(r => r.name === user.role_name);
+    if (current) {
+      setInitialRoleId(String(current.id));
+      setSelectedRoleId(String(current.id));
+    }
+  }, [user, roles, initialRoleId]);
 
   // Fetch initial data
   useEffect(() => {
@@ -336,11 +360,24 @@ export default function EditUserPage() {
         }
       }
 
+      // Apply a role change (if any) through the guarded RBAC endpoint, which
+      // replaces the user's role at the scope it implies. Done last so the
+      // basic-info save isn't blocked by a role-specific validation error.
+      if (selectedRoleId && selectedRoleId !== initialRoleId) {
+        await rbacService.setRole({
+          user_id: Number(user.id),
+          role_id: Number(selectedRoleId),
+        });
+        setInitialRoleId(selectedRoleId);
+      }
+
       toast.success('User updated successfully');
       navigate(`/dashboard/users/${user.id}`);
     } catch (error) {
       console.error('Failed to update user:', error);
-      toast.error('Failed to update user');
+      const detail = (error as { response?: { data?: { detail?: string } } })
+        ?.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Failed to update user');
     } finally {
       setIsSaving(false);
     }
@@ -860,12 +897,31 @@ export default function EditUserPage() {
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="space-y-2">
-                    <Label>Role</Label>
-                    <p className="text-sm font-medium capitalize px-3 py-2 rounded-md border bg-l-bg-2 dark:bg-d-bg-2">
-                      {user?.role_name || 'No role assigned'}
-                    </p>
+                    <Label htmlFor="role">Role</Label>
+                    <Select
+                      value={selectedRoleId}
+                      onValueChange={setSelectedRoleId}
+                      disabled={!selectedCompany || roles.length === 0}
+                    >
+                      <SelectTrigger>
+                        <Shield className="size-4 mr-2" />
+                        <SelectValue
+                          placeholder={
+                            selectedCompany ? 'Select a role' : 'Select a company first'
+                          }
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {roles.map(r => (
+                          <SelectItem key={r.id} value={String(r.id)}>
+                            {r.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                     <p className="text-xs text-l-text-3 dark:text-d-text-3">
-                      Roles are managed via RBAC assignments
+                      Only roles you are allowed to assign are shown. The role is
+                      applied at the scope it implies (company / brand / sales point).
                     </p>
                   </div>
 

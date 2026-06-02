@@ -131,4 +131,11 @@ export const rbacService = {
         assignment_id: assignmentId,
       })
       .then(r => r.data),
+
+  /** Replace a user's role with a single new one (Edit User → Role dropdown).
+   * The backend derives the scope from the role + the user's brand/sales-point. */
+  setRole: (data: { user_id: number; role_id: number }) =>
+    apiClient
+      .post<{ detail: string; roles: string[] }>(`${BASE}/assignments/set-role/`, data)
+      .then(r => r.data),
 };
