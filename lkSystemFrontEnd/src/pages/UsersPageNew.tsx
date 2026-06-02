@@ -310,6 +310,12 @@ export default function UsersPage() {
       toast.error('Please fill in email, role, and company');
       return;
     }
+    // Operational roles (Employee/Cashier) must be pinned to a sales point.
+    const selectedRole = roles.find(r => String(r.id) === inviteRoleId);
+    if (selectedRole?.requires_sales_point && !inviteSalesChannelId) {
+      toast.error('This role works at a single sales point — pick a sales channel.');
+      return;
+    }
 
     setIsInviting(true);
     try {
@@ -925,10 +931,13 @@ export default function UsersPage() {
             {/* Sales Channel (shown after brands are selected) */}
             {inviteChannels.length > 0 && (
               <div className="space-y-2">
-                <Label>Sales Channel</Label>
+                <Label>
+                  Sales Channel
+                  {roles.find(r => String(r.id) === inviteRoleId)?.requires_sales_point ? ' *' : ''}
+                </Label>
                 <Select value={inviteSalesChannelId} onValueChange={setInviteSalesChannelId}>
                   <SelectTrigger>
-                    <SelectValue placeholder="Select a sales channel (optional)" />
+                    <SelectValue placeholder="Select a sales channel" />
                   </SelectTrigger>
                   <SelectContent>
                     {inviteChannels.map(ch => (

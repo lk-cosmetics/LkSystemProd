@@ -1164,6 +1164,18 @@ class InviteEmployeeSerializer(serializers.Serializer):
                 ),
             })
 
+        # Operational, single-sales-point roles (Employee / Cashier) must be
+        # pinned to a sales point even when the role itself is company-scoped,
+        # so the new account is confined to exactly one channel.
+        from apps.rbac.services import role_requires_sales_point
+        if role_requires_sales_point(role) and not attrs['_sales_channel']:
+            raise serializers.ValidationError({
+                'sales_channel_id': (
+                    f"{role.name} works at a single sales point — pick the sales "
+                    f"channel this user will operate."
+                ),
+            })
+
         return attrs
 
     def create(self, validated_data):
@@ -1401,6 +1413,16 @@ class AcceptInvitationSerializer(serializers.Serializer):
                 assigned_by=invitation.invited_by,
                 **scope,
             )
+
+        # Pin operational accounts to their assigned sales point so every read
+        # is confined to that one channel (and its brand). Set whenever the
+        # invite carried a sales channel — a Cashier, or an Employee assigned
+        # one — regardless of the role's nominal scope.
+        if invitation.sales_channel_id:
+            user.assigned_sales_channel_id = invitation.sales_channel_id
+            user.current_brand_id = invitation.sales_channel.brand_id
+            user.save(update_fields=['assigned_sales_channel', 'current_brand'])
+            user.allowed_brands.add(invitation.sales_channel.brand_id)
 
         invitation.mark_accepted(user)
 

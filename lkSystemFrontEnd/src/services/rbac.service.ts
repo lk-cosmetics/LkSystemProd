@@ -31,6 +31,8 @@ export interface RBACRole {
   permissions: string[]; // codenames (detail) or count (list)
   permissions_count?: number;
   assignments_count?: number;
+  /** Operational role (Employee/Cashier) that must be pinned to a sales point. */
+  requires_sales_point?: boolean;
   is_system: boolean;
   created_at: string;
   updated_at: string;

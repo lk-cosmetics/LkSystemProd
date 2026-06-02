@@ -371,6 +371,15 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
     @classmethod
     def _scope_queryset(cls, qs, user, codename: str):
+        # Operational accounts pinned to a sales point (Employee / Cashier) see
+        # ONLY that channel's orders — web orders on the channel or POS orders
+        # rung on it — regardless of any wider role scope.
+        asc_id = getattr(user, 'assigned_sales_channel_id', None)
+        if asc_id:
+            return qs.filter(
+                Q(sales_channel_id=asc_id) | Q(pos_sales_channel_id=asc_id)
+            )
+
         # Active-brand workspace focus narrows orders for EVERYONE (including
         # superusers). An order belongs to a brand directly or through its
         # sales channel. NULL current_brand = whole-company (no narrowing).

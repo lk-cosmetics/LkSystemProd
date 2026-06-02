@@ -38,6 +38,9 @@ class RoleListSerializer(serializers.ModelSerializer):
     company_name = serializers.CharField(
         source='company.name', read_only=True, default=None
     )
+    # Operational roles (Employee / Cashier) must be assigned a sales point;
+    # the Add-User / Invite forms use this flag to require the channel selector.
+    requires_sales_point = serializers.SerializerMethodField()
 
     class Meta:
         model = Role
@@ -45,9 +48,14 @@ class RoleListSerializer(serializers.ModelSerializer):
             'id', 'name', 'description', 'scope_type',
             'company', 'company_name',
             'is_system', 'permissions_count', 'assignments_count',
+            'requires_sales_point',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'is_system', 'created_at', 'updated_at']
+
+    def get_requires_sales_point(self, obj) -> bool:
+        from apps.rbac.services import role_requires_sales_point
+        return role_requires_sales_point(obj)
 
 
 class RoleDetailSerializer(serializers.ModelSerializer):
