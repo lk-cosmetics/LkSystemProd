@@ -25,7 +25,10 @@ class IsBIUser(BasePermission):
             return False
         if user.is_superuser:
             return True
-        perms = PermissionService.get_user_permissions(
+        # Capability gate (data is scoped separately by scope_request_to_user),
+        # so match the permission anywhere within the active company — including
+        # brand/channel sub-scopes — not only company-wide roles.
+        perms = PermissionService.get_capability_permissions(
             user,
             company=getattr(user, 'current_company', None),
         )

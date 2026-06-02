@@ -1062,26 +1062,23 @@ class InviteEmployeeSerializer(serializers.Serializer):
             raise serializers.ValidationError('Authentication required.')
 
         if not inviter.is_superuser:
-            inviter_perms = PermissionService.get_user_permissions(
+            # Capability check across the inviter's active company INCLUDING its
+            # brand/channel sub-scopes, so a brand-scoped Brand Manager (who holds
+            # no company-wide role) can still invite within their own company.
+            inviter_perms = PermissionService.get_capability_permissions(
                 inviter, company=company,
             )
             if 'create_users' not in inviter_perms:
                 raise serializers.ValidationError(
                     "You don't have permission to invite users to this company."
                 )
-            # Refuse to escalate beyond the inviter's reach.
-            inviter_scopes = set(
-                inviter.user_roles.values_list('role__scope_type', flat=True)
-            )
-            rank = {'platform': 4, 'company': 3, 'brand': 2, 'channel': 1}
-            inviter_rank = max((rank.get(s, 0) for s in inviter_scopes), default=0)
-            target_rank = rank.get((role.scope_type or '').lower(), 0)
-            if target_rank > inviter_rank:
+            # The one escalation the permission ceiling below cannot catch: a
+            # non-platform admin must never mint a platform-scoped (cross-company)
+            # role, however small its permission set looks.
+            if (role.scope_type or '').lower() == 'platform' \
+                    and not PermissionService.is_platform_admin(inviter):
                 raise serializers.ValidationError({
-                    'role_id': (
-                        f"You can't invite a {role.name} ({role.scope_type}-scoped) "
-                        f"because this role outranks your own."
-                    ),
+                    'role_id': "You can't invite a user to a platform-wide role.",
                 })
             # Tenant isolation: the role must be one owned by the target
             # company, never a global template or another tenant's role.
@@ -1090,7 +1087,12 @@ class InviteEmployeeSerializer(serializers.Serializer):
                     'role_id': 'You can only invite users to roles that belong '
                                'to this company.'
                 })
-            # Privilege ceiling: cannot grant permissions you do not hold.
+            # Privilege ceiling — the real escalation guard: the inviter may only
+            # grant a role whose permissions are a subset of their own. This lets
+            # a Brand Manager invite an Employee or a Cashier (their permissions
+            # are a subset) while still blocking a Manager / CEO / Super Admin
+            # (those need permissions the Brand Manager does not hold) — derived
+            # purely from permissions, with no role-name or scope-rank hard-coding.
             from apps.rbac.provisioning import assert_within_ceiling
             assert_within_ceiling(
                 inviter, role.permissions.values_list('codename', flat=True)
