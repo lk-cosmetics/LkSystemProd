@@ -16,6 +16,7 @@ import type {
 
 interface ProductQueryParams {
   brand?: number;
+  categories?: number; // filter products by a category id (?categories=<id>)
   product_type?: string;
   status?: 'publish' | 'draft' | 'pending' | 'private';
   search?: string;

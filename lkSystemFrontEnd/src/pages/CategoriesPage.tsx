@@ -23,6 +23,7 @@ import {
   Check,
   Tag,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -92,6 +93,7 @@ interface CategoryRowProps {
   selectionMode: boolean;
   onToggleSelection: (id: number) => void;
   onView: (category: CategoryListItem) => void;
+  onViewProducts: (category: CategoryListItem) => void;
   onEdit: (category: CategoryListItem) => void;
   onDelete: (category: CategoryListItem) => void;
 }
@@ -102,6 +104,7 @@ const CategoryRow = memo(function CategoryRow({
   selectionMode,
   onToggleSelection,
   onView,
+  onViewProducts,
   onEdit,
   onDelete,
 }: CategoryRowProps) {
@@ -228,6 +231,10 @@ const CategoryRow = memo(function CategoryRow({
             <DropdownMenuItem onClick={() => onView(category)}>
               <Eye className="size-4 mr-2" />
               View Details
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onViewProducts(category)}>
+              <Package className="size-4 mr-2" />
+              View Products
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => onEdit(category)}>
               <Pencil className="size-4 mr-2" />
@@ -404,6 +411,12 @@ export default function CategoriesPage() {
   }, [searchQuery, salesChannelFilter, parentFilter, categories]);
 
   // Action handlers
+  const navigate = useNavigate();
+  // Drill-down: open the Products page filtered to this category.
+  const handleViewProducts = useCallback(
+    (category: CategoryListItem) => navigate(`/dashboard/products?category=${category.id}`),
+    [navigate],
+  );
   const handleView = useCallback((category: CategoryListItem) => {
     setSelectedCategory(category);
     setViewDialog(true);
@@ -894,6 +907,7 @@ export default function CategoriesPage() {
                   selectionMode={selectionMode}
                   onToggleSelection={toggleCategorySelection}
                   onView={handleView}
+                  onViewProducts={handleViewProducts}
                   onEdit={handleEdit}
                   onDelete={handleDelete}
                 />

@@ -82,7 +82,9 @@ class ProductViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     parser_classes = [JSONParser]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['brand', 'product_type', 'status']
+    # ``categories`` enables ?categories=<id> to filter products by category
+    # (the category drill-down + the Products page category filter).
+    filterset_fields = ['brand', 'product_type', 'status', 'categories']
     search_fields = ['name', 'barcode']
     ordering_fields = ['name', 'sales_price', 'purchase_price', 'created_at']
     ordering = ['-created_at']

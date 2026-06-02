@@ -54,6 +54,7 @@ import { Switch } from '@/components/ui/switch';
 import { Separator } from '@/components/ui/separator';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { useDebounce } from '@/hooks/useDebounce';
+import { useSearchParams } from 'react-router-dom';
 import { useAuthStore } from '@/store/authStore';
 import { isPlatformAdmin, hasPermission } from '@/hooks/useAuth';
 import { getMediaUrl } from '@/utils/helpers';
@@ -63,6 +64,7 @@ import {
   useProductsPaginated,
   useSalesChannels,
   useBrands,
+  useCategories,
   useDeleteProduct,
   useHardDeleteProduct,
   useBulkDeleteProducts,
@@ -723,7 +725,11 @@ export default function ProductsPage() {
   const [packF, setPackF] = useState('all'); // 'all' | 'pack' | 'single'
   const [showDeleted, setShowDeleted] = useState(false);
   const [onlyDeleted, setOnlyDeleted] = useState(false);
-  const [filtersOpen, setFiltersOpen] = useState(false);
+  // ?category=<id> arrives from the category drill-down (clicking a category
+  // row on the Categories page); it preselects the filter and opens the panel.
+  const [searchParams] = useSearchParams();
+  const [categoryF, setCategoryF] = useState(() => searchParams.get('category') ?? 'all');
+  const [filtersOpen, setFiltersOpen] = useState(() => !!searchParams.get('category'));
 
   // Debounce search — 300ms for snappy live filtering
   useEffect(() => {
@@ -732,7 +738,7 @@ export default function ProductsPage() {
   }, [search]);
 
   // Reset page when filters change
-  useEffect(() => { setPage(1); }, [brandF, statusF, typeF, packF, showDeleted, onlyDeleted]);
+  useEffect(() => { setPage(1); }, [brandF, statusF, typeF, packF, categoryF, showDeleted, onlyDeleted]);
 
   // Count active filters (excluding search)
   const activeFilterCount = useMemo(() => {
@@ -741,22 +747,24 @@ export default function ProductsPage() {
     if (statusF !== 'all') count++;
     if (typeF !== 'all') count++;
     if (packF !== 'all') count++;
+    if (categoryF !== 'all') count++;
     if (showDeleted) count++;
     if (onlyDeleted) count++;
     return count;
-  }, [brandF, statusF, typeF, packF, showDeleted, onlyDeleted]);
+  }, [brandF, statusF, typeF, packF, categoryF, showDeleted, onlyDeleted]);
 
   const qp = useMemo(() => ({
     page,
     page_size: pageSize,
     search: debSearch || undefined,
     brand: brandF !== 'all' ? Number(brandF) : undefined,
+    categories: categoryF !== 'all' ? Number(categoryF) : undefined,
     status: (statusF !== 'all' ? statusF : undefined) as ProductStatus | undefined,
     product_type: typeF !== 'all' ? typeF : undefined,
     is_pack: packF === 'pack' ? true : packF === 'single' ? false : undefined,
     show_deleted: (showDeleted || onlyDeleted) || undefined,
     only_deleted: onlyDeleted || undefined,
-  }), [page, pageSize, debSearch, brandF, statusF, typeF, packF, showDeleted, onlyDeleted]);
+  }), [page, pageSize, debSearch, brandF, categoryF, statusF, typeF, packF, showDeleted, onlyDeleted]);
 
   // ── Data ──
   const { data: paginated, isLoading, refetch } = useProductsPaginated(qp);
@@ -766,6 +774,7 @@ export default function ProductsPage() {
 
   const { data: salesChannels = [] } = useSalesChannels();
   const { data: brands = [] } = useBrands();
+  const { data: categories = [] } = useCategories();
 
   // ── Mutations ──
   const deleteMut = useDeleteProduct();
@@ -1380,6 +1389,7 @@ export default function ProductsPage() {
   // Reset filters
   const clearFilters = () => {
     setBrandF('all');
+    setCategoryF('all');
     setStatusF('all');
     setTypeF('all');
     setPackF('all');
@@ -1666,6 +1676,16 @@ export default function ProductsPage() {
                 <SelectContent>
                   <SelectItem value="all">All Brands</SelectItem>
                   {brands.map(b => <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1 min-w-[150px]">
+              <Label className="text-xs text-muted-foreground">Category</Label>
+              <Select value={categoryF} onValueChange={setCategoryF}>
+                <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Categories</SelectItem>
+                  {categories.map(c => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
