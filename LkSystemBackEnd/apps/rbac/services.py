@@ -273,6 +273,54 @@ class PermissionService:
             .distinct()
         )
 
+    @staticmethod
+    def get_capability_permissions(user, company=None) -> set[str]:
+        """Permissions for a *capability* gate (e.g. ``require_permission``).
+
+        ``get_user_permissions(company=X)`` answers "what may the user do AT the
+        company-wide scope", so it deliberately excludes brand- and
+        channel-scoped roles. That is wrong for a capability gate: a Brand
+        Manager *can* view manufacturing, just for their own brand. This method
+        answers "may the user do X *somewhere within* company X" — matching
+        company-wide, brand, and channel roles under that company, plus
+        platform roles. Each viewset still scopes the data it returns to the
+        user's visible brands/channels, so widening the gate this way does not
+        grant any cross-tenant access, and a multi-company user does not inherit
+        another company's permissions (assignments outside ``company`` are not
+        matched).
+
+        With no active company the gate falls back to the union of every
+        permission the user holds (same as ``has_permission`` with no scope).
+        """
+        if not user.is_authenticated:
+            return set()
+        if user.is_superuser:
+            return set(
+                AppPermission.objects.values_list('codename', flat=True)
+            )
+
+        assignments = UserRole.objects.filter(user=user)
+        if company is not None:
+            assignments = assignments.filter(
+                # Platform-level roles apply everywhere.
+                Q(company__isnull=True, brand__isnull=True,
+                  sales_channel__isnull=True)
+                # Any role attached to this company (company-wide rows, and
+                # brand/channel rows which also carry their company).
+                | Q(company=company)
+                # Belt-and-braces for rows where only brand/channel is set.
+                | Q(brand__company=company)
+                | Q(sales_channel__brand__company=company)
+            )
+
+        return set(
+            AppPermission.objects.filter(
+                roles__assignments__in=assignments,
+            )
+            .values_list('codename', flat=True)
+            .distinct()
+        )
+
     # ── Convenience checks ──────────────────────────────────────────────
 
     @staticmethod

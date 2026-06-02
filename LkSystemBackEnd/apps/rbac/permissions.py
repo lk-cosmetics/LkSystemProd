@@ -53,7 +53,12 @@ def require_permission(*codenames: str, require_all: bool = True):
             if user.is_superuser:
                 return True
 
-            perms = PermissionService.get_user_permissions(
+            # Capability gate: does the user hold the permission anywhere within
+            # their active company (company-wide, brand, or channel role)? Each
+            # viewset scopes the data it returns to the user's visible
+            # brands/channels, so a brand-scoped user (e.g. Brand Manager)
+            # correctly passes here without gaining any cross-company access.
+            perms = PermissionService.get_capability_permissions(
                 user,
                 company=getattr(user, 'current_company', None),
             )
