@@ -110,12 +110,43 @@ class ProductViewSet(viewsets.ModelViewSet):
     # ── Create / Update with audit ──────────────────────────────────────
 
     def perform_create(self, serializer):
-        instance = serializer.save()
+        user = self.request.user
+
+        # Resolve the active brand: a focused brand workspace, or the brand of
+        # an operational account's assigned sales point.
+        active_brand_id = getattr(user, 'current_brand_id', None)
+        if not active_brand_id and getattr(user, 'assigned_sales_channel_id', None):
+            from apps.sales_channels.models import SalesChannel
+            active_brand_id = (
+                SalesChannel.objects.filter(id=user.assigned_sales_channel_id)
+                .values_list('brand_id', flat=True).first()
+            )
+
+        save_kwargs = {}
+        if active_brand_id:
+            # Inside a brand workspace, always create the product under the
+            # active brand (drop any brand sent by the client) so it can never
+            # land under the wrong brand and the user need not re-pick it.
+            serializer.validated_data.pop('brand', None)
+            save_kwargs['brand_id'] = active_brand_id
+        else:
+            # No brand focus: keep the chosen brand only if it is one the user
+            # may actually reach — never create under an out-of-scope brand.
+            from apps.rbac.services import visible_brand_ids
+            allowed = visible_brand_ids(user)
+            provided = serializer.validated_data.get('brand')
+            if provided is not None and allowed is not None and provided.id not in allowed:
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError(
+                    {'brand': 'You cannot create a product under a brand outside your scope.'}
+                )
+
+        instance = serializer.save(**save_kwargs)
         # Run model-level pack validation (circular refs, existence checks)
         instance.full_clean()
         ProductAuditLog.objects.create(
             product=instance,
-            user=self.request.user,
+            user=user,
             action=ProductAuditLog.Action.CREATE,
         )
 

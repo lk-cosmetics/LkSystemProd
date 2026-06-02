@@ -688,6 +688,8 @@ function Toast({ toast, onClose }: { toast: { type: 'success' | 'error'; msg: st
 
 export default function ProductsPage() {
   const { user } = useAuthStore();
+  // Active brand workspace — when set, brand-scoped forms lock to it.
+  const activeBrandId = user?.current_brand_id ?? null;
   const isMobile = useIsMobile();
 
   // ── Pagination & filters ──
@@ -1395,7 +1397,14 @@ export default function ProductsPage() {
         </div>
         <div className="space-y-1.5">
           <Label>Brand</Label>
-          <Select value={form.brand || 'none'} onValueChange={v => setF('brand', v === 'none' ? '' : v)}>
+          {/* Inside a brand workspace the brand is locked to the active brand:
+              shown disabled + prefilled so a product can't be created under
+              another brand (the backend enforces this too). */}
+          <Select
+            value={activeBrandId ? String(activeBrandId) : (form.brand || 'none')}
+            onValueChange={v => setF('brand', v === 'none' ? '' : v)}
+            disabled={!!activeBrandId}
+          >
             <SelectTrigger><SelectValue placeholder="Select brand" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="none">No Brand</SelectItem>
