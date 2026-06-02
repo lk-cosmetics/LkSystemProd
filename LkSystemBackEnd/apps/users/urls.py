@@ -22,7 +22,7 @@ from .api.views import (
     ValidateInvitationView,
     AcceptInvitationView,
 )
-from .api.workspace_views import WorkspacesView, SwitchWorkspaceView
+from .api.workspace_views import WorkspacesView, SwitchWorkspaceView, CurrentIdentityView
 
 # Create router and register viewsets
 router = DefaultRouter()
@@ -72,4 +72,7 @@ auth_urlpatterns = [
     # Workspace switching (authenticated)
     path('workspaces/', WorkspacesView.as_view(), name='workspaces'),
     path('switch-workspace/', SwitchWorkspaceView.as_view(), name='switch_workspace'),
+
+    # Current identity with fresh permissions (live RBAC refresh, no re-login)
+    path('me/', CurrentIdentityView.as_view(), name='current_identity'),
 ]

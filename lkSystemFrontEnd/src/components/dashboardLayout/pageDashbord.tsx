@@ -3,6 +3,7 @@ import { SiteHeader } from '@/components/site-header';
 import { Outlet, useLocation } from 'react-router-dom';
 import { Suspense, useEffect } from 'react';
 import PageLoader from '@/components/PageLoader';
+import { useAuthStore } from '@/store/authStore';
 import {
   SidebarInset,
   SidebarProvider,
@@ -22,6 +23,32 @@ function AutoCloseSidebarOnRouteChange() {
   return null;
 }
 
+/**
+ * Keeps the cached permission set in sync with the backend so a role change
+ * made by an admin takes effect WITHOUT a logout/login. Refreshes on mount,
+ * on every route change, when the tab regains focus, and on a light interval.
+ */
+function LivePermissionSync() {
+  const refreshUser = useAuthStore(s => s.refreshUser);
+  const { pathname } = useLocation();
+
+  useEffect(() => {
+    void refreshUser();
+  }, [pathname, refreshUser]);
+
+  useEffect(() => {
+    const onFocus = () => { void refreshUser(); };
+    window.addEventListener('focus', onFocus);
+    const id = window.setInterval(() => { void refreshUser(); }, 60_000);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.clearInterval(id);
+    };
+  }, [refreshUser]);
+
+  return null;
+}
+
 export default function Page() {
   return (
     <SidebarProvider
@@ -33,6 +60,7 @@ export default function Page() {
       }
     >
       <AutoCloseSidebarOnRouteChange />
+      <LivePermissionSync />
       <AppSidebar variant="inset" />
       <SidebarInset>
         <SiteHeader />

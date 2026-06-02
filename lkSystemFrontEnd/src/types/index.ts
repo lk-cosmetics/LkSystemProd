@@ -238,6 +238,8 @@ export interface AuthState {
   logout: () => void;
   refreshToken: () => Promise<void>;
   switchWorkspace: (companyId: number | null, brandId: number | null) => Promise<void>;
+  /** Re-fetch the caller's identity (fresh roles/permissions) without re-login. */
+  refreshUser: () => Promise<void>;
   clearError: () => void;
 }
 

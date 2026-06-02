@@ -148,3 +148,24 @@ class SwitchWorkspaceView(APIView):
             'refresh': str(refresh),
             'user': _build_user_payload(user),
         })
+
+
+class CurrentIdentityView(APIView):
+    """GET /api/v1/auth/me/ — the caller's identity with permissions recomputed
+    fresh from the database.
+
+    Lets the SPA refresh its cached permission set after an admin changes the
+    user's roles, without forcing a logout/login. The backend already authorises
+    every request against the live DB; this only keeps the client UI (menus,
+    buttons) in sync.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=['Auth'],
+        summary='Current identity with fresh permissions',
+        responses={200: OpenApiResponse(description='Current user payload.')},
+    )
+    def get(self, request):
+        return Response({'user': _build_user_payload(request.user)})
