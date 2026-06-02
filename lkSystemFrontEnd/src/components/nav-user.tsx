@@ -34,6 +34,7 @@ import {
 } from '@/components/ui/sidebar';
 import { getMediaUrl } from '@/utils/helpers';
 import { useAuthStore } from '@/store/authStore';
+import { hasPermission, isPlatformAdmin } from '@/hooks/useAuth';
 import {
   workspaceService,
   type Workspace,
@@ -60,6 +61,10 @@ export function NavUser({
   const activeCompanyId = authUser?.company_id ?? null;
   const activeBrandId = authUser?.current_brand_id ?? null;
   const activeCompanyName = authUser?.company_name ?? null;
+  // Workspace switching is permission-based, not role-name based: only a
+  // platform admin or a user holding switch_brands (CEO / Company Manager) may
+  // switch. Employees, Cashiers and any single-workspace role never see it.
+  const canSwitch = isPlatformAdmin(authUser) || hasPermission(authUser, 'switch_brands');
 
   // Pick the most descriptive role to show under the name.
   const roleLabel: string | null = (() => {
@@ -168,7 +173,10 @@ export function NavUser({
 
             <DropdownMenuSeparator />
 
-            {/* ── Instagram-style workspace switcher ── */}
+            {/* Workspace switcher — shown only to users who may switch
+                (platform admin / switch_brands). Employees, Cashiers and any
+                role without switch_brands never see it. */}
+            {canSwitch && (<>
             <DropdownMenuGroup>
               <DropdownMenuSub>
                 <DropdownMenuSubTrigger disabled={switching}>
@@ -225,6 +233,7 @@ export function NavUser({
             </DropdownMenuGroup>
 
             <DropdownMenuSeparator />
+            </>)}
 
             <DropdownMenuGroup>
               <DropdownMenuItem onClick={() => navigate('/dashboard/settings')}>
