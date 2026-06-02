@@ -420,7 +420,13 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         'role_id': 'You cannot assign a platform role.'
                     })
-                if not actor_company_id or role.company_id != actor_company_id:
+                if not actor_company_id:
+                    raise serializers.ValidationError({
+                        'role_id': 'You must belong to a company to assign roles.'
+                    })
+                # A company-owned role must match the actor's company; a global
+                # default role (company IS NULL) may be assigned by any company.
+                if role.company_id is not None and role.company_id != actor_company_id:
                     raise serializers.ValidationError({
                         'role_id': 'You can only assign roles that belong to '
                                    'your company.'
@@ -1097,7 +1103,12 @@ class InviteEmployeeSerializer(serializers.Serializer):
                 })
             # Tenant isolation: the role must be one owned by the target
             # company, never a global template or another tenant's role.
-            if role.scope_type != 'platform' and role.company_id != company.id:
+            # A company-owned role must belong to the target company; a global
+            # default role (company IS NULL, non-platform) may be assigned in any
+            # company.
+            if (role.scope_type != 'platform'
+                    and role.company_id is not None
+                    and role.company_id != company.id):
                 raise serializers.ValidationError({
                     'role_id': 'You can only invite users to roles that belong '
                                'to this company.'

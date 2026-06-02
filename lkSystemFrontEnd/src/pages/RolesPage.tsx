@@ -94,6 +94,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from 'sonner';
 import { useDebounce, useCurrentUser } from '@/hooks';
+import { useCompanies } from '@/hooks/queries';
 import {
   rbacService,
   type RBACRole,
@@ -778,6 +779,10 @@ export default function RolesPage() {
   const [formDescription, setFormDescription] = useState('');
   const [formScopeType, setFormScopeType] = useState<string>('company');
   const [formPermissions, setFormPermissions] = useState<Set<string>>(new Set());
+  // Super-Admin only: global default role (all companies) vs specific company.
+  const [formIsGlobal, setFormIsGlobal] = useState(true);
+  const [formCompanyId, setFormCompanyId] = useState<string>('');
+  const { data: companies = [] } = useCompanies();
 
   // ── Assign form ──
   const [assignRoleId, setAssignRoleId] = useState<number | null>(null);
@@ -915,6 +920,8 @@ export default function RolesPage() {
     setFormDescription('');
     setFormScopeType('company');
     setFormPermissions(new Set());
+    setFormIsGlobal(true);
+    setFormCompanyId('');
     setEditingRole(null);
   }, []);
 
@@ -931,6 +938,8 @@ export default function RolesPage() {
       setFormDescription(detail.description);
       setFormScopeType(detail.scope_type);
       setFormPermissions(new Set(detail.permissions));
+      setFormIsGlobal(detail.company == null);
+      setFormCompanyId(detail.company != null ? String(detail.company) : '');
       setRoleDialogOpen(true);
     } catch {
       toast.error('Failed to load role details');
@@ -988,6 +997,14 @@ export default function RolesPage() {
         scope_type: formScopeType as RoleCreateRequest['scope_type'],
         permissions: Array.from(formPermissions),
       };
+      // Super Admin chooses the role's visibility; company users always create
+      // company-specific roles (the backend forces their company regardless).
+      if (isPlatformAdmin) {
+        payload.is_global = formIsGlobal;
+        if (!formIsGlobal && formCompanyId) {
+          payload.company = Number(formCompanyId);
+        }
+      }
 
       if (editingRole) {
         await rbacService.updateRole(editingRole.id, payload);
@@ -1452,6 +1469,40 @@ export default function RolesPage() {
                     Higher scopes cascade to lower levels.
                   </p>
                 </div>
+
+                {isPlatformAdmin && (
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">Visibility</Label>
+                    <Select
+                      value={formIsGlobal ? 'global' : 'company'}
+                      onValueChange={v => setFormIsGlobal(v === 'global')}
+                    >
+                      <SelectTrigger className="max-w-md">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="global">🌐 Global Default Role (all companies)</SelectItem>
+                        <SelectItem value="company">🏢 Specific Company Role</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    {!formIsGlobal && (
+                      <Select value={formCompanyId} onValueChange={setFormCompanyId}>
+                        <SelectTrigger className="max-w-md">
+                          <SelectValue placeholder="Select a company" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {companies.map(c => (
+                            <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                    <p className="text-xs text-muted-foreground max-w-md">
+                      A global default role is visible and assignable in every company.
+                      A specific company role appears only inside the selected company.
+                    </p>
+                  </div>
+                )}
               </TabsContent>
 
               {/* ── Permissions tab ── */}

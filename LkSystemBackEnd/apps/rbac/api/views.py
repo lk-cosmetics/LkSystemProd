@@ -93,14 +93,19 @@ class RoleViewSet(viewsets.ModelViewSet):
                 current_company_id = getattr(user, 'current_company_id', None)
                 result = qs.filter(company_id=current_company_id) if current_company_id else qs
         else:
-            # A company-scoped user sees ONLY their own company's roles. The
-            # global business templates (company=NULL) are provisioning sources,
-            # not directly assignable, so they are hidden to keep tenants
-            # isolated.
+            # A company-scoped user sees their own company's roles PLUS the
+            # global default/custom roles a Super Admin published for everyone
+            # (company IS NULL, non-system). The global business TEMPLATES
+            # (is_system, company NULL) stay hidden because each company already
+            # has its own provisioned copy of them — never another tenant's role.
             current_company_id = getattr(user, 'current_company_id', None)
             if not current_company_id:
                 return qs.none()
-            result = qs.filter(company_id=current_company_id)
+            from django.db.models import Q
+            result = qs.filter(
+                Q(company_id=current_company_id)
+                | Q(company__isnull=True, is_system=False)
+            )
 
         # ``?assignable=true`` → only the roles the caller may actually grant:
         # within their permission ceiling, and (for a non-platform admin) never a
@@ -181,10 +186,20 @@ class RoleViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if not PermissionService.is_platform_admin(user):
             return
+        # ``is_global`` truthy → a GLOBAL default/custom role (company=None),
+        # visible to every company; never auto-tag it to the active company.
+        if str(self.request.data.get('is_global', '')).lower() in ('1', 'true', 'yes'):
+            serializer.validated_data['company'] = None
+            serializer.validated_data.pop('company_id', None)
+            return
         if serializer.validated_data.get('scope_type') == 'platform':
-            return  # an explicit, intentional global role
+            return  # an explicit, intentional platform role
+        has_company = (
+            serializer.validated_data.get('company')
+            or serializer.validated_data.get('company_id')
+        )
         current_company_id = getattr(user, 'current_company_id', None)
-        if current_company_id and not serializer.validated_data.get('company_id'):
+        if current_company_id and not has_company:
             serializer.validated_data['company_id'] = current_company_id
 
     def perform_create(self, serializer):
@@ -201,11 +216,16 @@ class RoleViewSet(viewsets.ModelViewSet):
         if instance.is_system and not user.is_superuser:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('System roles cannot be edited.')
-        # A CEO can only edit a role owned by their own company.
+        # A CEO can only edit a role owned by their own company — never a global
+        # default role (platform-admin managed) nor another tenant's role.
         if not PermissionService.is_platform_admin(user):
+            from rest_framework.exceptions import PermissionDenied
             user_company_id = getattr(user, 'current_company_id', None)
-            if instance.company_id and instance.company_id != user_company_id:
-                from rest_framework.exceptions import PermissionDenied
+            if instance.company_id is None:
+                raise PermissionDenied(
+                    'Global default roles can only be edited by a platform administrator.'
+                )
+            if instance.company_id != user_company_id:
                 raise PermissionDenied(
                     'You can only edit roles owned by your company.'
                 )
@@ -286,7 +306,12 @@ class AssignmentViewSet(viewsets.ViewSet):
                 'Only a platform administrator can assign platform roles.'
             )
         actor_company = getattr(actor, 'current_company_id', None)
-        if not actor_company or role.company_id != actor_company:
+        if not actor_company:
+            raise PermissionDenied('You must belong to a company to assign roles.')
+        # A company-owned role must match the actor's company; a GLOBAL role
+        # (company IS NULL, non-platform) is assignable by every company,
+        # subject to the permission ceiling enforced at the call site.
+        if role.company_id is not None and role.company_id != actor_company:
             raise PermissionDenied(
                 'You can only assign roles that belong to your company.'
             )

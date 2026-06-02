@@ -43,6 +43,9 @@ export interface RoleCreateRequest {
   description?: string;
   scope_type: 'platform' | 'company' | 'brand' | 'channel';
   company?: number | null;
+  /** Super-Admin only: create a global default role (company=null), visible to
+   * every company. Ignored for non-platform users (backend forces their company). */
+  is_global?: boolean;
   permissions: string[]; // codenames
 }
 
