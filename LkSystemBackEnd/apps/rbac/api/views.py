@@ -88,18 +88,38 @@ class RoleViewSet(viewsets.ModelViewSet):
         # company's roles regardless of their current workspace.
         if PermissionService.is_platform_admin(user):
             if self.request.query_params.get('company'):
-                return qs
+                result = qs
+            else:
+                current_company_id = getattr(user, 'current_company_id', None)
+                result = qs.filter(company_id=current_company_id) if current_company_id else qs
+        else:
+            # A company-scoped user sees ONLY their own company's roles. The
+            # global business templates (company=NULL) are provisioning sources,
+            # not directly assignable, so they are hidden to keep tenants
+            # isolated.
             current_company_id = getattr(user, 'current_company_id', None)
-            if current_company_id:
-                return qs.filter(company_id=current_company_id)
-            return qs
-        # A company-scoped user sees ONLY their own company's roles. The global
-        # business templates (company=NULL) are provisioning sources, not
-        # directly assignable, so they are hidden to keep tenants isolated.
-        current_company_id = getattr(user, 'current_company_id', None)
-        if not current_company_id:
-            return qs.none()
-        return qs.filter(company_id=current_company_id)
+            if not current_company_id:
+                return qs.none()
+            result = qs.filter(company_id=current_company_id)
+
+        # ``?assignable=true`` → only the roles the caller may actually grant:
+        # within their permission ceiling, and (for a non-platform admin) never a
+        # platform-scoped role. This lets the Add-User / Invite role dropdowns
+        # show only roles at or below the caller's level instead of offering
+        # higher roles that would 403 on submit. The backend assignment paths
+        # still enforce the ceiling — this is UX, not the security boundary.
+        if (self.request.query_params.get('assignable', '').lower() == 'true'
+                and not PermissionService.is_platform_admin(user)):
+            from apps.rbac.provisioning import permission_ceiling
+            ceiling = permission_ceiling(user)  # None == unrestricted
+            if ceiling is not None:
+                result = result.exclude(scope_type='platform')
+                assignable_ids = [
+                    r.id for r in result
+                    if set(r.permissions.values_list('codename', flat=True)) <= ceiling
+                ]
+                result = result.filter(id__in=assignable_ids)
+        return result
 
     def get_serializer_class(self):
         if self.action in ('retrieve', 'create', 'update', 'partial_update'):

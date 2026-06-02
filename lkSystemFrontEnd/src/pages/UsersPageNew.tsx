@@ -169,7 +169,8 @@ export default function UsersPage() {
     const fetchFiltersData = async () => {
       try {
         const [rolesData, companiesData] = await Promise.all([
-          rbacService.getRoles(),
+          // Only roles the logged-in user may actually assign (invite dialog).
+          rbacService.getRoles({ assignable: true }),
           companyService.getAllCompanies(),
         ]);
         setRoles(rolesData);

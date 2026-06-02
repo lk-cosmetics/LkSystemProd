@@ -274,16 +274,43 @@ class UserViewSet(viewsets.ModelViewSet):
                 'allowed_brands', 'profile', 'user_roles__role',
             )
         
-        # Scope to the active company whenever one is selected. A Super Admin
-        # who has picked a company in the workspace switcher sees only that
-        # company's users; a Super Admin with no company selected sees every
-        # user (global mode). Normal users always have a company, so they stay
-        # scoped exactly as before.
-        user = self.request.user
-        if user.current_company_id:
-            queryset = queryset.filter(current_company_id=user.current_company_id)
+        # ── Scope the user list to exactly what the caller may manage ──────
+        from django.db.models import Q
+        from apps.rbac.services import PermissionService, visible_brand_ids
 
-        return queryset
+        user = self.request.user
+        if not user.is_authenticated:
+            return queryset.none()
+
+        # Platform admin: scoped to the selected company in workspace context;
+        # with no company selected, every user (global mode).
+        if PermissionService.is_platform_admin(user):
+            if user.current_company_id:
+                queryset = queryset.filter(current_company_id=user.current_company_id)
+            return queryset
+
+        # Everyone else is confined to their active company.
+        if not user.current_company_id:
+            return queryset.none()
+        queryset = queryset.filter(current_company_id=user.current_company_id)
+
+        # Company-scoped managers (CEO / Company Manager) see every user in the
+        # company. Brand/channel-scoped managers (e.g. Brand Manager) see only
+        # users tied to the brand(s) they can reach — mirroring the
+        # _authz_manage_user edit guard, so the list never exposes a user the
+        # caller could not manage anyway.
+        if user.user_roles.filter(role__scope_type='company').exists():
+            return queryset
+        brand_ids = visible_brand_ids(user)
+        if brand_ids is None:
+            return queryset
+        if not brand_ids:
+            return queryset.none()
+        return queryset.filter(
+            Q(allowed_brands__id__in=brand_ids)
+            | Q(user_roles__brand_id__in=brand_ids)
+            | Q(user_roles__sales_channel__brand_id__in=brand_ids)
+        ).distinct()
 
     # ── Authorization for destructive / privileged actions on OTHER users ──
     def _authz_manage_user(self, actor, target, *, codename, allow_self):

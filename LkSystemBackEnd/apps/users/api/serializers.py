@@ -392,8 +392,23 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
         role = attrs.get('role_id')
         request = self.context.get('request')
         actor = getattr(request, 'user', None) if request else None
+
+        from apps.rbac.services import PermissionService
+
+        # Gate the whole create endpoint behind ``create_users``. The viewset
+        # only enforces IsAuthenticated, so without this any authenticated user
+        # (even a Cashier) could create accounts. ``get_capability_permissions``
+        # matches the permission anywhere within the actor's active company
+        # (company-wide, brand or channel role), so a brand-scoped manager who
+        # legitimately holds create_users passes correctly.
+        if actor is not None and not actor.is_superuser:
+            target_company = attrs.get('current_company') or getattr(actor, 'current_company', None)
+            if 'create_users' not in PermissionService.get_capability_permissions(actor, company=target_company):
+                raise serializers.ValidationError(
+                    'You do not have permission to create users.'
+                )
+
         if role is not None and actor is not None:
-            from apps.rbac.services import PermissionService
             from apps.rbac.provisioning import assert_within_ceiling
 
             if not PermissionService.is_platform_admin(actor):
