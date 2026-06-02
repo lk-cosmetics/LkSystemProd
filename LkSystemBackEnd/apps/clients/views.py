@@ -19,11 +19,12 @@ from .serializers import (
     ClientCreateSerializer,
     ClientCreateFromPOSSerializer,
 )
+from apps.rbac.permissions import ActionPermissionMixin
 from apps.orders.models import Order
 from apps.orders.serializers import OrderListSerializer, OrderDetailSerializer
 
 
-class ClientViewSet(viewsets.ModelViewSet):
+class ClientViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     """
         CRUD for Client records.
 
@@ -33,6 +34,17 @@ class ClientViewSet(viewsets.ModelViewSet):
         In POS scope we include clients that match either brand or sales channel,
         plus generic clients not tied to either (both fields null).
     """
+
+    # RBAC: client writes require client permissions (unlisted writes default to
+    # edit_clients). Reads need view_clients (held by all operational roles) and
+    # are brand/company-scoped in get_queryset.
+    action_permissions = {
+        'create': 'create_clients',
+        'create_from_pos': 'create_clients',
+        'destroy': 'delete_clients',
+    }
+    default_read_permission = 'view_clients'
+    default_write_permission = 'edit_clients'
 
     queryset = Client.objects.select_related(
         'company', 'brand', 'sales_channel', 'reseller', 'created_by',

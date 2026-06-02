@@ -202,11 +202,14 @@ interface RowProps {
   onHardDelete: (p: ProductListItem) => void;
   onRestore: (p: ProductListItem) => void;
   onScanBarcode: (p: ProductListItem) => void;
+  canEdit: boolean;
+  canDelete: boolean;
 }
 
 const ProductRow = memo(function ProductRow({
   product: p, isSelected, selectionMode,
   onSelect, onView, onEdit, onDelete, onHardDelete, onRestore, onScanBarcode,
+  canEdit, canDelete,
 }: RowProps) {
   const [imgErr, setImgErr] = useState(false);
   const img = getMediaUrl(p.image_url);
@@ -305,26 +308,38 @@ const ProductRow = memo(function ProductRow({
             </DropdownMenuItem>
             {!p.is_deleted && (
               <>
-                <DropdownMenuItem onClick={() => onEdit(p)} className="gap-2">
-                  <Pencil className="size-4" /> Edit
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onScanBarcode(p)} className="gap-2">
-                  <ScanBarcode className="size-4" /> Scan Barcode
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => onDelete(p)} className="gap-2 text-destructive focus:text-destructive">
-                  <Trash2 className="size-4" /> Soft Delete
-                </DropdownMenuItem>
+                {canEdit && (
+                  <DropdownMenuItem onClick={() => onEdit(p)} className="gap-2">
+                    <Pencil className="size-4" /> Edit
+                  </DropdownMenuItem>
+                )}
+                {canEdit && (
+                  <DropdownMenuItem onClick={() => onScanBarcode(p)} className="gap-2">
+                    <ScanBarcode className="size-4" /> Scan Barcode
+                  </DropdownMenuItem>
+                )}
+                {canDelete && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => onDelete(p)} className="gap-2 text-destructive focus:text-destructive">
+                      <Trash2 className="size-4" /> Soft Delete
+                    </DropdownMenuItem>
+                  </>
+                )}
               </>
             )}
             {p.is_deleted && (
               <>
-                <DropdownMenuItem onClick={() => onRestore(p)} className="gap-2 text-green-600 focus:text-green-600">
-                  <RotateCcw className="size-4" /> Restore
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onHardDelete(p)} className="gap-2 text-destructive focus:text-destructive">
-                  <Trash2 className="size-4" /> Delete Permanently
-                </DropdownMenuItem>
+                {canEdit && (
+                  <DropdownMenuItem onClick={() => onRestore(p)} className="gap-2 text-green-600 focus:text-green-600">
+                    <RotateCcw className="size-4" /> Restore
+                  </DropdownMenuItem>
+                )}
+                {canDelete && (
+                  <DropdownMenuItem onClick={() => onHardDelete(p)} className="gap-2 text-destructive focus:text-destructive">
+                    <Trash2 className="size-4" /> Delete Permanently
+                  </DropdownMenuItem>
+                )}
               </>
             )}
           </DropdownMenuContent>
@@ -690,6 +705,11 @@ export default function ProductsPage() {
   const { user } = useAuthStore();
   // Active brand workspace — when set, brand-scoped forms lock to it.
   const activeBrandId = user?.current_brand_id ?? null;
+  // RBAC (UX only — the backend is the real gate): hide actions the user can't
+  // perform, driven by permission codenames, never role names.
+  const canCreateProducts = hasPermission(user, 'create_products');
+  const canEditProducts = hasPermission(user, 'edit_products');
+  const canDeleteProducts = hasPermission(user, 'delete_products');
   const isMobile = useIsMobile();
 
   // ── Pagination & filters ──
@@ -1550,9 +1570,11 @@ export default function ProductsPage() {
           >
             <HelpCircle className="size-4" />
           </Button>
-          <Button size="sm" onClick={handleAdd} className="gap-1.5">
-            <Plus className="size-4" /> Add
-          </Button>
+          {canCreateProducts && (
+            <Button size="sm" onClick={handleAdd} className="gap-1.5">
+              <Plus className="size-4" /> Add
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={() => { setScanFeedback(null); setScanOpen(true); }} className="gap-1.5">
             <ScanBarcode className="size-4" />{!isMobile && ' Scan'}
           </Button>
@@ -1819,6 +1841,7 @@ export default function ProductsPage() {
                   isSelected={selSet.has(p.id)} selectionMode={selMode}
                   onSelect={toggle} onView={openView} onEdit={openEdit}
                   onDelete={openDel} onHardDelete={openHardDel} onRestore={doRestore} onScanBarcode={openBcScan}
+                  canEdit={canEditProducts} canDelete={canDeleteProducts}
                 />
               ))}
             </TableBody>

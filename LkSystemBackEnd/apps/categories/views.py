@@ -18,9 +18,10 @@ from .serializers import (
 )
 from .service import CategoryService
 from apps.sales_channels.models import SalesChannel
+from apps.rbac.permissions import ActionPermissionMixin
 
 
-class CategoryViewSet(viewsets.ModelViewSet):
+class CategoryViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     """
     ViewSet for Category CRUD operations.
     
@@ -34,6 +35,17 @@ class CategoryViewSet(viewsets.ModelViewSet):
     - GET /categories/tree/ - Get hierarchical category tree
     """
     
+    # RBAC: writes require category permissions (unlisted writes default to
+    # edit_categories). Reads stay open (IsAuthenticated) and are brand-scoped
+    # in get_queryset — categories are reference data read via dropdowns.
+    action_permissions = {
+        'create': 'create_categories',
+        'destroy': 'delete_categories',
+        'sync': 'create_categories',
+        'sync_selected': 'create_categories',
+    }
+    default_write_permission = 'edit_categories'
+
     queryset = Category.objects.all()
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]

@@ -13,6 +13,7 @@ from drf_spectacular.utils import extend_schema, extend_schema_view
 from .models import Brand
 from .filters import BrandFilterSet
 from .serializers import BrandSerializer, BrandListSerializer
+from apps.rbac.permissions import ActionPermissionMixin
 
 
 @extend_schema_view(
@@ -47,14 +48,24 @@ from .serializers import BrandSerializer, BrandListSerializer
         description='Delete a brand. This will also cascade delete all related sales channels.',
     ),
 )
-class BrandViewSet(viewsets.ModelViewSet):
+class BrandViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     """
     API ViewSet for Brand management.
-    
+
     Provides CRUD operations for brands.
     Supports filtering by company.
     """
-    
+
+    # RBAC: brand WRITES require brand permissions (unlisted writes default to
+    # edit_brands). Reads stay open (IsAuthenticated) and are brand-scoped in
+    # get_queryset, so brand-scoped users (e.g. Brand Manager, who has no
+    # view_brands) can still read their brands for dropdowns.
+    action_permissions = {
+        'create': 'create_brands',
+        'destroy': 'delete_brands',
+    }
+    default_write_permission = 'edit_brands'
+
     queryset = Brand.objects.all()
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]

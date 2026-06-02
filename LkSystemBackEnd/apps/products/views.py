@@ -18,6 +18,7 @@ from django.db import transaction
 from django.http import HttpResponse
 from django.utils import timezone
 
+from apps.rbac.permissions import ActionPermissionMixin
 from .models import Product, ProductAuditLog
 from .serializers import (
     ProductSerializer,
@@ -54,7 +55,7 @@ def _user_scoped_channel_ids(user):
     return None
 
 
-class ProductViewSet(viewsets.ModelViewSet):
+class ProductViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     """
     Product CRUD with soft delete, restore, and audit trail.
 
@@ -62,6 +63,21 @@ class ProductViewSet(viewsets.ModelViewSet):
     Pass ``?show_deleted=true`` to include soft-deleted products,
     or ``?only_deleted=true`` to list deleted ones exclusively.
     """
+
+    # RBAC: every action is gated on a product permission codename (the Role
+    # Permissions page is the source of truth). Reads default to view_products;
+    # any unlisted write defaults to edit_products (deny-by-default), so an
+    # Employee with only view_products can list products but cannot create,
+    # edit, delete, sync or import them.
+    action_permissions = {
+        'create': 'create_products',
+        'sync': 'create_products',
+        'sync_selected': 'create_products',
+        'import_csv': 'create_products',
+        'destroy': 'delete_products',
+    }
+    default_read_permission = 'view_products'
+    default_write_permission = 'edit_products'
 
     permission_classes = [IsAuthenticated]
     parser_classes = [JSONParser]

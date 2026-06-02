@@ -30,6 +30,7 @@ from apps.inventory.serializers import (
     ProductionBatchSendSerializer, ProductionBatchReceiveSerializer,
     ProductionBatchUpdateSerializer, ProductionBatchCancelSerializer,
 )
+from apps.rbac.permissions import ActionPermissionMixin
 
 
 def _allowed_sales_channel_ids(user):
@@ -46,7 +47,7 @@ def _allowed_sales_channel_ids(user):
     return visible_sales_channel_ids(user)
 
 
-class SalesChannelInventoryViewSet(viewsets.ModelViewSet):
+class SalesChannelInventoryViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     """
     ViewSet for managing sales channel inventory levels.
     
@@ -56,6 +57,15 @@ class SalesChannelInventoryViewSet(viewsets.ModelViewSet):
     update: Update inventory settings (min/max, location)
     adjust: Quick stock adjustment
     """
+    # RBAC: stock WRITES require inventory permissions; unlisted writes (e.g.
+    # adjust) default to edit_inventory. Reads stay open (IsAuthenticated) and
+    # are channel-scoped in get_queryset.
+    action_permissions = {
+        'create': 'create_inventory',
+        'destroy': 'delete_inventory',
+    }
+    default_write_permission = 'edit_inventory'
+
     queryset = SalesChannelInventory.objects.select_related(
         'sales_channel', 'sales_channel__brand', 'product'
     ).all()
@@ -199,7 +209,7 @@ class SalesChannelInventoryViewSet(viewsets.ModelViewSet):
         })
 
 
-class InventoryMovementViewSet(viewsets.ModelViewSet):
+class InventoryMovementViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     """
     ViewSet for managing inventory movements.
     
@@ -209,6 +219,15 @@ class InventoryMovementViewSet(viewsets.ModelViewSet):
     complete: Complete a pending movement
     transfer: Create inter-channel transfer
     """
+    # RBAC: movement WRITES require inventory permissions; unlisted writes (e.g.
+    # complete, transfer) default to edit_inventory. Reads stay open
+    # (IsAuthenticated) and are channel-scoped in get_queryset.
+    action_permissions = {
+        'create': 'create_inventory',
+        'destroy': 'delete_inventory',
+    }
+    default_write_permission = 'edit_inventory'
+
     queryset = InventoryMovement.objects.select_related(
         'sales_channel', 'product', 'destination_channel', 'created_by'
     ).all()
