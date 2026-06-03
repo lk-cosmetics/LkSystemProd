@@ -8,7 +8,9 @@ re-deduction correctness), and OrderKPIService (returns/exchanges/cancels exclud
 from successful sales + revenue).
 
 Everything runs network-free: WooCommerce is patched at ``_build_client`` and the
-global push gate (``WC_ORDER_PUSH_ENABLED``) defaults to False.
+push is gated per channel (``SalesChannel.wc_push_status_enabled``, default
+False), with ``settings.WC_ORDER_PUSH_ENABLED`` as an optional global override
+(unset in tests).
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from decimal import Decimal
 from unittest import mock
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from apps.brands.models import Brand
@@ -363,12 +365,39 @@ class WooCommerceSyncServiceTests(_BaseOrderServiceTest):
         return resp
 
     def test_parks_pending_sync_when_push_disabled(self):
+        # Channel flag defaults False -> the push is gated and the order parks.
         order = self._wc_order()
         with mock.patch.object(WooCommerceSyncService, '_build_client') as build:
             result = WooCommerceSyncService.update_order_status(order, actor=self.actor)
-        build.assert_not_called()  # no network when the gate is closed
+        build.assert_not_called()  # no network when the channel hasn't enabled it
         self.assertEqual(result.sync_status, Order.SyncStatus.PENDING_SYNC)
         self.assertEqual(result.wc_status, '')
+
+    def test_pushes_when_channel_flag_enabled(self):
+        """The per-channel DB flag opens the push — no env / no ``force`` needed."""
+        self.channel.wc_push_status_enabled = True
+        self.channel.save(update_fields=['wc_push_status_enabled'])
+        order = self._wc_order()
+        fake = mock.Mock()
+        fake.put.return_value = self._resp(200)
+        with mock.patch.object(WooCommerceSyncService, '_build_client', return_value=fake):
+            WooCommerceSyncService.update_order_status(order, actor=self.actor)  # no force
+        order.refresh_from_db()
+        fake.put.assert_called_once_with('orders/9001', {'status': 'completed'})
+        self.assertEqual(order.sync_status, Order.SyncStatus.SYNCED)
+        self.assertEqual(order.wc_status, 'completed')
+
+    @override_settings(WC_ORDER_PUSH_ENABLED=False)
+    def test_global_override_disables_even_when_channel_enabled(self):
+        """The optional global kill-switch wins over an enabled channel."""
+        self.channel.wc_push_status_enabled = True
+        self.channel.save(update_fields=['wc_push_status_enabled'])
+        order = self._wc_order()
+        with mock.patch.object(WooCommerceSyncService, '_build_client') as build:
+            WooCommerceSyncService.update_order_status(order, actor=self.actor)
+        build.assert_not_called()  # kill-switch -> no network
+        order.refresh_from_db()
+        self.assertEqual(order.sync_status, Order.SyncStatus.PENDING_SYNC)
 
     def test_non_woocommerce_order_is_noop(self):
         order = self.persist_order(

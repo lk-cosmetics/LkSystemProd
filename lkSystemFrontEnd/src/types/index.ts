@@ -336,6 +336,7 @@ export interface SalesChannel {
   wc_consumer_key: string;
   wc_consumer_secret: string;
   wc_webhook_token: string;
+  wc_push_status_enabled: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -364,6 +365,7 @@ export interface CreateSalesChannelRequest {
   wc_store_url?: string;
   wc_consumer_key?: string;
   wc_consumer_secret?: string;
+  wc_push_status_enabled?: boolean;
 }
 
 export interface GenerateCredentialsResponse {
@@ -997,7 +999,9 @@ export type MovementType =
   | 'ADJUSTMENT_OUT'
   | 'DAMAGE'
   | 'SENT_TO_FACTORY'
-  | 'PRODUCTION_IN';
+  | 'PRODUCTION_IN'
+  | 'RESERVATION'
+  | 'RELEASE';
 
 export type MovementStatus = 'PENDING' | 'COMPLETED' | 'CANCELLED';
 

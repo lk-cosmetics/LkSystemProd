@@ -121,7 +121,17 @@ class SalesChannel(models.Model):
         verbose_name='Webhook Token',
         help_text='Token for authenticating incoming webhooks'
     )
-    
+    wc_push_status_enabled = models.BooleanField(
+        default=False,
+        verbose_name='Push order status to WooCommerce',
+        help_text=(
+            'When enabled, completing an order in the system (e.g. after '
+            'packaging) pushes the mapped status (completed / cancelled / …) '
+            'back to this WooCommerce store. A failed push never changes the '
+            'local status — it is recorded for a retry.'
+        ),
+    )
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

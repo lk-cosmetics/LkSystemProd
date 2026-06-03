@@ -56,6 +56,7 @@ class SalesChannelSerializer(serializers.ModelSerializer):
             'wc_consumer_key',
             'wc_consumer_secret',
             'wc_webhook_token',
+            'wc_push_status_enabled',
             'company_id',
             'company_name',
             'created_at',
@@ -133,6 +134,7 @@ class SalesChannelNestedSerializer(serializers.ModelSerializer):
             'wc_consumer_key',
             'wc_consumer_secret',
             'wc_webhook_token',
+            'wc_push_status_enabled',
             'created_at',
             'updated_at',
         ]
@@ -189,6 +191,7 @@ class SalesChannelListSerializer(serializers.ModelSerializer):
             'wc_consumer_key',
             'wc_consumer_secret',
             'wc_webhook_token',
+            'wc_push_status_enabled',
             'created_at',
             'updated_at',
         ]
