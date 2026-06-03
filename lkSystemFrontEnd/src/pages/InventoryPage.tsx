@@ -25,6 +25,8 @@ import {
   Factory,
   PackageCheck,
   Camera,
+  Lock,
+  Unlock,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -88,6 +90,7 @@ import type {
   SalesChannel,
   MovementSummary,
   ProductListItem,
+  ProductType,
   MovementType,
 } from '@/types';
 
@@ -180,6 +183,14 @@ function movementBadge(type: string) {
       variant: 'default',
       icon: <PackageCheck className="h-3 w-3 mr-1" />,
     },
+    RESERVATION: {
+      variant: 'outline',
+      icon: <Lock className="h-3 w-3 mr-1" />,
+    },
+    RELEASE: {
+      variant: 'outline',
+      icon: <Unlock className="h-3 w-3 mr-1" />,
+    },
   };
   const m = map[type] ?? { variant: 'secondary' as const, icon: null };
   return (
@@ -187,6 +198,33 @@ function movementBadge(type: string) {
       {m.icon}
       {type.split('_').join(' ')}
     </Badge>
+  );
+}
+
+// Quantity cell for a movement row. On-hand movements read as +in (green) /
+// -out (red). A RESERVATION/RELEASE moves only `reserved_quantity` — on-hand is
+// unchanged (quantity_before == quantity_after) — so it is shown neutrally
+// (amber, with a lock icon) and never as a red stock-out.
+function MovementQuantity({ mov }: Readonly<{ mov: InventoryMovement }>) {
+  if (mov.is_stock_in) {
+    return <span className="font-semibold text-green-600">+{mov.quantity}</span>;
+  }
+  if (mov.is_stock_out) {
+    return <span className="font-semibold text-red-600">-{mov.quantity}</span>;
+  }
+  const reserved = mov.movement_type === 'RESERVATION';
+  return (
+    <span
+      className="inline-flex items-center gap-1 font-semibold text-amber-600"
+      title={
+        reserved
+          ? 'Reserved — on-hand stock unchanged, available reduced'
+          : 'Released — on-hand stock unchanged, available restored'
+      }
+    >
+      {reserved ? <Lock className="h-3 w-3" /> : <Unlock className="h-3 w-3" />}
+      {mov.quantity}
+    </span>
   );
 }
 
@@ -280,7 +318,9 @@ function filterMovementItems(
   query: string,
   channelId: string,
   typeFilter: string,
-  statusFilter: string
+  statusFilter: string,
+  dateFrom: string,
+  dateTo: string
 ): InventoryMovement[] {
   let result = items;
   if (query) {
@@ -298,6 +338,10 @@ function filterMovementItems(
     result = result.filter(m => m.movement_type === typeFilter);
   if (statusFilter !== 'all')
     result = result.filter(m => m.status === statusFilter);
+  if (dateFrom)
+    result = result.filter(m => (m.created_at || '').slice(0, 10) >= dateFrom);
+  if (dateTo)
+    result = result.filter(m => (m.created_at || '').slice(0, 10) <= dateTo);
   return result;
 }
 
@@ -310,6 +354,10 @@ function TabFilters({
   setMovementTypeFilter,
   movementStatusFilter,
   setMovementStatusFilter,
+  movementDateFrom,
+  setMovementDateFrom,
+  movementDateTo,
+  setMovementDateTo,
 }: Readonly<{
   activeTab: string;
   stockFilter: string;
@@ -318,6 +366,10 @@ function TabFilters({
   setMovementTypeFilter: (v: string) => void;
   movementStatusFilter: string;
   setMovementStatusFilter: (v: string) => void;
+  movementDateFrom: string;
+  setMovementDateFrom: (v: string) => void;
+  movementDateTo: string;
+  setMovementDateTo: (v: string) => void;
 }>) {
   if (activeTab === 'inventory') {
     return (
@@ -365,6 +417,8 @@ function TabFilters({
               <SelectItem value="RETURN_OUT">Return Out</SelectItem>
               <SelectItem value="DAMAGE">Damage</SelectItem>
               <SelectItem value="INITIAL">Initial</SelectItem>
+              <SelectItem value="RESERVATION">Reserved</SelectItem>
+              <SelectItem value="RELEASE">Released</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -386,6 +440,26 @@ function TabFilters({
               <SelectItem value="CANCELLED">Cancelled</SelectItem>
             </SelectContent>
           </Select>
+        </div>
+        <div className="w-[150px]">
+          <Label className="text-xs text-muted-foreground mb-1 block">
+            From date
+          </Label>
+          <Input
+            type="date"
+            value={movementDateFrom}
+            onChange={e => setMovementDateFrom(e.target.value)}
+          />
+        </div>
+        <div className="w-[150px]">
+          <Label className="text-xs text-muted-foreground mb-1 block">
+            To date
+          </Label>
+          <Input
+            type="date"
+            value={movementDateTo}
+            onChange={e => setMovementDateTo(e.target.value)}
+          />
         </div>
       </>
     );
@@ -525,11 +599,8 @@ function MovementDetailContent({
         )}
         <div>
           <span className="text-muted-foreground block text-xs">Quantity</span>
-          <p
-            className={`font-semibold ${mov.is_stock_in ? 'text-green-600' : 'text-red-600'}`}
-          >
-            {mov.is_stock_in ? '+' : '-'}
-            {mov.quantity}
+          <p>
+            <MovementQuantity mov={mov} />
           </p>
         </div>
         <div>
@@ -780,7 +851,28 @@ function SearchableProductSelect({
 }
 
 // ─── Main page ──────────────────────────────────────────────────────────────
-type InventoryTab = 'inventory' | 'packs' | 'movements' | 'low-stock';
+type InventoryTab =
+  | 'inventory'
+  | 'packs'
+  | 'movements'
+  | 'low-stock'
+  | 'daily-out';
+
+const todayISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
+    d.getDate(),
+  ).padStart(2, '0')}`;
+};
+
+// Canonical product taxonomy (matches Product.ProductType on the backend), used
+// by the inventory report tabs.
+const PRODUCT_TYPE_META: { key: ProductType; label: string }[] = [
+  { key: 'resell_product', label: 'Resell Product' },
+  { key: 'pack', label: 'Pack' },
+  { key: 'component', label: 'Component' },
+  { key: 'packaging_item', label: 'Packaging Item' },
+];
 
 export default function InventoryPage() {
   // ── Data ────────────────────────────────────────────────────────────────
@@ -798,6 +890,12 @@ export default function InventoryPage() {
   // summary cards still see every row, only the table is sliced.
   const [inventoryPage, setInventoryPage] = useState(1);
   const [inventoryPageSize, setInventoryPageSize] = useState(25);
+  // Movements-tab pagination (client-side over the filtered set).
+  const [movementPage, setMovementPage] = useState(1);
+  const [movementPageSize, setMovementPageSize] = useState(25);
+  // Daily Stock Out: outgoing units on a chosen day, by product type + channel.
+  const [stockOutDate, setStockOutDate] = useState<string>(() => todayISO());
+  const [stockOutChannelId, setStockOutChannelId] = useState('all');
   const [activeTab, setActiveTab] = useState<InventoryTab>('inventory');
   const [actionLoading, setActionLoading] = useState(false);
 
@@ -810,6 +908,8 @@ export default function InventoryPage() {
   const [stockFilter, setStockFilter] = useState('all');
   const [movementTypeFilter, setMovementTypeFilter] = useState('all');
   const [movementStatusFilter, setMovementStatusFilter] = useState('all');
+  const [movementDateFrom, setMovementDateFrom] = useState('');
+  const [movementDateTo, setMovementDateTo] = useState('');
   const inventoryBarcodeInputRef = useRef<HTMLInputElement>(null);
 
   // ── Dialog state ────────────────────────────────────────────────────────
@@ -992,7 +1092,9 @@ export default function InventoryPage() {
         searchQuery,
         channelFilter,
         movementTypeFilter,
-        movementStatusFilter
+        movementStatusFilter,
+        movementDateFrom,
+        movementDateTo
       ),
     [
       movements,
@@ -1000,8 +1102,101 @@ export default function InventoryPage() {
       channelFilter,
       movementTypeFilter,
       movementStatusFilter,
+      movementDateFrom,
+      movementDateTo,
     ]
   );
+
+  // Movements pagination (mirror of the inventory-tab pattern above).
+  const movementTotalPages = Math.max(
+    1,
+    Math.ceil(filteredMovements.length / movementPageSize),
+  );
+  const safeMovementPage = Math.min(movementPage, movementTotalPages);
+  useEffect(() => {
+    if (safeMovementPage !== movementPage) setMovementPage(safeMovementPage);
+  }, [safeMovementPage, movementPage]);
+  useEffect(() => {
+    setMovementPage(1);
+  }, [
+    searchQuery,
+    channelFilter,
+    movementTypeFilter,
+    movementStatusFilter,
+    movementDateFrom,
+    movementDateTo,
+    movementPageSize,
+  ]);
+  const paginatedMovements = useMemo(() => {
+    const start = (safeMovementPage - 1) * movementPageSize;
+    return filteredMovements.slice(start, start + movementPageSize);
+  }, [filteredMovements, safeMovementPage, movementPageSize]);
+
+  // Map product id -> product type, used by the Daily Stock Out report below.
+  const productTypeById = useMemo(() => {
+    const m = new Map<number, ProductType>();
+    for (const p of products) m.set(p.id, p.product_type);
+    return m;
+  }, [products]);
+
+  // ── Daily Stock Out: outgoing units on the selected date ──────────────────
+  // Sources every stock-OUT movement (sale, transfer-out, damage, write-off …)
+  // dated on ``stockOutDate``, optionally narrowed to one channel, then groups
+  // by product type and aggregates per product+channel.
+  const dailyStockOut = useMemo(() => {
+    const movs = movements.filter(
+      m =>
+        m.is_stock_out &&
+        (m.created_at || '').slice(0, 10) === stockOutDate &&
+        (stockOutChannelId === 'all' ||
+          m.sales_channel === Number(stockOutChannelId)),
+    );
+    type Row = {
+      product_name: string;
+      product_barcode: string;
+      sales_channel_name: string;
+      qty: number;
+    };
+    const byTypeMap = new Map<string, { total: number; rows: Map<string, Row> }>();
+    const byChannelMap = new Map<string, number>();
+    let total = 0;
+    for (const m of movs) {
+      total += m.quantity;
+      const type = productTypeById.get(m.product) ?? 'unknown';
+      const bucket = byTypeMap.get(type) ?? { total: 0, rows: new Map<string, Row>() };
+      bucket.total += m.quantity;
+      const key = `${m.product}:${m.sales_channel}`;
+      const row =
+        bucket.rows.get(key) ?? {
+          product_name: m.product_name,
+          product_barcode: m.product_barcode,
+          sales_channel_name: m.sales_channel_name,
+          qty: 0,
+        };
+      row.qty += m.quantity;
+      bucket.rows.set(key, row);
+      byTypeMap.set(type, bucket);
+      byChannelMap.set(
+        m.sales_channel_name,
+        (byChannelMap.get(m.sales_channel_name) ?? 0) + m.quantity,
+      );
+    }
+    const typeOrder = ['packaging_item', 'resell_product', 'component', 'pack', 'unknown'];
+    const byType = [...byTypeMap.entries()]
+      .map(([type, v]) => ({
+        type,
+        label: PRODUCT_TYPE_META.find(t => t.key === type)?.label ?? 'Other',
+        total: v.total,
+        rows: [...v.rows.values()].sort(
+          (a, b) => b.qty - a.qty || a.product_name.localeCompare(b.product_name),
+        ),
+      }))
+      .sort((a, b) => typeOrder.indexOf(a.type) - typeOrder.indexOf(b.type));
+    const byChannel = [...byChannelMap.entries()]
+      .map(([name, qty]) => ({ name, total: qty }))
+      .sort((a, b) => b.total - a.total);
+    return { total, lines: movs.length, byType, byChannel };
+  }, [movements, stockOutDate, stockOutChannelId, productTypeById]);
 
   const selectedAddProduct = useMemo(
     () => products.find(p => String(p.id) === addForm.product) || null,
@@ -1741,6 +1936,9 @@ export default function InventoryPage() {
               <AlertTriangle className="h-4 w-4 mr-1.5" /> Low Stock (
               {lowStock.length})
             </TabsTrigger>
+            <TabsTrigger value="daily-out">
+              <TrendingDown className="h-4 w-4 mr-1.5" /> Daily Stock Out
+            </TabsTrigger>
         </TabsList>
 
         {/* ── Filters (shared row) ─────────────────────────────────────── */}
@@ -1787,6 +1985,10 @@ export default function InventoryPage() {
             setMovementTypeFilter={setMovementTypeFilter}
             movementStatusFilter={movementStatusFilter}
             setMovementStatusFilter={setMovementStatusFilter}
+            movementDateFrom={movementDateFrom}
+            setMovementDateFrom={setMovementDateFrom}
+            movementDateTo={movementDateTo}
+            setMovementDateTo={setMovementDateTo}
           />
 
           {hasActiveFilters(
@@ -2133,7 +2335,7 @@ export default function InventoryPage() {
                     </TableCell>
                   </TableRow>
                 ) : (
-                  filteredMovements.map(mov => (
+                  paginatedMovements.map(mov => (
                     <TableRow key={mov.id}>
                       <TableCell className="font-mono text-xs">
                         {mov.reference_number}
@@ -2158,14 +2360,7 @@ export default function InventoryPage() {
                       </TableCell>
                       <TableCell>{movementBadge(mov.movement_type)}</TableCell>
                       <TableCell className="text-right font-mono text-sm">
-                        <span
-                          className={
-                            mov.is_stock_in ? 'text-green-600' : 'text-red-600'
-                          }
-                        >
-                          {mov.is_stock_in ? '+' : '-'}
-                          {mov.quantity}
-                        </span>
+                        <MovementQuantity mov={mov} />
                       </TableCell>
                       <TableCell>{statusBadge(mov.status)}</TableCell>
                       <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
@@ -2204,6 +2399,65 @@ export default function InventoryPage() {
                 )}
               </TableBody>
             </Table>
+
+            {/* Pagination footer (only when the filtered set is non-empty). */}
+            {filteredMovements.length > 0 && (
+              <div className="flex flex-col gap-3 border-t px-3 py-3 text-xs sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-muted-foreground tabular-nums">
+                  Showing{' '}
+                  <span className="font-medium text-foreground">
+                    {(safeMovementPage - 1) * movementPageSize + 1}
+                    –
+                    {Math.min(safeMovementPage * movementPageSize, filteredMovements.length)}
+                  </span>{' '}
+                  of{' '}
+                  <span className="font-medium text-foreground">{filteredMovements.length}</span>{' '}
+                  movements
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-1.5">
+                    <Label className="text-xs text-muted-foreground">Rows per page</Label>
+                    <Select
+                      value={String(movementPageSize)}
+                      onValueChange={v => setMovementPageSize(Number(v))}
+                    >
+                      <SelectTrigger className="h-8 w-[70px]">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {[10, 25, 50, 100, 200].map(n => (
+                          <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 px-2"
+                      disabled={safeMovementPage <= 1}
+                      onClick={() => setMovementPage(p => Math.max(1, p - 1))}
+                    >
+                      ‹ Prev
+                    </Button>
+                    <span className="px-2 tabular-nums text-muted-foreground">
+                      Page <span className="font-medium text-foreground">{safeMovementPage}</span> /{' '}
+                      {movementTotalPages}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 px-2"
+                      disabled={safeMovementPage >= movementTotalPages}
+                      onClick={() => setMovementPage(p => Math.min(movementTotalPages, p + 1))}
+                    >
+                      Next ›
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
           </Card>
         </TabsContent>
 
@@ -2274,6 +2528,150 @@ export default function InventoryPage() {
               </TableBody>
             </Table>
           </Card>
+        </TabsContent>
+
+        {/* ── TAB: Daily Stock Out (outgoing units on a chosen date) ────── */}
+        <TabsContent value="daily-out" className="mt-4 space-y-4">
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <Label className="text-xs text-muted-foreground mb-1 block">Date</Label>
+              <Input
+                type="date"
+                value={stockOutDate}
+                onChange={e => setStockOutDate(e.target.value)}
+                className="h-9 w-[170px]"
+              />
+            </div>
+            <div className="min-w-[200px]">
+              <Label className="text-xs text-muted-foreground mb-1 block">
+                Sales channel
+              </Label>
+              <Select
+                value={stockOutChannelId}
+                onValueChange={setStockOutChannelId}
+              >
+                <SelectTrigger className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All channels</SelectItem>
+                  {channels.map(ch => (
+                    <SelectItem key={ch.id} value={String(ch.id)}>
+                      {ch.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {/* Summary: grand total + per product-type totals */}
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <Card className="p-4">
+              <p className="text-xs text-muted-foreground">Total out</p>
+              <p className="text-2xl font-semibold tabular-nums text-red-600">
+                {dailyStockOut.total.toLocaleString()}
+              </p>
+              <p className="text-[11px] text-muted-foreground">
+                units · {dailyStockOut.lines} lines
+              </p>
+            </Card>
+            {dailyStockOut.byType.map(g => (
+              <Card key={g.type} className="p-4">
+                <p className="text-xs text-muted-foreground">{g.label}</p>
+                <p className="text-2xl font-semibold tabular-nums">
+                  {g.total.toLocaleString()}
+                </p>
+                <p className="text-[11px] text-muted-foreground">units out</p>
+              </Card>
+            ))}
+          </div>
+
+          {dailyStockOut.total === 0 ? (
+            <Card className="p-10 text-center">
+              <TrendingDown className="mx-auto h-10 w-10 text-muted-foreground/30" />
+              <p className="mt-3 text-sm font-medium">No stock went out</p>
+              <p className="mx-auto mt-1 max-w-sm text-xs text-muted-foreground">
+                Nothing left {stockOutChannelId === 'all' ? 'any channel' : 'this channel'} on{' '}
+                {stockOutDate || 'the selected date'}.
+              </p>
+            </Card>
+          ) : (
+            <>
+              {/* Grouped by product type: each product + its channel + qty out */}
+              {dailyStockOut.byType.map(g => (
+                <Card key={g.type}>
+                  <div className="flex items-center justify-between border-b px-4 py-2.5">
+                    <h3 className="text-sm font-semibold">{g.label}</h3>
+                    <span className="text-xs text-muted-foreground">
+                      Total out:{' '}
+                      <span className="font-semibold tabular-nums text-foreground">
+                        {g.total.toLocaleString()}
+                      </span>
+                    </span>
+                  </div>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Product</TableHead>
+                        <TableHead>Sales Channel</TableHead>
+                        <TableHead className="text-right">Qty Out</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {g.rows.map((r, i) => (
+                        <TableRow key={i}>
+                          <TableCell>
+                            <div className="flex flex-col">
+                              <span className="text-sm font-medium">
+                                {r.product_name}
+                              </span>
+                              <span className="font-mono text-xs text-muted-foreground">
+                                {r.product_barcode}
+                              </span>
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            {r.sales_channel_name}
+                          </TableCell>
+                          <TableCell className="text-right font-mono text-sm font-semibold text-red-600">
+                            {r.qty}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </Card>
+              ))}
+
+              {/* By Sales Channel — only when aggregating across channels */}
+              {stockOutChannelId === 'all' && dailyStockOut.byChannel.length > 1 && (
+                <Card>
+                  <div className="border-b px-4 py-2.5">
+                    <h3 className="text-sm font-semibold">By Sales Channel</h3>
+                  </div>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Sales Channel</TableHead>
+                        <TableHead className="text-right">Qty Out</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {dailyStockOut.byChannel.map((c, i) => (
+                        <TableRow key={i}>
+                          <TableCell className="text-sm">{c.name}</TableCell>
+                          <TableCell className="text-right font-mono text-sm font-semibold">
+                            {c.total}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </Card>
+              )}
+            </>
+          )}
         </TabsContent>
 
       </Tabs>
