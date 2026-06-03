@@ -124,7 +124,12 @@ class InventoryMovement(models.Model):
         DAMAGE = 'DAMAGE', 'Damaged/Expired'
         SENT_TO_FACTORY = 'SENT_TO_FACTORY', 'Sent to Factory'
         PRODUCTION_IN = 'PRODUCTION_IN', 'Production Receipt'
-        
+
+        # Reservation — adjusts reserved_quantity, NOT on-hand quantity. Recorded
+        # in the ledger so a reservation/release is visible in the movements list.
+        RESERVATION = 'RESERVATION', 'Stock Reserved'
+        RELEASE = 'RELEASE', 'Reservation Released'
+
     class MovementStatus(models.TextChoices):
         """Status of the movement."""
         PENDING = 'PENDING', 'Pending'

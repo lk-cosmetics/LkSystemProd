@@ -1158,6 +1158,15 @@ class OrderIngestionService:
         sales_channel: SalesChannel,
         created_by,
     ) -> None:
+        # Reconciling real stock movements supersedes any pre-completion
+        # reservation this order held, so release it first — otherwise the unit
+        # would be double-counted (reserved AND sold) and the order's own
+        # reservation could block its SALE availability check. release() reads
+        # the flag under a row lock and is a no-op when nothing is reserved, so
+        # it is safe to call unconditionally (and on a possibly-stale instance).
+        from apps.orders.stock_service import OrderStockReservationService
+        OrderStockReservationService.release(order, actor=created_by)
+
         desired = {}
         if order.status in WC_MOVEMENT_STATUSES:
             desired = cls._line_quantities_by_product(lines)

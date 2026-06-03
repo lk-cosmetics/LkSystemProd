@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from apps.inventory.models import SalesChannelInventory
+from django.db import transaction
+from django.utils import timezone
+
+from apps.inventory.models import InventoryMovement, SalesChannelInventory
 from apps.orders.models import Order
 from apps.products.models import Product
 from apps.sales_channels.models import SalesChannel
@@ -26,33 +29,34 @@ class OrderStockAvailabilityService:
 
     @classmethod
     def build(cls, order: Order) -> dict[str, Any]:
-        lines = list(
-            order.lines.filter(is_deleted=False)
-            .exclude(product__product_type=Product.ProductType.PACKAGING_ITEM)
-            .select_related('product')
-        )
-        grouped: dict[int, dict[str, Any]] = {}
-        unlinked: list[dict[str, Any]] = []
-
-        for line in lines:
-            if not line.product_id:
-                unlinked.append({
-                    'line_id': line.id,
-                    'product_name': line.product_name,
-                    'required_quantity': line.quantity,
-                    'issue': 'Product is not linked to a local product.',
-                })
-                continue
-
-            item = grouped.setdefault(line.product_id, {
-                'product_id': line.product_id,
-                'product_name': line.product.name if line.product else line.product_name,
-                'barcode': line.product.barcode if line.product else line.barcode,
-                'required_quantity': 0,
+        # Pack-aware requirements: a pack expands into its component products
+        # (a pack has no stock row of its own) via the same engine the sale uses.
+        # ``grouped`` keeps its historical shape so the per-channel logic below is
+        # unchanged.
+        required_map, meta, unlinked_raw = cls._required_customer_quantities(order)
+        unlinked: list[dict[str, Any]] = [
+            {
+                'line_id': item['line_id'],
+                'product_name': item['product_name'],
+                'required_quantity': item['required_quantity'],
+                'issue': (
+                    'Pack components are missing or invalid; cannot stock-check.'
+                    if item.get('reason') == 'pack_invalid'
+                    else 'Product is not linked to a local product.'
+                ),
+            }
+            for item in unlinked_raw
+        ]
+        grouped: dict[int, dict[str, Any]] = {
+            product_id: {
+                'product_id': product_id,
+                'product_name': meta.get(product_id, {}).get('product_name', ''),
+                'barcode': meta.get(product_id, {}).get('barcode', ''),
+                'required_quantity': needed,
                 'line_ids': [],
-            })
-            item['required_quantity'] += line.quantity
-            item['line_ids'].append(line.id)
+            }
+            for product_id, needed in required_map.items()
+        }
 
         channels = [order.sales_channel_id]
         if order.pos_sales_channel_id and order.pos_sales_channel_id not in channels:
@@ -147,18 +151,11 @@ class OrderStockAvailabilityService:
         SS = Order.StockStatus
         channel_id = order.pos_sales_channel_id or order.sales_channel_id
 
-        lines = list(
-            order.lines.filter(is_deleted=False)
-            .exclude(product__product_type=Product.ProductType.PACKAGING_ITEM)
-        )
-        mapping_required = any(
-            (not line.is_linked) or (not line.product_id) for line in lines
-        )
-
-        required: dict[int, int] = {}
-        for line in lines:
-            if line.product_id:
-                required[line.product_id] = required.get(line.product_id, 0) + line.quantity
+        # Pack-aware: ``required`` is keyed by the *component* products a pack
+        # actually consumes (a pack has no stock row of its own), via the same
+        # expansion the sale uses. ``unlinked`` drives ``mapping_required``.
+        required, _meta, unlinked = cls._required_customer_quantities(order)
+        mapping_required = bool(unlinked)
 
         if not required:
             return {'stock_status': SS.IN_STOCK, 'mapping_required': mapping_required}
@@ -197,27 +194,34 @@ class OrderStockAvailabilityService:
     def _required_customer_quantities(
         cls, order: Order,
     ) -> tuple[dict[int, int], dict[int, dict[str, Any]], list[dict[str, Any]]]:
-        """Aggregate required quantities for *stock-bearing* customer lines.
+        """Aggregate the stock requirements of *stock-bearing* customer lines,
+        with PACKS expanded into the component products they consume.
 
         Returns ``(required, meta, unlinked)`` where:
 
-          * ``required``  -> ``{product_id: total_quantity}`` for LINKED, locally
-            mapped, non-packaging lines (the only lines that ever move stock).
+          * ``required``  -> ``{product_id: total_quantity}`` for the products that
+            actually move stock. A pack has no inventory row of its own, so each
+            pack line is expanded into its component products (via the same engine
+            the sale uses) and a non-pack line maps to itself; quantities for a
+            product shared across several lines / packs are summed.
           * ``meta``      -> ``{product_id: {product_name, barcode}}`` for display.
-          * ``unlinked``  -> customer lines that cannot be stock-checked
-            (``is_linked == False`` or no local product). These are reported as
-            warnings but never block fulfilment — by design unlinked lines never
-            trigger stock movements (WooCommerce-import compatibility).
+          * ``unlinked``  -> customer lines that cannot be stock-checked: unlinked
+            WooCommerce lines (``is_linked == False`` or no local product) and
+            misconfigured packs (``reason == 'pack_invalid'`` — a missing or
+            deleted component). Reported as warnings; by design they never
+            silently trigger stock movements (WooCommerce-import compatibility).
         """
         lines = list(
             order.lines.filter(is_deleted=False)
             .exclude(product__product_type=Product.ProductType.PACKAGING_ITEM)
             .select_related('product')
         )
+        # Lazy import: ``service`` imports this module, so import at call time.
+        from apps.orders.service import OrderIngestionError, OrderIngestionService
+
         required: dict[int, int] = {}
         meta: dict[int, dict[str, Any]] = {}
         unlinked: list[dict[str, Any]] = []
-
         for line in lines:
             if (not line.is_linked) or (not line.product_id):
                 unlinked.append({
@@ -227,12 +231,34 @@ class OrderStockAvailabilityService:
                     'reason': line.unlinked_reason or 'not_linked',
                 })
                 continue
-            required[line.product_id] = required.get(line.product_id, 0) + line.quantity
-            if line.product_id not in meta:
-                meta[line.product_id] = {
-                    'product_name': line.product.name if line.product else line.product_name,
-                    'barcode': (line.product.barcode if line.product else line.barcode) or '',
-                }
+
+            # A PACK carries no stock of its own — its availability is its
+            # component stock. Expand each line with the SAME engine the sale
+            # uses (``_line_quantities_by_product``) so this availability /
+            # reservation check matches exactly what gets decremented at
+            # fulfilment; a non-pack line maps to itself. Expanding one line at a
+            # time keeps a single misconfigured pack (missing/deleted component)
+            # from crashing this read-path: it degrades to an unfulfillable
+            # warning instead, and the order simply cannot be stock-checked until
+            # the pack is fixed.
+            try:
+                expanded = OrderIngestionService._line_quantities_by_product([line])
+            except OrderIngestionError:
+                unlinked.append({
+                    'line_id': line.id,
+                    'product_name': line.product_name,
+                    'required_quantity': line.quantity,
+                    'reason': 'pack_invalid',
+                })
+                continue
+
+            for product_id, data in expanded.items():
+                required[product_id] = required.get(product_id, 0) + data['quantity']
+                if product_id not in meta:
+                    meta[product_id] = {
+                        'product_name': data['product'].name,
+                        'barcode': (data['product'].barcode or ''),
+                    }
 
         return required, meta, unlinked
 
@@ -379,3 +405,160 @@ class OrderStockAvailabilityService:
             'channels': channel_payloads,
             'unlinked_lines': unlinked,
         }
+
+
+class OrderStockReservationService:
+    """Reserve / release finished-product stock for confirmed online orders.
+
+    Reserving increments ``SalesChannelInventory.reserved_quantity`` so a unit's
+    ``available_quantity`` (= quantity − reserved) drops immediately. Every sale
+    path — POS checkout, the order ingestion engine and production — gates on
+    ``available_quantity``, so a reserved unit can no longer be sold by the POS
+    or committed to another order.
+
+    Lifecycle: reserved at confirm (online / manual-delivery orders), held until
+    the order completes — where the SALE movement supersedes it — or is
+    cancelled (released). POS orders sell-and-complete instantly and never
+    reserve.
+    """
+
+    # Sources confirmed first and fulfilled later (the reservation window). POS
+    # is excluded: it sells and completes at the till, decrementing immediately.
+    _RESERVING_SOURCES = {Order.Source.WOOCOMMERCE, Order.Source.MANUAL}
+
+    @classmethod
+    def should_reserve(cls, order: Order) -> bool:
+        return order.source in cls._RESERVING_SOURCES and bool(order.sales_channel_id)
+
+    @classmethod
+    def reserve(cls, order: Order, *, actor=None) -> None:
+        """Reserve stock for the order's stock-bearing lines on its sales channel.
+
+        Idempotent — a no-op when the order already holds a reservation or is not
+        a reserving order. Raises ``LifecycleError`` (blocking the confirm) when
+        any line's available stock is insufficient, so a confirmed order always
+        owns its stock. The order row is locked and its reservation state is read
+        from the DB, so a stale in-memory ``order`` can never double-reserve.
+        """
+        if not cls.should_reserve(order):
+            return
+
+        with transaction.atomic():
+            locked = Order.all_objects.select_for_update().get(pk=order.pk)
+            if locked.stock_reserved:
+                order.stock_reserved = True
+                return
+
+            required, meta, _unlinked = (
+                OrderStockAvailabilityService._required_customer_quantities(locked)
+            )
+            channel_id = locked.sales_channel_id
+            if required and channel_id:
+                inventories = {
+                    inv.product_id: inv
+                    for inv in SalesChannelInventory.objects
+                    .select_for_update()
+                    .filter(sales_channel_id=channel_id, product_id__in=required.keys())
+                }
+                shortfalls = []
+                for product_id, needed in required.items():
+                    inv = inventories.get(product_id)
+                    available = inv.available_quantity if inv else 0
+                    if available < needed:
+                        info = meta.get(product_id, {})
+                        shortfalls.append(
+                            (info.get('product_name') or f'product #{product_id}', needed, available)
+                        )
+                if shortfalls:
+                    from apps.orders.lifecycle_service import LifecycleError
+                    detail = '; '.join(
+                        f'{name} (need {req}, available {av})'
+                        for name, req, av in shortfalls[:6]
+                    )
+                    raise LifecycleError(
+                        f'Cannot confirm — stock is no longer available to reserve: {detail}.'
+                    )
+                for product_id, needed in required.items():
+                    inv = inventories[product_id]
+                    reserved_before = inv.reserved_quantity
+                    inv.reserved_quantity += needed
+                    inv.save(update_fields=['reserved_quantity', 'updated_at'])
+                    # Ledger entry so the reservation is visible in the movements
+                    # list. On-hand is unchanged (before == after) — only
+                    # reserved_quantity moved (shown in the note).
+                    InventoryMovement.objects.create(
+                        sales_channel_id=channel_id,
+                        product_id=product_id,
+                        movement_type=InventoryMovement.MovementType.RESERVATION,
+                        status=InventoryMovement.MovementStatus.COMPLETED,
+                        quantity=needed,
+                        quantity_before=inv.quantity,
+                        quantity_after=inv.quantity,
+                        external_reference=locked.order_number,
+                        notes=(
+                            f'Reserved for order {locked.order_number} '
+                            f'(reserved {reserved_before}→{inv.reserved_quantity})'
+                        ),
+                        created_by=actor,
+                        completed_at=timezone.now(),
+                    )
+
+            locked.stock_reserved = True
+            locked.save(update_fields=['stock_reserved', 'updated_at'])
+            order.stock_reserved = True
+
+    @classmethod
+    def release(cls, order: Order, *, actor=None) -> None:
+        """Release a held reservation back to available stock.
+
+        Idempotent and safe to call unconditionally — it reads the authoritative
+        ``stock_reserved`` flag under a row lock, so a stale in-memory ``order``
+        (e.g. one passed from a separate request) can neither skip a real release
+        nor double-release. Called when the order completes (the SALE movement
+        takes over) or is cancelled.
+        """
+        with transaction.atomic():
+            locked = Order.all_objects.select_for_update().get(pk=order.pk)
+            if not locked.stock_reserved:
+                order.stock_reserved = False
+                return
+
+            required, _meta, _unlinked = (
+                OrderStockAvailabilityService._required_customer_quantities(locked)
+            )
+            channel_id = locked.sales_channel_id
+            if required and channel_id:
+                inventories = {
+                    inv.product_id: inv
+                    for inv in SalesChannelInventory.objects
+                    .select_for_update()
+                    .filter(sales_channel_id=channel_id, product_id__in=required.keys())
+                }
+                for product_id, needed in required.items():
+                    inv = inventories.get(product_id)
+                    if inv:
+                        reserved_before = inv.reserved_quantity
+                        inv.reserved_quantity = max(0, inv.reserved_quantity - needed)
+                        inv.save(update_fields=['reserved_quantity', 'updated_at'])
+                        # Ledger entry so the release is visible in the movements
+                        # list. On-hand is unchanged (before == after).
+                        InventoryMovement.objects.create(
+                            sales_channel_id=channel_id,
+                            product_id=product_id,
+                            movement_type=InventoryMovement.MovementType.RELEASE,
+                            status=InventoryMovement.MovementStatus.COMPLETED,
+                            quantity=needed,
+                            quantity_before=inv.quantity,
+                            quantity_after=inv.quantity,
+                            external_reference=locked.order_number,
+                            notes=(
+                                f'Reservation released for order {locked.order_number} '
+                                f'(reserved {reserved_before}→{inv.reserved_quantity})'
+                            ),
+                            created_by=actor,
+                            completed_at=timezone.now(),
+                        )
+
+            locked.stock_reserved = False
+            locked.save(update_fields=['stock_reserved', 'updated_at'])
+            order.stock_reserved = False
