@@ -58,12 +58,26 @@ def on_inventory_movement_completed(sender, instance, created, **kwargs):
                 quantity=0,
             )
 
-        if store_inv.quantity != instance.quantity_after:
-            if instance.is_stock_in:
-                store_inv.quantity += instance.quantity
-            elif instance.is_stock_out:
-                store_inv.quantity -= instance.quantity
-
+        # Apply this movement's RECORDED delta exactly once. The
+        # status-transition guard above (``_previous_status``) ensures this body
+        # runs a single time per movement-completion, and ``store_inv`` is locked
+        # (select_for_update) for this transaction, so the read-modify-write is
+        # atomic.
+        #
+        # We apply ``quantity_after - quantity_before`` — the delta the movement
+        # itself recorded — instead of the previous
+        # ``if store_inv.quantity != instance.quantity_after`` guard. That guard
+        # compared live stock to a caller-supplied ABSOLUTE ``quantity_after``
+        # (often from an unlocked, stale read), so when it coincidentally equalled
+        # live stock it SILENTLY DROPPED a real decrement/restock (oversell), and
+        # on a sign mismatch it diverged the ledger from on-hand. Applying the
+        # recorded delta is sign-correct, robust to a stale absolute read (the
+        # delta is what matters, applied to the locked live value), and naturally
+        # a no-op for log-only movements that record quantity_after ==
+        # quantity_before (e.g. a DAMAGE write-off that must NOT restock).
+        delta = instance.quantity_after - instance.quantity_before
+        if delta:
+            store_inv.quantity += delta
             store_inv.save(update_fields=['quantity', 'updated_at'])
 
         if not instance.completed_at:

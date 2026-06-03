@@ -643,6 +643,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            old_order_status = locked.order_status  # workflow state before the patch
             update_fields = []
             for field in (
                 'status',
@@ -690,6 +691,37 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                 locked.save(update_fields=[*dict.fromkeys(update_fields), 'updated_at'])
                 if any(field in data for field in ('delivery_status', 'status', 'return_exchange_status', 'outcome')):
                     OrderLifecycleService._recompute_outcome(locked, actor=request.user)
+                    # Reject an illegal workflow transition produced by this raw
+                    # status patch — reuse the lifecycle FSM map so the endpoint
+                    # can no longer jump an order into an unreachable state.
+                    # (Raising inside the atomic block rolls the whole patch back
+                    # and DRF returns 400.)
+                    from rest_framework.exceptions import ValidationError as _VErr
+                    from apps.orders.lifecycle_service import LifecycleError
+                    try:
+                        OrderLifecycleService._assert_transition(
+                            old_order_status, locked.order_status,
+                        )
+                    except LifecycleError as exc:
+                        raise _VErr({'status': str(exc)})
+                    # Reconcile stock so a direct status change can never bypass
+                    # the decrement/restock side-effects (e.g. a jump to COMPLETED
+                    # must decrement; moving away from it must restock). The engine
+                    # is idempotent (delta = desired - already_moved).
+                    inventory_channel = locked.pos_sales_channel or locked.sales_channel
+                    if inventory_channel:
+                        from apps.orders.service import (
+                            OrderIngestionError, OrderIngestionService,
+                        )
+                        try:
+                            OrderIngestionService._sync_inventory_movements(
+                                locked,
+                                list(locked.lines.filter(is_deleted=False).select_related('product')),
+                                inventory_channel,
+                                request.user,
+                            )
+                        except OrderIngestionError as exc:
+                            raise _VErr({'detail': exc.message, **getattr(exc, 'details', {})})
 
         return self._transition_response(locked, request)
 
