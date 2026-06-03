@@ -88,18 +88,43 @@ class RoleViewSet(viewsets.ModelViewSet):
         # company's roles regardless of their current workspace.
         if PermissionService.is_platform_admin(user):
             if self.request.query_params.get('company'):
-                return qs
+                result = qs
+            else:
+                current_company_id = getattr(user, 'current_company_id', None)
+                result = qs.filter(company_id=current_company_id) if current_company_id else qs
+        else:
+            # A company-scoped user sees their own company's roles PLUS the
+            # global default/custom roles a Super Admin published for everyone
+            # (company IS NULL, non-system). The global business TEMPLATES
+            # (is_system, company NULL) stay hidden because each company already
+            # has its own provisioned copy of them — never another tenant's role.
             current_company_id = getattr(user, 'current_company_id', None)
-            if current_company_id:
-                return qs.filter(company_id=current_company_id)
-            return qs
-        # A company-scoped user sees ONLY their own company's roles. The global
-        # business templates (company=NULL) are provisioning sources, not
-        # directly assignable, so they are hidden to keep tenants isolated.
-        current_company_id = getattr(user, 'current_company_id', None)
-        if not current_company_id:
-            return qs.none()
-        return qs.filter(company_id=current_company_id)
+            if not current_company_id:
+                return qs.none()
+            from django.db.models import Q
+            result = qs.filter(
+                Q(company_id=current_company_id)
+                | Q(company__isnull=True, is_system=False)
+            )
+
+        # ``?assignable=true`` → only the roles the caller may actually grant:
+        # within their permission ceiling, and (for a non-platform admin) never a
+        # platform-scoped role. This lets the Add-User / Invite role dropdowns
+        # show only roles at or below the caller's level instead of offering
+        # higher roles that would 403 on submit. The backend assignment paths
+        # still enforce the ceiling — this is UX, not the security boundary.
+        if (self.request.query_params.get('assignable', '').lower() == 'true'
+                and not PermissionService.is_platform_admin(user)):
+            from apps.rbac.provisioning import permission_ceiling
+            ceiling = permission_ceiling(user)  # None == unrestricted
+            if ceiling is not None:
+                result = result.exclude(scope_type='platform')
+                assignable_ids = [
+                    r.id for r in result
+                    if set(r.permissions.values_list('codename', flat=True)) <= ceiling
+                ]
+                result = result.filter(id__in=assignable_ids)
+        return result
 
     def get_serializer_class(self):
         if self.action in ('retrieve', 'create', 'update', 'partial_update'):
@@ -161,10 +186,20 @@ class RoleViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if not PermissionService.is_platform_admin(user):
             return
+        # ``is_global`` truthy → a GLOBAL default/custom role (company=None),
+        # visible to every company; never auto-tag it to the active company.
+        if str(self.request.data.get('is_global', '')).lower() in ('1', 'true', 'yes'):
+            serializer.validated_data['company'] = None
+            serializer.validated_data.pop('company_id', None)
+            return
         if serializer.validated_data.get('scope_type') == 'platform':
-            return  # an explicit, intentional global role
+            return  # an explicit, intentional platform role
+        has_company = (
+            serializer.validated_data.get('company')
+            or serializer.validated_data.get('company_id')
+        )
         current_company_id = getattr(user, 'current_company_id', None)
-        if current_company_id and not serializer.validated_data.get('company_id'):
+        if current_company_id and not has_company:
             serializer.validated_data['company_id'] = current_company_id
 
     def perform_create(self, serializer):
@@ -181,11 +216,16 @@ class RoleViewSet(viewsets.ModelViewSet):
         if instance.is_system and not user.is_superuser:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('System roles cannot be edited.')
-        # A CEO can only edit a role owned by their own company.
+        # A CEO can only edit a role owned by their own company — never a global
+        # default role (platform-admin managed) nor another tenant's role.
         if not PermissionService.is_platform_admin(user):
+            from rest_framework.exceptions import PermissionDenied
             user_company_id = getattr(user, 'current_company_id', None)
-            if instance.company_id and instance.company_id != user_company_id:
-                from rest_framework.exceptions import PermissionDenied
+            if instance.company_id is None:
+                raise PermissionDenied(
+                    'Global default roles can only be edited by a platform administrator.'
+                )
+            if instance.company_id != user_company_id:
                 raise PermissionDenied(
                     'You can only edit roles owned by your company.'
                 )
@@ -266,7 +306,12 @@ class AssignmentViewSet(viewsets.ViewSet):
                 'Only a platform administrator can assign platform roles.'
             )
         actor_company = getattr(actor, 'current_company_id', None)
-        if not actor_company or role.company_id != actor_company:
+        if not actor_company:
+            raise PermissionDenied('You must belong to a company to assign roles.')
+        # A company-owned role must match the actor's company; a GLOBAL role
+        # (company IS NULL, non-platform) is assignable by every company,
+        # subject to the permission ceiling enforced at the call site.
+        if role.company_id is not None and role.company_id != actor_company:
             raise PermissionDenied(
                 'You can only assign roles that belong to your company.'
             )
@@ -447,3 +492,93 @@ class AssignmentViewSet(viewsets.ViewSet):
 
         assignment.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=False, methods=['post'], url_path='set-role')
+    def set_role(self, request):
+        """Replace a user's role with a single new one (Edit User → Role).
+
+        Removes the target's existing assignable (company-owned, non-platform)
+        role assignments and creates the new role at the scope it implies
+        (company / brand / channel), reusing the same authorisation guards as
+        ``assign_role`` plus a privilege guard so a user more powerful than the
+        actor can never be re-roled.
+        """
+        from rest_framework.exceptions import PermissionDenied
+        from django.db import transaction
+        from apps.rbac.services import scope_kwargs_for_role
+
+        actor = request.user
+        self._require_assign_permission(actor)
+
+        try:
+            target = User.objects.get(id=request.data.get('user_id'))
+            role = Role.objects.get(id=request.data.get('role_id'))
+        except (User.DoesNotExist, Role.DoesNotExist):
+            return Response({'detail': 'User or role not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        self._assert_target_in_company(actor, target)
+        self._assert_role_assignable(actor, role)
+        if not PermissionService.is_platform_admin(actor):
+            from apps.rbac.provisioning import assert_within_ceiling
+            # Cannot grant a role more powerful than the actor holds.
+            assert_within_ceiling(actor, role.permissions.values_list('codename', flat=True))
+            # Cannot re-role a user whose privileges already exceed the actor's.
+            if PermissionService.is_platform_admin(target):
+                raise PermissionDenied("You cannot change a platform administrator's role.")
+            if not (PermissionService.get_user_permissions(target)
+                    <= PermissionService.get_user_permissions(actor)):
+                raise PermissionDenied(
+                    'You cannot change the role of a user whose permissions exceed your own.'
+                )
+
+        # Resolve scope ingredients from the role + the target's own data so the
+        # caller need not re-pick a brand/sales-point that the user already has.
+        company = target.current_company
+        scope = (role.scope_type or '').lower()
+        brands = list(target.allowed_brands.all()) if scope in ('brand', 'channel') else []
+        sales_channel = getattr(target, 'assigned_sales_channel', None) if scope == 'channel' else None
+        if scope == 'brand' and not brands:
+            return Response(
+                {'detail': f'{role.name} is brand-scoped — give the user brand access first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if scope == 'channel' and not sales_channel:
+            return Response(
+                {'detail': f'{role.name} works at a single sales point — assign the user a sales point first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            # Clear the target's current assignable roles so they end with
+            # exactly the new one. A non-platform actor only touches roles owned
+            # by their company and never platform-level assignments.
+            existing = UserRole.objects.filter(user=target).exclude(
+                role__scope_type='platform'
+            )
+            if not PermissionService.is_platform_admin(actor):
+                # The user's effective role lives either as a per-company copy in
+                # the actor's company or as a global business template; replace
+                # both, but never another tenant's or a platform assignment.
+                from django.db.models import Q
+                existing = existing.filter(
+                    Q(role__company_id=actor.current_company_id)
+                    | Q(role__company__isnull=True)
+                )
+            existing.delete()
+
+            if scope == 'brand' and len(brands) > 1:
+                for brand in brands:
+                    UserRole.objects.create(
+                        user=target, role=role, company=company, brand=brand,
+                        assigned_by=actor,
+                    )
+            else:
+                kwargs = scope_kwargs_for_role(
+                    role, company=company, brands=brands, sales_channel=sales_channel,
+                )
+                UserRole.objects.create(user=target, role=role, assigned_by=actor, **kwargs)
+
+        return Response({
+            'detail': 'Role updated.',
+            'roles': sorted(PermissionService.get_user_role_names(target)),
+        })

@@ -10,7 +10,7 @@
  *   - Mobile-responsive table with progressive column hiding
  *   - Always-visible action buttons (no opacity tricks)
  */
-import { useEffect, useMemo, useState, useCallback, useDeferredValue, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback, useDeferredValue, type ReactNode } from 'react';
 import {
   ShoppingCart, Search, RefreshCw, Eye, MoreVertical,
   CheckCircle, Clock, Package, Pencil, History, Trash2,
@@ -289,6 +289,10 @@ export default function OrdersPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [editLockToken, setEditLockToken] = useState('');
+  // Take-over prompt shown when another user already holds this order's lock.
+  const [takeoverInfo, setTakeoverInfo] = useState<{ orderId: number; userName: string } | null>(null);
+  // Mirror of the active lock so it can be best-effort released on page unload.
+  const lockRef = useRef<{ orderId: number; token: string } | null>(null);
   const [editForm, setEditForm] = useState<OrderEditRequest | null>(null);
   const [editProducts, setEditProducts] = useState<ProductListItem[]>([]);
   const [loadingEditProducts, setLoadingEditProducts] = useState(false);
@@ -543,10 +547,26 @@ export default function OrdersPage() {
   /* DETAIL / EDIT ACTIONS                                                    */
   /* ══════════════════════════════════════════════════════════════════════════ */
 
-  const openDetail = async (id: number) => {
+  const openDetail = async (id: number, opts?: { force?: boolean }) => {
     setDetailLoading(true);
     try {
+      // Acquire (or take over) the exclusive lock BEFORE opening the popup —
+      // the backend is the source of truth for who is handling the order.
+      let lockResult;
+      try {
+        lockResult = await orderService.acquireEditLock(id, opts?.force ?? false);
+      } catch (err: unknown) {
+        const response = (err as { response?: { status?: number; data?: { lock?: { user_name?: string | null } } } }).response;
+        if (response?.status === 409 && !opts?.force) {
+          // Held by someone else → ask whether to take over (take-over dialog).
+          setTakeoverInfo({ orderId: id, userName: response.data?.lock?.user_name || 'another user' });
+          return;
+        }
+        throw err;
+      }
+
       const detail = await orderService.getById(id);
+      setEditLockToken(lockResult.lock.token);
       setViewOrder(detail);
       setEditMode(false);
       const customerLines = detail.customer_lines ?? detail.lines.filter(line => line.product_type !== 'packaging_item');
@@ -608,53 +628,53 @@ export default function OrdersPage() {
     }
   };
 
-  const handleEditModeChange = async (enabled: boolean) => {
+  const handleEditModeChange = (enabled: boolean) => {
     if (!viewOrder) return;
-    if (!enabled) {
-      if (editLockToken) {
-        orderService.releaseEditLock(viewOrder.id, editLockToken).catch(() => undefined);
-      }
-      setEditLockToken('');
-      setEditMode(false);
-      return;
-    }
-
-    try {
-      const result = await orderService.acquireEditLock(viewOrder.id);
-      setEditLockToken(result.lock.token);
-      if (result.order) setViewOrder(result.order);
-      setEditMode(true);
-    } catch (err: unknown) {
-      const response = (err as { response?: { status?: number; data?: { lock?: { user_name?: string | null } } } }).response;
-      if (response?.status === 409) {
-        const userName = response.data?.lock?.user_name || 'another user';
-        const takeOver = window.confirm(`This order is being edited now by ${userName}. Do you want to take over editing?`);
-        if (!takeOver) return;
-        const result = await orderService.acquireEditLock(viewOrder.id, true);
-        setEditLockToken(result.lock.token);
-        if (result.order) setViewOrder(result.order);
-        setEditMode(true);
-        return;
-      }
-      setErrorMessage(extractErrorMessage(err, 'Failed to acquire edit lock.'));
-      setErrorDialog(true);
-    }
+    // The exclusive lock is acquired when the popup opens and held for its whole
+    // lifetime (released on close / takeover), so toggling edit mode only flips
+    // the UI here — there is no separate lock to acquire or release.
+    setEditMode(enabled);
   };
 
+  // Keep the lock alive while the popup is open. A 409 means another user took
+  // the order over, so we close our popup (the backend rejects us anyway).
   useEffect(() => {
-    if (!editMode || !viewOrder || !editLockToken) return undefined;
+    if (!viewOrder || !editLockToken) return undefined;
     const timer = window.setInterval(async () => {
       try {
         await orderService.heartbeatEditLock(viewOrder.id, editLockToken);
-      } catch (err) {
-        setEditMode(false);
+      } catch (err: unknown) {
+        const response = (err as { response?: { data?: { lock?: { user_name?: string | null } } } }).response;
+        const name = response?.data?.lock?.user_name || 'another user';
         setEditLockToken('');
-        setErrorMessage(extractErrorMessage(err, 'Another user took over editing this order.'));
+        setEditMode(false);
+        setViewOrder(null);
+        setErrorMessage(`This order was taken over by ${name}.`);
         setErrorDialog(true);
       }
-    }, 30_000);
+    }, 20_000);
     return () => window.clearInterval(timer);
   }, [editMode, editLockToken, viewOrder?.id]);
+
+  // Mirror the active lock into a ref + release it best-effort if the user
+  // navigates away or closes the tab with the popup still open. The 90s server
+  // TTL is the ultimate safety net for closed tabs and logout.
+  useEffect(() => {
+    lockRef.current = viewOrder && editLockToken
+      ? { orderId: viewOrder.id, token: editLockToken }
+      : null;
+  }, [editLockToken, viewOrder?.id]);
+  useEffect(() => {
+    const release = () => {
+      const l = lockRef.current;
+      if (l) orderService.releaseEditLock(l.orderId, l.token).catch(() => undefined);
+    };
+    window.addEventListener('beforeunload', release);
+    return () => {
+      window.removeEventListener('beforeunload', release);
+      release();
+    };
+  }, []);
 
   useEffect(() => {
     if (!viewOrder) {
@@ -1813,6 +1833,32 @@ export default function OrdersPage() {
           </Button>
         </div>
       </div>
+
+      {/* Take-over confirmation shown when the order is locked by another user */}
+      <Dialog open={!!takeoverInfo} onOpenChange={(open) => { if (!open) setTakeoverInfo(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Order in use</DialogTitle>
+            <DialogDescription>
+              This order is currently being handled by{' '}
+              <span className="font-semibold text-foreground">{takeoverInfo?.userName}</span>.
+              {' '}Do you want to take over this order?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button variant="outline" onClick={() => setTakeoverInfo(null)}>Cancel</Button>
+            <Button
+              onClick={() => {
+                const id = takeoverInfo?.orderId;
+                setTakeoverInfo(null);
+                if (id != null) openDetail(id, { force: true });
+              }}
+            >
+              Yes, take over
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Dialogs ─── */}
       <OrderDetailDialog

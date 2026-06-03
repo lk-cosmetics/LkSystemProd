@@ -26,6 +26,23 @@ class WorkspaceError(Exception):
 class WorkspaceService:
     """Stateless helper — every method is a ``@staticmethod``."""
 
+    # ── Switch capability ───────────────────────────────────────────────
+
+    @staticmethod
+    def can_switch(user) -> bool:
+        """Whether the user may change their active workspace at all.
+
+        Permission-based, never a role name: a platform admin always may;
+        everyone else needs the ``switch_brands`` permission. Employees and
+        Cashiers do not hold it, so they are locked to the single workspace
+        they were assigned and never see the switcher.
+        """
+        if not user or not user.is_authenticated:
+            return False
+        if PermissionService.is_platform_admin(user):
+            return True
+        return PermissionService.has_permission(user, 'switch_brands')
+
     # ── Switchable companies ────────────────────────────────────────────
 
     @staticmethod
@@ -35,12 +52,15 @@ class WorkspaceService:
 
         ``None`` means "every company" (platform admin / superuser). Otherwise
         a concrete set derived from the user's role assignments, always
-        including their home ``current_company``.
+        including their home ``current_company``. A user without switch rights
+        is pinned to their home company only.
         """
         if not user or not user.is_authenticated:
             return set()
         if PermissionService.is_platform_admin(user):
             return None
+        if not WorkspaceService.can_switch(user):
+            return {user.current_company_id} if user.current_company_id else set()
 
         ids: set[int] = set()
         assignments = user.user_roles.select_related(
@@ -83,6 +103,12 @@ class WorkspaceService:
             Brand.objects.filter(company_id=company_id)
             .values_list('id', flat=True)
         )
+
+        # A user without switch rights is pinned to their assigned brand only
+        # (Employee / Cashier) — they can never reach a sibling brand.
+        if not PermissionService.is_platform_admin(user) and not WorkspaceService.can_switch(user):
+            cb = user.current_brand_id
+            return {cb} if (cb and cb in company_brand_ids) else set()
 
         # Platform admin, or a user holding a company-scoped role in this
         # company, may focus any brand of the company.
@@ -145,6 +171,18 @@ class WorkspaceService:
         target_company_id = company_id or user.current_company_id
         if not target_company_id:
             raise WorkspaceError('No company to switch to.')
+
+        # Users without switch rights (Employee / Cashier, or any role lacking
+        # the ``switch_brands`` permission) are locked to their assigned
+        # workspace: only a no-op switch to the exact current (company, brand)
+        # is allowed. Moving to a sibling brand — or clearing the brand focus to
+        # widen back to the whole company — is rejected.
+        if not WorkspaceService.can_switch(user):
+            requested_brand = brand_id or None
+            if (int(target_company_id) != (user.current_company_id or 0)
+                    or requested_brand != (user.current_brand_id or None)):
+                raise WorkspaceError('You are not allowed to switch workspace.')
+            return user
 
         if not WorkspaceService.can_access_company(user, target_company_id):
             raise WorkspaceError('You do not have access to this company.')

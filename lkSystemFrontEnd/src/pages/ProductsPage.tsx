@@ -54,6 +54,7 @@ import { Switch } from '@/components/ui/switch';
 import { Separator } from '@/components/ui/separator';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { useDebounce } from '@/hooks/useDebounce';
+import { useSearchParams } from 'react-router-dom';
 import { useAuthStore } from '@/store/authStore';
 import { isPlatformAdmin, hasPermission } from '@/hooks/useAuth';
 import { getMediaUrl } from '@/utils/helpers';
@@ -63,6 +64,7 @@ import {
   useProductsPaginated,
   useSalesChannels,
   useBrands,
+  useCategories,
   useDeleteProduct,
   useHardDeleteProduct,
   useBulkDeleteProducts,
@@ -202,11 +204,14 @@ interface RowProps {
   onHardDelete: (p: ProductListItem) => void;
   onRestore: (p: ProductListItem) => void;
   onScanBarcode: (p: ProductListItem) => void;
+  canEdit: boolean;
+  canDelete: boolean;
 }
 
 const ProductRow = memo(function ProductRow({
   product: p, isSelected, selectionMode,
   onSelect, onView, onEdit, onDelete, onHardDelete, onRestore, onScanBarcode,
+  canEdit, canDelete,
 }: RowProps) {
   const [imgErr, setImgErr] = useState(false);
   const img = getMediaUrl(p.image_url);
@@ -305,26 +310,38 @@ const ProductRow = memo(function ProductRow({
             </DropdownMenuItem>
             {!p.is_deleted && (
               <>
-                <DropdownMenuItem onClick={() => onEdit(p)} className="gap-2">
-                  <Pencil className="size-4" /> Edit
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onScanBarcode(p)} className="gap-2">
-                  <ScanBarcode className="size-4" /> Scan Barcode
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => onDelete(p)} className="gap-2 text-destructive focus:text-destructive">
-                  <Trash2 className="size-4" /> Soft Delete
-                </DropdownMenuItem>
+                {canEdit && (
+                  <DropdownMenuItem onClick={() => onEdit(p)} className="gap-2">
+                    <Pencil className="size-4" /> Edit
+                  </DropdownMenuItem>
+                )}
+                {canEdit && (
+                  <DropdownMenuItem onClick={() => onScanBarcode(p)} className="gap-2">
+                    <ScanBarcode className="size-4" /> Scan Barcode
+                  </DropdownMenuItem>
+                )}
+                {canDelete && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => onDelete(p)} className="gap-2 text-destructive focus:text-destructive">
+                      <Trash2 className="size-4" /> Soft Delete
+                    </DropdownMenuItem>
+                  </>
+                )}
               </>
             )}
             {p.is_deleted && (
               <>
-                <DropdownMenuItem onClick={() => onRestore(p)} className="gap-2 text-green-600 focus:text-green-600">
-                  <RotateCcw className="size-4" /> Restore
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onHardDelete(p)} className="gap-2 text-destructive focus:text-destructive">
-                  <Trash2 className="size-4" /> Delete Permanently
-                </DropdownMenuItem>
+                {canEdit && (
+                  <DropdownMenuItem onClick={() => onRestore(p)} className="gap-2 text-green-600 focus:text-green-600">
+                    <RotateCcw className="size-4" /> Restore
+                  </DropdownMenuItem>
+                )}
+                {canDelete && (
+                  <DropdownMenuItem onClick={() => onHardDelete(p)} className="gap-2 text-destructive focus:text-destructive">
+                    <Trash2 className="size-4" /> Delete Permanently
+                  </DropdownMenuItem>
+                )}
               </>
             )}
           </DropdownMenuContent>
@@ -688,6 +705,13 @@ function Toast({ toast, onClose }: { toast: { type: 'success' | 'error'; msg: st
 
 export default function ProductsPage() {
   const { user } = useAuthStore();
+  // Active brand workspace — when set, brand-scoped forms lock to it.
+  const activeBrandId = user?.current_brand_id ?? null;
+  // RBAC (UX only — the backend is the real gate): hide actions the user can't
+  // perform, driven by permission codenames, never role names.
+  const canCreateProducts = hasPermission(user, 'create_products');
+  const canEditProducts = hasPermission(user, 'edit_products');
+  const canDeleteProducts = hasPermission(user, 'delete_products');
   const isMobile = useIsMobile();
 
   // ── Pagination & filters ──
@@ -701,7 +725,11 @@ export default function ProductsPage() {
   const [packF, setPackF] = useState('all'); // 'all' | 'pack' | 'single'
   const [showDeleted, setShowDeleted] = useState(false);
   const [onlyDeleted, setOnlyDeleted] = useState(false);
-  const [filtersOpen, setFiltersOpen] = useState(false);
+  // ?category=<id> arrives from the category drill-down (clicking a category
+  // row on the Categories page); it preselects the filter and opens the panel.
+  const [searchParams] = useSearchParams();
+  const [categoryF, setCategoryF] = useState(() => searchParams.get('category') ?? 'all');
+  const [filtersOpen, setFiltersOpen] = useState(() => !!searchParams.get('category'));
 
   // Debounce search — 300ms for snappy live filtering
   useEffect(() => {
@@ -710,7 +738,7 @@ export default function ProductsPage() {
   }, [search]);
 
   // Reset page when filters change
-  useEffect(() => { setPage(1); }, [brandF, statusF, typeF, packF, showDeleted, onlyDeleted]);
+  useEffect(() => { setPage(1); }, [brandF, statusF, typeF, packF, categoryF, showDeleted, onlyDeleted]);
 
   // Count active filters (excluding search)
   const activeFilterCount = useMemo(() => {
@@ -719,22 +747,24 @@ export default function ProductsPage() {
     if (statusF !== 'all') count++;
     if (typeF !== 'all') count++;
     if (packF !== 'all') count++;
+    if (categoryF !== 'all') count++;
     if (showDeleted) count++;
     if (onlyDeleted) count++;
     return count;
-  }, [brandF, statusF, typeF, packF, showDeleted, onlyDeleted]);
+  }, [brandF, statusF, typeF, packF, categoryF, showDeleted, onlyDeleted]);
 
   const qp = useMemo(() => ({
     page,
     page_size: pageSize,
     search: debSearch || undefined,
     brand: brandF !== 'all' ? Number(brandF) : undefined,
+    categories: categoryF !== 'all' ? Number(categoryF) : undefined,
     status: (statusF !== 'all' ? statusF : undefined) as ProductStatus | undefined,
     product_type: typeF !== 'all' ? typeF : undefined,
     is_pack: packF === 'pack' ? true : packF === 'single' ? false : undefined,
     show_deleted: (showDeleted || onlyDeleted) || undefined,
     only_deleted: onlyDeleted || undefined,
-  }), [page, pageSize, debSearch, brandF, statusF, typeF, packF, showDeleted, onlyDeleted]);
+  }), [page, pageSize, debSearch, brandF, categoryF, statusF, typeF, packF, showDeleted, onlyDeleted]);
 
   // ── Data ──
   const { data: paginated, isLoading, refetch } = useProductsPaginated(qp);
@@ -744,6 +774,7 @@ export default function ProductsPage() {
 
   const { data: salesChannels = [] } = useSalesChannels();
   const { data: brands = [] } = useBrands();
+  const { data: categories = [] } = useCategories();
 
   // ── Mutations ──
   const deleteMut = useDeleteProduct();
@@ -1358,6 +1389,7 @@ export default function ProductsPage() {
   // Reset filters
   const clearFilters = () => {
     setBrandF('all');
+    setCategoryF('all');
     setStatusF('all');
     setTypeF('all');
     setPackF('all');
@@ -1395,7 +1427,14 @@ export default function ProductsPage() {
         </div>
         <div className="space-y-1.5">
           <Label>Brand</Label>
-          <Select value={form.brand || 'none'} onValueChange={v => setF('brand', v === 'none' ? '' : v)}>
+          {/* Inside a brand workspace the brand is locked to the active brand:
+              shown disabled + prefilled so a product can't be created under
+              another brand (the backend enforces this too). */}
+          <Select
+            value={activeBrandId ? String(activeBrandId) : (form.brand || 'none')}
+            onValueChange={v => setF('brand', v === 'none' ? '' : v)}
+            disabled={!!activeBrandId}
+          >
             <SelectTrigger><SelectValue placeholder="Select brand" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="none">No Brand</SelectItem>
@@ -1541,9 +1580,11 @@ export default function ProductsPage() {
           >
             <HelpCircle className="size-4" />
           </Button>
-          <Button size="sm" onClick={handleAdd} className="gap-1.5">
-            <Plus className="size-4" /> Add
-          </Button>
+          {canCreateProducts && (
+            <Button size="sm" onClick={handleAdd} className="gap-1.5">
+              <Plus className="size-4" /> Add
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={() => { setScanFeedback(null); setScanOpen(true); }} className="gap-1.5">
             <ScanBarcode className="size-4" />{!isMobile && ' Scan'}
           </Button>
@@ -1635,6 +1676,16 @@ export default function ProductsPage() {
                 <SelectContent>
                   <SelectItem value="all">All Brands</SelectItem>
                   {brands.map(b => <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1 min-w-[150px]">
+              <Label className="text-xs text-muted-foreground">Category</Label>
+              <Select value={categoryF} onValueChange={setCategoryF}>
+                <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Categories</SelectItem>
+                  {categories.map(c => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
@@ -1810,6 +1861,7 @@ export default function ProductsPage() {
                   isSelected={selSet.has(p.id)} selectionMode={selMode}
                   onSelect={toggle} onView={openView} onEdit={openEdit}
                   onDelete={openDel} onHardDelete={openHardDel} onRestore={doRestore} onScanBarcode={openBcScan}
+                  canEdit={canEditProducts} canDelete={canDeleteProducts}
                 />
               ))}
             </TableBody>

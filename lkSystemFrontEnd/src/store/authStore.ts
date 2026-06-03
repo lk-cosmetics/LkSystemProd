@@ -110,6 +110,24 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   /**
+   * Re-fetch the current user's identity (fresh roles/permissions) and swap it
+   * into the store — so a role change made by an admin takes effect without a
+   * logout/login. The backend already enforces permissions on every request;
+   * this keeps the UI (menus, buttons) in sync.
+   */
+  refreshUser: async () => {
+    if (!get().isAuthenticated) return;
+    try {
+      const user = await authService.refreshIdentity();
+      // Guard against a logout that happened while the request was in flight.
+      if (get().isAuthenticated) set({ user });
+    } catch {
+      // Transient failure — the next focus/interval retries; a genuine auth
+      // failure is handled by the axios refresh/logout flow.
+    }
+  },
+
+  /**
    * Clear error
    */
   clearError: () => {

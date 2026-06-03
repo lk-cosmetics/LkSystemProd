@@ -187,8 +187,13 @@ class CompanyViewSet(viewsets.ModelViewSet):
         Read + update of their own company is allowed (the queryset above
         already restricts the rows they can touch).
         """
+        from apps.rbac.permissions import require_permission
         if self.action in ('create', 'destroy'):
             return [IsAuthenticated(), _IsPlatformAdmin()]
+        if self.action in ('update', 'partial_update'):
+            # Editing a company requires edit_company; the queryset still
+            # restricts which company rows the user can touch.
+            return [IsAuthenticated(), require_permission('edit_company')()]
         return [IsAuthenticated()]
 
     def perform_create(self, serializer):

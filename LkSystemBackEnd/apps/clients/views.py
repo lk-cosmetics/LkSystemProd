@@ -19,11 +19,12 @@ from .serializers import (
     ClientCreateSerializer,
     ClientCreateFromPOSSerializer,
 )
+from apps.rbac.permissions import ActionPermissionMixin
 from apps.orders.models import Order
 from apps.orders.serializers import OrderListSerializer, OrderDetailSerializer
 
 
-class ClientViewSet(viewsets.ModelViewSet):
+class ClientViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     """
         CRUD for Client records.
 
@@ -33,6 +34,17 @@ class ClientViewSet(viewsets.ModelViewSet):
         In POS scope we include clients that match either brand or sales channel,
         plus generic clients not tied to either (both fields null).
     """
+
+    # RBAC: client writes require client permissions (unlisted writes default to
+    # edit_clients). Reads need view_clients (held by all operational roles) and
+    # are brand/company-scoped in get_queryset.
+    action_permissions = {
+        'create': 'create_clients',
+        'create_from_pos': 'create_clients',
+        'destroy': 'delete_clients',
+    }
+    default_read_permission = 'view_clients'
+    default_write_permission = 'edit_clients'
 
     queryset = Client.objects.select_related(
         'company', 'brand', 'sales_channel', 'reseller', 'created_by',
@@ -63,15 +75,33 @@ class ClientViewSet(viewsets.ModelViewSet):
             ),
         )
         
-        # Scope to current user's company for multi-tenancy
-        if self.request.user.current_company:
-            qs = qs.filter(company=self.request.user.current_company)
+        user = self.request.user
 
+        # Brand-workspace + multi-tenant scoping. ``visible_brand_ids`` is the
+        # shared source of truth used by every other module (products, orders,
+        # promotions, …): it narrows to the ACTIVE brand (``current_brand_id``)
+        # when a brand workspace is focused, to the selected company's brands for
+        # a company-scoped user, and returns None only for an unscoped global
+        # admin. Generic clients (no brand) stay visible inside a brand workspace
+        # so company-level records are never hidden — but a sibling brand's
+        # clients never leak in.
+        from apps.rbac.services import visible_brand_ids
+        brand_ids = visible_brand_ids(user)
+        if brand_ids is not None:
+            if not brand_ids:
+                return qs.none()
+            qs = qs.filter(Q(brand_id__in=brand_ids) | Q(brand__isnull=True))
+
+        # Tenant isolation by the active company (also applied for a global
+        # admin who has selected a company in the workspace switcher).
+        if user.current_company_id:
+            qs = qs.filter(company_id=user.current_company_id)
+
+        # Explicit POS scope param: narrow to a single channel's brand on demand
+        # (used by POS reads that pass a brand without a focused workspace).
         scope = self.request.query_params.get('scope', '').lower()
         brand = self.request.query_params.get('brand')
-
         if scope == 'pos' and brand:
-            # POS scope: clients belonging to this brand OR generic (no brand set)
             qs = qs.filter(Q(brand_id=brand) | Q(brand__isnull=True))
 
         return qs
@@ -84,12 +114,29 @@ class ClientViewSet(viewsets.ModelViewSet):
         return ClientCreateSerializer
 
     def perform_create(self, serializer):
-        # Always attach the user who created the client for audit trails
-        # Auto-set company from user's current_company for multi-tenancy
-        serializer.save(
-            created_by=self.request.user,
-            company=self.request.user.current_company
-        )
+        # Always attach the creator (audit) and the active company (multi-tenancy).
+        user = self.request.user
+        extra = {'created_by': user, 'company': user.current_company}
+
+        focused = getattr(user, 'current_brand_id', None)
+        if focused:
+            # Inside a brand workspace, always tag the new client to that brand
+            # (and drop any brand the request tried to send) so "Add Client"
+            # uses the current brand automatically and the record stays visible
+            # in this workspace.
+            serializer.validated_data.pop('brand', None)
+            extra['brand_id'] = focused
+        else:
+            # No brand focus: keep the form's brand only if it is one the user
+            # may actually reach — never attach a client to a brand outside the
+            # user's scope (visible_brand_ids returns None for a global admin).
+            from apps.rbac.services import visible_brand_ids
+            allowed = visible_brand_ids(user)
+            provided = serializer.validated_data.get('brand')
+            if provided is not None and allowed is not None and provided.id not in allowed:
+                serializer.validated_data['brand'] = None
+
+        serializer.save(**extra)
 
     @action(detail=False, methods=['post'], url_path='create-from-pos')
     def create_from_pos(self, request):

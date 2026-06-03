@@ -17,6 +17,7 @@ from .serializers import (
     SalesChannelListSerializer,
     WebhookTokenSerializer,
 )
+from apps.rbac.permissions import ActionPermissionMixin
 
 
 @extend_schema_view(
@@ -51,14 +52,24 @@ from .serializers import (
         description='Delete a sales channel.',
     ),
 )
-class SalesChannelViewSet(viewsets.ModelViewSet):
+class SalesChannelViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     """
     API ViewSet for SalesChannel management.
-    
+
     Provides CRUD operations for sales channels.
     Supports filtering by brand and channel type.
     """
-    
+
+    # RBAC: channel WRITES require sales-channel permissions (unlisted writes —
+    # regenerate-webhook, store-url — default to edit_sales_channels). Reads
+    # stay open (IsAuthenticated) and are channel-scoped in get_queryset, so
+    # operational roles populate channel dropdowns without view_sales_channels.
+    action_permissions = {
+        'create': 'create_sales_channels',
+        'destroy': 'delete_sales_channels',
+    }
+    default_write_permission = 'edit_sales_channels'
+
     queryset = SalesChannel.objects.all()
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]

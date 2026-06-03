@@ -258,6 +258,10 @@ class UserDetailSerializer(serializers.ModelSerializer):
     # drilling through the nested profile object every time it wants to
     # render an <Avatar> in the quick-view dialog.
     avatar = serializers.SerializerMethodField()
+    # Sales point an operational account (Employee / Cashier) is pinned to.
+    assigned_sales_channel_name = serializers.CharField(
+        source='assigned_sales_channel.name', read_only=True, default=None
+    )
 
     class Meta:
         model = User
@@ -274,6 +278,8 @@ class UserDetailSerializer(serializers.ModelSerializer):
             'allowed_brands',
             'allowed_brand_ids',
             'allowed_brand_names',
+            'assigned_sales_channel',
+            'assigned_sales_channel_name',
             'can_switch_brands',
             'is_active',
             'is_staff',
@@ -392,8 +398,23 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
         role = attrs.get('role_id')
         request = self.context.get('request')
         actor = getattr(request, 'user', None) if request else None
+
+        from apps.rbac.services import PermissionService
+
+        # Gate the whole create endpoint behind ``create_users``. The viewset
+        # only enforces IsAuthenticated, so without this any authenticated user
+        # (even a Cashier) could create accounts. ``get_capability_permissions``
+        # matches the permission anywhere within the actor's active company
+        # (company-wide, brand or channel role), so a brand-scoped manager who
+        # legitimately holds create_users passes correctly.
+        if actor is not None and not actor.is_superuser:
+            target_company = attrs.get('current_company') or getattr(actor, 'current_company', None)
+            if 'create_users' not in PermissionService.get_capability_permissions(actor, company=target_company):
+                raise serializers.ValidationError(
+                    'You do not have permission to create users.'
+                )
+
         if role is not None and actor is not None:
-            from apps.rbac.services import PermissionService
             from apps.rbac.provisioning import assert_within_ceiling
 
             if not PermissionService.is_platform_admin(actor):
@@ -405,7 +426,13 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         'role_id': 'You cannot assign a platform role.'
                     })
-                if not actor_company_id or role.company_id != actor_company_id:
+                if not actor_company_id:
+                    raise serializers.ValidationError({
+                        'role_id': 'You must belong to a company to assign roles.'
+                    })
+                # A company-owned role must match the actor's company; a global
+                # default role (company IS NULL) may be assigned by any company.
+                if role.company_id is not None and role.company_id != actor_company_id:
                     raise serializers.ValidationError({
                         'role_id': 'You can only assign roles that belong to '
                                    'your company.'
@@ -565,6 +592,7 @@ class UpdateUserSerializer(serializers.ModelSerializer):
             'last_name',
             'current_company',
             'allowed_brands',
+            'assigned_sales_channel',
             'is_active',
         ]
 
@@ -621,6 +649,26 @@ class UpdateUserSerializer(serializers.ModelSerializer):
                             f"{', '.join(invalid)}"
                         ),
                     })
+
+        # ``assigned_sales_channel`` pins an operational account (Employee /
+        # Cashier) to a single sales point. Validate it against the effective
+        # company and the user's brand access so a sales point can never be set
+        # outside the tenant — or in a brand the user cannot reach.
+        channel = attrs.get('assigned_sales_channel')
+        if channel is not None:
+            eff_company_id = getattr(effective_company, 'id', None)
+            if not eff_company_id or channel.brand.company_id != eff_company_id:
+                raise serializers.ValidationError({
+                    'assigned_sales_channel': "Sales channel does not belong to the user's company.",
+                })
+            eff_brands = attrs.get('allowed_brands')
+            if eff_brands is None and instance is not None:
+                eff_brands = list(instance.allowed_brands.all())
+            eff_brand_ids = {getattr(b, 'id', b) for b in (eff_brands or [])}
+            if eff_brand_ids and channel.brand_id not in eff_brand_ids:
+                raise serializers.ValidationError({
+                    'assigned_sales_channel': "Sales channel must belong to one of the user's brands.",
+                })
         return attrs
 
     @transaction.atomic
@@ -685,6 +733,19 @@ class UpdateUserSerializer(serializers.ModelSerializer):
                     changed = True
                 if changed:
                     ur.save(update_fields=['company', 'brand', 'sales_channel'])
+
+        # Keep channel-scoped role rows (e.g. Cashier) pinned to the user's
+        # current sales point. Changing ``assigned_sales_channel`` without a
+        # role change would otherwise leave the existing UserRole resolving
+        # permissions at the OLD sales point.
+        if 'assigned_sales_channel' in validated_data:
+            from apps.rbac.models import UserRole
+            new_channel_id = user.assigned_sales_channel_id
+            if new_channel_id:
+                (UserRole.objects
+                 .filter(user=user, role__scope_type='channel')
+                 .exclude(sales_channel_id=new_channel_id)
+                 .update(sales_channel_id=new_channel_id))
 
         return user
 
@@ -1062,35 +1123,42 @@ class InviteEmployeeSerializer(serializers.Serializer):
             raise serializers.ValidationError('Authentication required.')
 
         if not inviter.is_superuser:
-            inviter_perms = PermissionService.get_user_permissions(
+            # Capability check across the inviter's active company INCLUDING its
+            # brand/channel sub-scopes, so a brand-scoped Brand Manager (who holds
+            # no company-wide role) can still invite within their own company.
+            inviter_perms = PermissionService.get_capability_permissions(
                 inviter, company=company,
             )
             if 'create_users' not in inviter_perms:
                 raise serializers.ValidationError(
                     "You don't have permission to invite users to this company."
                 )
-            # Refuse to escalate beyond the inviter's reach.
-            inviter_scopes = set(
-                inviter.user_roles.values_list('role__scope_type', flat=True)
-            )
-            rank = {'platform': 4, 'company': 3, 'brand': 2, 'channel': 1}
-            inviter_rank = max((rank.get(s, 0) for s in inviter_scopes), default=0)
-            target_rank = rank.get((role.scope_type or '').lower(), 0)
-            if target_rank > inviter_rank:
+            # The one escalation the permission ceiling below cannot catch: a
+            # non-platform admin must never mint a platform-scoped (cross-company)
+            # role, however small its permission set looks.
+            if (role.scope_type or '').lower() == 'platform' \
+                    and not PermissionService.is_platform_admin(inviter):
                 raise serializers.ValidationError({
-                    'role_id': (
-                        f"You can't invite a {role.name} ({role.scope_type}-scoped) "
-                        f"because this role outranks your own."
-                    ),
+                    'role_id': "You can't invite a user to a platform-wide role.",
                 })
             # Tenant isolation: the role must be one owned by the target
             # company, never a global template or another tenant's role.
-            if role.scope_type != 'platform' and role.company_id != company.id:
+            # A company-owned role must belong to the target company; a global
+            # default role (company IS NULL, non-platform) may be assigned in any
+            # company.
+            if (role.scope_type != 'platform'
+                    and role.company_id is not None
+                    and role.company_id != company.id):
                 raise serializers.ValidationError({
                     'role_id': 'You can only invite users to roles that belong '
                                'to this company.'
                 })
-            # Privilege ceiling: cannot grant permissions you do not hold.
+            # Privilege ceiling — the real escalation guard: the inviter may only
+            # grant a role whose permissions are a subset of their own. This lets
+            # a Brand Manager invite an Employee or a Cashier (their permissions
+            # are a subset) while still blocking a Manager / CEO / Super Admin
+            # (those need permissions the Brand Manager does not hold) — derived
+            # purely from permissions, with no role-name or scope-rank hard-coding.
             from apps.rbac.provisioning import assert_within_ceiling
             assert_within_ceiling(
                 inviter, role.permissions.values_list('codename', flat=True)
@@ -1144,6 +1212,18 @@ class InviteEmployeeSerializer(serializers.Serializer):
             raise serializers.ValidationError({
                 'sales_channel_id': (
                     f"{role.name} is channel-scoped — pick a sales channel."
+                ),
+            })
+
+        # Operational, single-sales-point roles (Employee / Cashier) must be
+        # pinned to a sales point even when the role itself is company-scoped,
+        # so the new account is confined to exactly one channel.
+        from apps.rbac.services import role_requires_sales_point
+        if role_requires_sales_point(role) and not attrs['_sales_channel']:
+            raise serializers.ValidationError({
+                'sales_channel_id': (
+                    f"{role.name} works at a single sales point — pick the sales "
+                    f"channel this user will operate."
                 ),
             })
 
@@ -1384,6 +1464,16 @@ class AcceptInvitationSerializer(serializers.Serializer):
                 assigned_by=invitation.invited_by,
                 **scope,
             )
+
+        # Pin operational accounts to their assigned sales point so every read
+        # is confined to that one channel (and its brand). Set whenever the
+        # invite carried a sales channel — a Cashier, or an Employee assigned
+        # one — regardless of the role's nominal scope.
+        if invitation.sales_channel_id:
+            user.assigned_sales_channel_id = invitation.sales_channel_id
+            user.current_brand_id = invitation.sales_channel.brand_id
+            user.save(update_fields=['assigned_sales_channel', 'current_brand'])
+            user.allowed_brands.add(invitation.sales_channel.brand_id)
 
         invitation.mark_accepted(user)
 

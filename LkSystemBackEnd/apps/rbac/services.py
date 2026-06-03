@@ -70,6 +70,23 @@ def scope_kwargs_for_role(role, *, company=None, brands=None, sales_channel=None
     return {'company': company, 'brand': None, 'sales_channel': None}
 
 
+def role_requires_sales_point(role) -> bool:
+    """True for operational, single-sales-point roles (Employee / Cashier).
+
+    Derived from scope + permissions, never role names: a channel-scoped role,
+    or any role that can neither switch brands (``switch_brands``) nor manage
+    users (``view_users``). Such accounts must be pinned to one sales point so
+    their data is confined to it. Managerial roles (Brand/Company Manager, CEO)
+    hold one of those permissions and are therefore exempt.
+    """
+    if role is None:
+        return False
+    if (getattr(role, 'scope_type', '') or '').lower() == 'channel':
+        return True
+    codes = set(role.permissions.values_list('codename', flat=True))
+    return 'switch_brands' not in codes and 'view_users' not in codes
+
+
 def visible_brand_ids(user):
     """
     Return the set of brand ids ``user`` is allowed to see, or ``None`` to
@@ -89,6 +106,18 @@ def visible_brand_ids(user):
     """
     if not user or not user.is_authenticated:
         return set()
+
+    # An operational account pinned to a single sales point (Employee /
+    # Cashier) is confined to that channel's brand — the strongest narrowing,
+    # checked before the brand focus and the role-based scope below.
+    asc_id = getattr(user, 'assigned_sales_channel_id', None)
+    if asc_id:
+        from apps.sales_channels.models import SalesChannel
+        brand_id = (
+            SalesChannel.objects.filter(id=asc_id)
+            .values_list('brand_id', flat=True).first()
+        )
+        return {brand_id} if brand_id else set()
 
     # Active-brand focus narrows EVERYONE, including platform admins. The
     # workspace-switch endpoint validates that current_brand is reachable, so
@@ -133,6 +162,12 @@ def visible_sales_channel_ids(user):
     """
     if not user or not user.is_authenticated:
         return set()
+
+    # An operational account pinned to a single sales point sees ONLY that
+    # channel — never sibling channels of the same brand.
+    asc_id = getattr(user, 'assigned_sales_channel_id', None)
+    if asc_id:
+        return {asc_id}
 
     # Active-brand focus narrows channels to that brand for everyone.
     if getattr(user, 'current_brand_id', None):
@@ -264,6 +299,54 @@ class PermissionService:
                 )
 
             assignments = assignments.filter(scope_q)
+
+        return set(
+            AppPermission.objects.filter(
+                roles__assignments__in=assignments,
+            )
+            .values_list('codename', flat=True)
+            .distinct()
+        )
+
+    @staticmethod
+    def get_capability_permissions(user, company=None) -> set[str]:
+        """Permissions for a *capability* gate (e.g. ``require_permission``).
+
+        ``get_user_permissions(company=X)`` answers "what may the user do AT the
+        company-wide scope", so it deliberately excludes brand- and
+        channel-scoped roles. That is wrong for a capability gate: a Brand
+        Manager *can* view manufacturing, just for their own brand. This method
+        answers "may the user do X *somewhere within* company X" — matching
+        company-wide, brand, and channel roles under that company, plus
+        platform roles. Each viewset still scopes the data it returns to the
+        user's visible brands/channels, so widening the gate this way does not
+        grant any cross-tenant access, and a multi-company user does not inherit
+        another company's permissions (assignments outside ``company`` are not
+        matched).
+
+        With no active company the gate falls back to the union of every
+        permission the user holds (same as ``has_permission`` with no scope).
+        """
+        if not user.is_authenticated:
+            return set()
+        if user.is_superuser:
+            return set(
+                AppPermission.objects.values_list('codename', flat=True)
+            )
+
+        assignments = UserRole.objects.filter(user=user)
+        if company is not None:
+            assignments = assignments.filter(
+                # Platform-level roles apply everywhere.
+                Q(company__isnull=True, brand__isnull=True,
+                  sales_channel__isnull=True)
+                # Any role attached to this company (company-wide rows, and
+                # brand/channel rows which also carry their company).
+                | Q(company=company)
+                # Belt-and-braces for rows where only brand/channel is set.
+                | Q(brand__company=company)
+                | Q(sales_channel__brand__company=company)
+            )
 
         return set(
             AppPermission.objects.filter(

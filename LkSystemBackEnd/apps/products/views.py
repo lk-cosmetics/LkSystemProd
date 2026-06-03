@@ -18,6 +18,7 @@ from django.db import transaction
 from django.http import HttpResponse
 from django.utils import timezone
 
+from apps.rbac.permissions import ActionPermissionMixin
 from .models import Product, ProductAuditLog
 from .serializers import (
     ProductSerializer,
@@ -54,7 +55,7 @@ def _user_scoped_channel_ids(user):
     return None
 
 
-class ProductViewSet(viewsets.ModelViewSet):
+class ProductViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     """
     Product CRUD with soft delete, restore, and audit trail.
 
@@ -63,10 +64,27 @@ class ProductViewSet(viewsets.ModelViewSet):
     or ``?only_deleted=true`` to list deleted ones exclusively.
     """
 
+    # RBAC: every action is gated on a product permission codename (the Role
+    # Permissions page is the source of truth). Reads default to view_products;
+    # any unlisted write defaults to edit_products (deny-by-default), so an
+    # Employee with only view_products can list products but cannot create,
+    # edit, delete, sync or import them.
+    action_permissions = {
+        'create': 'create_products',
+        'sync': 'create_products',
+        'sync_selected': 'create_products',
+        'import_csv': 'create_products',
+        'destroy': 'delete_products',
+    }
+    default_read_permission = 'view_products'
+    default_write_permission = 'edit_products'
+
     permission_classes = [IsAuthenticated]
     parser_classes = [JSONParser]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['brand', 'product_type', 'status']
+    # ``categories`` enables ?categories=<id> to filter products by category
+    # (the category drill-down + the Products page category filter).
+    filterset_fields = ['brand', 'product_type', 'status', 'categories']
     search_fields = ['name', 'barcode']
     ordering_fields = ['name', 'sales_price', 'purchase_price', 'created_at']
     ordering = ['-created_at']
@@ -110,12 +128,43 @@ class ProductViewSet(viewsets.ModelViewSet):
     # ── Create / Update with audit ──────────────────────────────────────
 
     def perform_create(self, serializer):
-        instance = serializer.save()
+        user = self.request.user
+
+        # Resolve the active brand: a focused brand workspace, or the brand of
+        # an operational account's assigned sales point.
+        active_brand_id = getattr(user, 'current_brand_id', None)
+        if not active_brand_id and getattr(user, 'assigned_sales_channel_id', None):
+            from apps.sales_channels.models import SalesChannel
+            active_brand_id = (
+                SalesChannel.objects.filter(id=user.assigned_sales_channel_id)
+                .values_list('brand_id', flat=True).first()
+            )
+
+        save_kwargs = {}
+        if active_brand_id:
+            # Inside a brand workspace, always create the product under the
+            # active brand (drop any brand sent by the client) so it can never
+            # land under the wrong brand and the user need not re-pick it.
+            serializer.validated_data.pop('brand', None)
+            save_kwargs['brand_id'] = active_brand_id
+        else:
+            # No brand focus: keep the chosen brand only if it is one the user
+            # may actually reach — never create under an out-of-scope brand.
+            from apps.rbac.services import visible_brand_ids
+            allowed = visible_brand_ids(user)
+            provided = serializer.validated_data.get('brand')
+            if provided is not None and allowed is not None and provided.id not in allowed:
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError(
+                    {'brand': 'You cannot create a product under a brand outside your scope.'}
+                )
+
+        instance = serializer.save(**save_kwargs)
         # Run model-level pack validation (circular refs, existence checks)
         instance.full_clean()
         ProductAuditLog.objects.create(
             product=instance,
-            user=self.request.user,
+            user=user,
             action=ProductAuditLog.Action.CREATE,
         )
 

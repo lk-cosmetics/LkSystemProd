@@ -51,6 +51,7 @@ import {
   useDeleteClient, useBlockClient,
 } from '@/hooks/queries';
 import { clientService } from '@/services/client.service';
+import { useAuthStore } from '@/store/authStore';
 import { TUNISIA_GOVERNORATES } from '@/constants/tunisia';
 import type { Client, CreateClientRequest, OrderDetail, OrderListItem } from '@/types';
 
@@ -305,6 +306,8 @@ interface EditDialogProps {
 
 function ClientEditDialog({ open, onOpenChange, client, brands, onSave, saving }: EditDialogProps) {
   const isEdit = !!client;
+  // Active brand workspace — when set, the brand is locked to it (no reselect).
+  const activeBrandId = useAuthStore(s => s.user?.current_brand_id ?? null);
   const [form, setForm] = useState<Partial<CreateClientRequest>>({});
   const [error, setError] = useState('');
 
@@ -424,7 +427,11 @@ function ClientEditDialog({ open, onOpenChange, client, brands, onSave, saving }
           </div>
           <div>
             <Label className="text-xs font-medium">Brand</Label>
-            <Select value={form.brand != null ? String(form.brand) : ''} onValueChange={value => set('brand', value ? Number(value) : null)}>
+            <Select
+              value={(form.brand ?? activeBrandId) != null ? String(form.brand ?? activeBrandId) : ''}
+              onValueChange={value => set('brand', value ? Number(value) : null)}
+              disabled={activeBrandId != null}
+            >
               <SelectTrigger className="h-9 mt-1"><SelectValue placeholder="Select brand" /></SelectTrigger>
               <SelectContent>
                 {brands.map(brand => <SelectItem key={brand.id} value={String(brand.id)}>{brand.name}</SelectItem>)}

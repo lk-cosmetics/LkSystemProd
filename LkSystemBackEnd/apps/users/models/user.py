@@ -107,7 +107,22 @@ class User(AbstractUser):
         verbose_name='Active Brand',
         help_text='Active brand workspace; must belong to current_company.'
     )
-    
+
+    # Permanent sales-point assignment for operational accounts (Employee /
+    # Cashier). When set, data scoping confines the user to EXACTLY this one
+    # sales channel — stronger than current_brand, which only narrows to a
+    # brand. NULL for managers/admins, who are scoped by brand/company instead.
+    assigned_sales_channel = models.ForeignKey(
+        'sales_channels.SalesChannel',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        verbose_name='Assigned Sales Point',
+        help_text='Operational accounts (Employee/Cashier) are locked to this '
+                  'sales channel for all data they can see.'
+    )
+
     # Additional fields
     first_name = models.CharField(max_length=150, blank=True)
     last_name = models.CharField(max_length=150, blank=True)

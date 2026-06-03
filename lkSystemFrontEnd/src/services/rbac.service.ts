@@ -31,6 +31,8 @@ export interface RBACRole {
   permissions: string[]; // codenames (detail) or count (list)
   permissions_count?: number;
   assignments_count?: number;
+  /** Operational role (Employee/Cashier) that must be pinned to a sales point. */
+  requires_sales_point?: boolean;
   is_system: boolean;
   created_at: string;
   updated_at: string;
@@ -41,6 +43,9 @@ export interface RoleCreateRequest {
   description?: string;
   scope_type: 'platform' | 'company' | 'brand' | 'channel';
   company?: number | null;
+  /** Super-Admin only: create a global default role (company=null), visible to
+   * every company. Ignored for non-platform users (backend forces their company). */
+  is_global?: boolean;
   permissions: string[]; // codenames
 }
 
@@ -128,5 +133,12 @@ export const rbacService = {
       .post(`${BASE}/assignments/revoke/`, {
         assignment_id: assignmentId,
       })
+      .then(r => r.data),
+
+  /** Replace a user's role with a single new one (Edit User → Role dropdown).
+   * The backend derives the scope from the role + the user's brand/sales-point. */
+  setRole: (data: { user_id: number; role_id: number }) =>
+    apiClient
+      .post<{ detail: string; roles: string[] }>(`${BASE}/assignments/set-role/`, data)
       .then(r => r.data),
 };

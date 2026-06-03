@@ -161,39 +161,55 @@ class AuthService {
       );
     }
 
-    const user = data.user;
+    return this.mapAndStoreUser(data.user);
+  }
+
+  /**
+   * Map a backend identity payload to the frontend ``User`` shape and persist
+   * the non-sensitive display copy (so it survives a page refresh). Shared by
+   * the workspace switch and the live identity refresh.
+   */
+  private mapAndStoreUser(user: User): User {
     const [firstName, ...lastNameParts] = (user.full_name || '').split(' ');
     const lastName = lastNameParts.join(' ');
+    const roles = user.roles ?? (user.role ? [user.role] : []);
     const transformedUser: User = {
       ...user,
-      roles: user.roles ?? (user.role ? [user.role] : []),
+      roles,
       firstName: firstName || '',
       lastName: lastName || '',
-    };
-
-    const userDisplay = {
-      id: user.id,
-      matricule: user.matricule,
-      firstName: firstName || '',
-      lastName: lastName || '',
-      email: user.email,
-      full_name: user.full_name,
-      role: user.role,
-      roles: user.roles ?? (user.role ? [user.role] : []),
-      permissions: user.permissions ?? [],
-      is_superuser: user.is_superuser ?? false,
-      can_switch_brands: user.can_switch_brands,
-      company_id: user.company_id,
-      company_name: user.company_name ?? null,
-      current_brand_id: user.current_brand_id ?? null,
-      allowed_brand_ids: user.allowed_brand_ids,
     };
     localStorage.setItem(
       AUTH_CONFIG.STORAGE_KEY.USER_DISPLAY,
-      JSON.stringify(userDisplay)
+      JSON.stringify({
+        id: user.id,
+        matricule: user.matricule,
+        firstName: firstName || '',
+        lastName: lastName || '',
+        email: user.email,
+        full_name: user.full_name,
+        role: user.role,
+        roles,
+        permissions: user.permissions ?? [],
+        is_superuser: user.is_superuser ?? false,
+        can_switch_brands: user.can_switch_brands,
+        company_id: user.company_id,
+        company_name: user.company_name ?? null,
+        current_brand_id: user.current_brand_id ?? null,
+        allowed_brand_ids: user.allowed_brand_ids,
+      }),
     );
-
     return transformedUser;
+  }
+
+  /**
+   * Fetch the caller's identity with permissions recomputed live on the server
+   * and refresh the persisted user. Lets an admin's role/permission change take
+   * effect in the UI without a logout/login.
+   */
+  async refreshIdentity(): Promise<User> {
+    const { data } = await apiClient.get<{ user: User }>('/api/v1/auth/me/');
+    return this.mapAndStoreUser(data.user);
   }
 
   /**

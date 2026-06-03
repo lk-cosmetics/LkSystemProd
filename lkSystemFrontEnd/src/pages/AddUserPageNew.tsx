@@ -191,7 +191,9 @@ export default function AddUserPage() {
       return;
     }
     rbacService
-      .getRoles({ company: selectedCompany })
+      // assignable: true → backend returns only roles at or below the logged-in
+      // user's level (e.g. a Brand Manager never sees CEO / Company Manager).
+      .getRoles({ company: selectedCompany, assignable: true })
       .then(setRoles)
       .catch(() => setRoles([]));
   }, [selectedCompany]);

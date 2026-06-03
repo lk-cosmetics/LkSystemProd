@@ -20,6 +20,7 @@ import {
   FileText,
   X,
   Eye,
+  Store,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -47,7 +48,9 @@ import { userService } from '@/services/user.service';
 import { profileService } from '@/services/profile.service';
 import { companyService } from '@/services/company.service';
 import { brandService } from '@/services/brand.service';
-import type { UserDetails, CompanyListItem, Brand } from '@/types';
+import { rbacService, type RBACRole } from '@/services/rbac.service';
+import { salesChannelService } from '@/services/salesChannel.service';
+import type { UserDetails, CompanyListItem, Brand, SalesChannel } from '@/types';
 import { toast } from 'sonner';
 
 // Tunisia cities constant
@@ -107,6 +110,12 @@ export default function EditUserPage() {
   const [brands, setBrands] = useState<Brand[]>([]);
   const [filteredBrands, setFilteredBrands] = useState<Brand[]>([]);
   const [selectedBrands, setSelectedBrands] = useState<number[]>([]);
+  const [roles, setRoles] = useState<RBACRole[]>([]);
+  const [selectedRoleId, setSelectedRoleId] = useState<string>('');
+  const [initialRoleId, setInitialRoleId] = useState<string>('');
+  // Sales point (channel) for operational roles (Employee / Cashier).
+  const [salesChannels, setSalesChannels] = useState<SalesChannel[]>([]);
+  const [selectedSalesChannelId, setSelectedSalesChannelId] = useState<string>('');
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [activeTab, setActiveTab] = useState('basic');
@@ -141,6 +150,43 @@ export default function EditUserPage() {
 
   const selectedCompany = watch('current_company');
 
+  // Load the roles the logged-in user is allowed to assign for the selected
+  // company (backend filters by the caller's permission ceiling).
+  useEffect(() => {
+    if (!selectedCompany) { setRoles([]); return; }
+    rbacService
+      .getRoles({ company: selectedCompany, assignable: true })
+      .then(setRoles)
+      .catch(() => setRoles([]));
+  }, [selectedCompany]);
+
+  // Initialise the role dropdown from the user's current role once both load.
+  useEffect(() => {
+    if (!user || roles.length === 0 || initialRoleId) return;
+    const current = roles.find(r => r.name === user.role_name);
+    if (current) {
+      setInitialRoleId(String(current.id));
+      setSelectedRoleId(String(current.id));
+    }
+  }, [user, roles, initialRoleId]);
+
+  // Operational roles (Employee / Cashier) must be pinned to one sales point.
+  const selectedRole = roles.find(r => String(r.id) === selectedRoleId);
+  const requiresSalesPoint = !!selectedRole?.requires_sales_point;
+
+  // Load the sales channels the user can be pinned to (those of their brands),
+  // mirroring the Add-User dialog so the sales point can be set here too.
+  useEffect(() => {
+    if (selectedBrands.length === 0) {
+      setSalesChannels([]);
+      return;
+    }
+    salesChannelService
+      .getAllChannels()
+      .then(all => setSalesChannels(all.filter(ch => selectedBrands.includes(ch.brand))))
+      .catch(() => setSalesChannels([]));
+  }, [selectedBrands]);
+
   // Fetch initial data
   useEffect(() => {
     const fetchData = async () => {
@@ -159,6 +205,9 @@ export default function EditUserPage() {
         setCompanies(companiesData);
         setBrands(brandsData);
         setSelectedBrands(userData.allowed_brands);
+        if (userData.assigned_sales_channel) {
+          setSelectedSalesChannelId(String(userData.assigned_sales_channel));
+        }
 
         // Set avatar preview from existing data
         if (userData.profile?.avatar) {
@@ -289,6 +338,16 @@ export default function EditUserPage() {
   const onSubmit = async (data: EditUserFormData) => {
     if (!user) return;
 
+    // Operational roles (Employee / Cashier) must be pinned to a sales point.
+    if (requiresSalesPoint && !selectedSalesChannelId) {
+      toast.error(
+        salesChannels.length === 0
+          ? 'This role works at a single sales point — give the user brand access, then pick a sales point.'
+          : 'This role works at a single sales point — pick a sales point.'
+      );
+      return;
+    }
+
     setIsSaving(true);
     try {
       // Update user basic info
@@ -300,6 +359,12 @@ export default function EditUserPage() {
         allowed_brands: selectedBrands,
         can_switch_brands: data.can_switch_brands,
         is_active: data.is_active,
+        // Pin (or clear) the sales point. Operational roles get the chosen
+        // channel; other roles clear it. Saved before setRole, which reads it.
+        assigned_sales_channel:
+          requiresSalesPoint && selectedSalesChannelId
+            ? Number(selectedSalesChannelId)
+            : null,
       });
 
       // Update profile with files if user has a profile
@@ -336,11 +401,24 @@ export default function EditUserPage() {
         }
       }
 
+      // Apply a role change (if any) through the guarded RBAC endpoint, which
+      // replaces the user's role at the scope it implies. Done last so the
+      // basic-info save isn't blocked by a role-specific validation error.
+      if (selectedRoleId && selectedRoleId !== initialRoleId) {
+        await rbacService.setRole({
+          user_id: Number(user.id),
+          role_id: Number(selectedRoleId),
+        });
+        setInitialRoleId(selectedRoleId);
+      }
+
       toast.success('User updated successfully');
       navigate(`/dashboard/users/${user.id}`);
     } catch (error) {
       console.error('Failed to update user:', error);
-      toast.error('Failed to update user');
+      const detail = (error as { response?: { data?: { detail?: string } } })
+        ?.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Failed to update user');
     } finally {
       setIsSaving(false);
     }
@@ -860,14 +938,67 @@ export default function EditUserPage() {
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="space-y-2">
-                    <Label>Role</Label>
-                    <p className="text-sm font-medium capitalize px-3 py-2 rounded-md border bg-l-bg-2 dark:bg-d-bg-2">
-                      {user?.role_name || 'No role assigned'}
-                    </p>
+                    <Label htmlFor="role">Role</Label>
+                    <Select
+                      value={selectedRoleId}
+                      onValueChange={setSelectedRoleId}
+                      disabled={!selectedCompany || roles.length === 0}
+                    >
+                      <SelectTrigger>
+                        <Shield className="size-4 mr-2" />
+                        <SelectValue
+                          placeholder={
+                            selectedCompany ? 'Select a role' : 'Select a company first'
+                          }
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {roles.map(r => (
+                          <SelectItem key={r.id} value={String(r.id)}>
+                            {r.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                     <p className="text-xs text-l-text-3 dark:text-d-text-3">
-                      Roles are managed via RBAC assignments
+                      Only roles you are allowed to assign are shown. The role is
+                      applied at the scope it implies (company / brand / sales point).
                     </p>
                   </div>
+
+                  {/* Sales point — required for operational roles (Employee / Cashier) */}
+                  {requiresSalesPoint && (
+                    <div className="space-y-2">
+                      <Label htmlFor="sales-point">Sales Point *</Label>
+                      <Select
+                        value={selectedSalesChannelId}
+                        onValueChange={setSelectedSalesChannelId}
+                        disabled={salesChannels.length === 0}
+                      >
+                        <SelectTrigger>
+                          <Store className="size-4 mr-2" />
+                          <SelectValue
+                            placeholder={
+                              salesChannels.length === 0
+                                ? 'Give the user brand access first'
+                                : 'Select a sales point'
+                            }
+                          />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {salesChannels.map(ch => (
+                            <SelectItem key={ch.id} value={String(ch.id)}>
+                              {ch.name} ({ch.brand_name})
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-l-text-3 dark:text-d-text-3">
+                        {selectedRole?.name} works at a single sales point — their
+                        orders and POS are confined to it.
+                      </p>
+                    </div>
+                  )}
 
                   <div className="space-y-2">
                     <Label htmlFor="company">Company</Label>
