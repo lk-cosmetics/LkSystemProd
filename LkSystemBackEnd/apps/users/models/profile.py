@@ -250,5 +250,12 @@ class Profile(models.Model):
     
     def save(self, *args, **kwargs):
         """Update is_complete flag before saving."""
+        # ``cin_number`` is unique, so a blank value MUST be stored as NULL,
+        # never as ''. Postgres treats NULLs as distinct but '' as a single
+        # real value — so two profiles saved without a CIN would collide on the
+        # unique constraint and raise an IntegrityError (HTTP 500). Normalising
+        # '' → None lets any number of profiles legitimately have no CIN.
+        if not self.cin_number:
+            self.cin_number = None
         self.is_complete = self.check_completeness()
         super().save(*args, **kwargs)

@@ -258,6 +258,10 @@ class UserDetailSerializer(serializers.ModelSerializer):
     # drilling through the nested profile object every time it wants to
     # render an <Avatar> in the quick-view dialog.
     avatar = serializers.SerializerMethodField()
+    # Sales point an operational account (Employee / Cashier) is pinned to.
+    assigned_sales_channel_name = serializers.CharField(
+        source='assigned_sales_channel.name', read_only=True, default=None
+    )
 
     class Meta:
         model = User
@@ -274,6 +278,8 @@ class UserDetailSerializer(serializers.ModelSerializer):
             'allowed_brands',
             'allowed_brand_ids',
             'allowed_brand_names',
+            'assigned_sales_channel',
+            'assigned_sales_channel_name',
             'can_switch_brands',
             'is_active',
             'is_staff',
@@ -586,6 +592,7 @@ class UpdateUserSerializer(serializers.ModelSerializer):
             'last_name',
             'current_company',
             'allowed_brands',
+            'assigned_sales_channel',
             'is_active',
         ]
 
@@ -642,6 +649,26 @@ class UpdateUserSerializer(serializers.ModelSerializer):
                             f"{', '.join(invalid)}"
                         ),
                     })
+
+        # ``assigned_sales_channel`` pins an operational account (Employee /
+        # Cashier) to a single sales point. Validate it against the effective
+        # company and the user's brand access so a sales point can never be set
+        # outside the tenant — or in a brand the user cannot reach.
+        channel = attrs.get('assigned_sales_channel')
+        if channel is not None:
+            eff_company_id = getattr(effective_company, 'id', None)
+            if not eff_company_id or channel.brand.company_id != eff_company_id:
+                raise serializers.ValidationError({
+                    'assigned_sales_channel': "Sales channel does not belong to the user's company.",
+                })
+            eff_brands = attrs.get('allowed_brands')
+            if eff_brands is None and instance is not None:
+                eff_brands = list(instance.allowed_brands.all())
+            eff_brand_ids = {getattr(b, 'id', b) for b in (eff_brands or [])}
+            if eff_brand_ids and channel.brand_id not in eff_brand_ids:
+                raise serializers.ValidationError({
+                    'assigned_sales_channel': "Sales channel must belong to one of the user's brands.",
+                })
         return attrs
 
     @transaction.atomic
@@ -706,6 +733,19 @@ class UpdateUserSerializer(serializers.ModelSerializer):
                     changed = True
                 if changed:
                     ur.save(update_fields=['company', 'brand', 'sales_channel'])
+
+        # Keep channel-scoped role rows (e.g. Cashier) pinned to the user's
+        # current sales point. Changing ``assigned_sales_channel`` without a
+        # role change would otherwise leave the existing UserRole resolving
+        # permissions at the OLD sales point.
+        if 'assigned_sales_channel' in validated_data:
+            from apps.rbac.models import UserRole
+            new_channel_id = user.assigned_sales_channel_id
+            if new_channel_id:
+                (UserRole.objects
+                 .filter(user=user, role__scope_type='channel')
+                 .exclude(sales_channel_id=new_channel_id)
+                 .update(sales_channel_id=new_channel_id))
 
         return user
 

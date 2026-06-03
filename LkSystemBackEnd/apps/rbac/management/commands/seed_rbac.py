@@ -58,6 +58,7 @@ class Command(BaseCommand):
         self._seed_permissions()
         self._cleanup_legacy_permissions()
         self._seed_roles()
+        self._provision_company_role_sets()
         self._sync_company_role_copies()
         self._ensure_superusers_have_rbac_role()
 
@@ -157,6 +158,40 @@ class Command(BaseCommand):
                 f'  Role "{role_name}": {action} '
                 f'(now has {role.permissions.count()} permissions)'
             )
+
+    # ── Per-company role provisioning (create missing copies) ────────────
+
+    def _provision_company_role_sets(self):
+        """Ensure every company owns a copy of **every** business-role template.
+
+        ``provision_company_roles`` normally runs once, at company creation. A
+        template role introduced *later* (e.g. ``Employee`` was added after some
+        tenants already existed) is therefore missing from every company that
+        predates it — the company silently lacks that role, and it never appears
+        on the Roles page. ``_sync_company_role_copies`` only tops up the
+        permissions of copies that already exist; it does not create absent ones.
+
+        Because ``provision_company_roles`` is idempotent (``get_or_create``),
+        calling it here for every company creates only the *missing* copies and
+        leaves existing roles untouched. With ``--reset-system-roles`` it also
+        forces each copy's permissions back to its template.
+        """
+        from django.apps import apps
+
+        from apps.rbac.provisioning import provision_company_roles
+
+        Company = apps.get_model('company', 'Company')
+        companies = 0
+        created = 0
+        for company in Company.objects.all():
+            touched = provision_company_roles(company, reset=self._reset)
+            created += len(touched)
+            companies += 1
+
+        self.stdout.write(
+            f'  Company role sets: ensured {companies} compan(y/ies) own every '
+            f'template role ({created} created/reset).'
+        )
 
     # ── Per-company role copies ─────────────────────────────────────────
 

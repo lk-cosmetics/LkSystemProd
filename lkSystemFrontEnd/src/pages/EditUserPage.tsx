@@ -20,6 +20,7 @@ import {
   FileText,
   X,
   Eye,
+  Store,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -48,7 +49,8 @@ import { profileService } from '@/services/profile.service';
 import { companyService } from '@/services/company.service';
 import { brandService } from '@/services/brand.service';
 import { rbacService, type RBACRole } from '@/services/rbac.service';
-import type { UserDetails, CompanyListItem, Brand } from '@/types';
+import { salesChannelService } from '@/services/salesChannel.service';
+import type { UserDetails, CompanyListItem, Brand, SalesChannel } from '@/types';
 import { toast } from 'sonner';
 
 // Tunisia cities constant
@@ -111,6 +113,9 @@ export default function EditUserPage() {
   const [roles, setRoles] = useState<RBACRole[]>([]);
   const [selectedRoleId, setSelectedRoleId] = useState<string>('');
   const [initialRoleId, setInitialRoleId] = useState<string>('');
+  // Sales point (channel) for operational roles (Employee / Cashier).
+  const [salesChannels, setSalesChannels] = useState<SalesChannel[]>([]);
+  const [selectedSalesChannelId, setSelectedSalesChannelId] = useState<string>('');
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [activeTab, setActiveTab] = useState('basic');
@@ -165,6 +170,23 @@ export default function EditUserPage() {
     }
   }, [user, roles, initialRoleId]);
 
+  // Operational roles (Employee / Cashier) must be pinned to one sales point.
+  const selectedRole = roles.find(r => String(r.id) === selectedRoleId);
+  const requiresSalesPoint = !!selectedRole?.requires_sales_point;
+
+  // Load the sales channels the user can be pinned to (those of their brands),
+  // mirroring the Add-User dialog so the sales point can be set here too.
+  useEffect(() => {
+    if (selectedBrands.length === 0) {
+      setSalesChannels([]);
+      return;
+    }
+    salesChannelService
+      .getAllChannels()
+      .then(all => setSalesChannels(all.filter(ch => selectedBrands.includes(ch.brand))))
+      .catch(() => setSalesChannels([]));
+  }, [selectedBrands]);
+
   // Fetch initial data
   useEffect(() => {
     const fetchData = async () => {
@@ -183,6 +205,9 @@ export default function EditUserPage() {
         setCompanies(companiesData);
         setBrands(brandsData);
         setSelectedBrands(userData.allowed_brands);
+        if (userData.assigned_sales_channel) {
+          setSelectedSalesChannelId(String(userData.assigned_sales_channel));
+        }
 
         // Set avatar preview from existing data
         if (userData.profile?.avatar) {
@@ -313,6 +338,16 @@ export default function EditUserPage() {
   const onSubmit = async (data: EditUserFormData) => {
     if (!user) return;
 
+    // Operational roles (Employee / Cashier) must be pinned to a sales point.
+    if (requiresSalesPoint && !selectedSalesChannelId) {
+      toast.error(
+        salesChannels.length === 0
+          ? 'This role works at a single sales point — give the user brand access, then pick a sales point.'
+          : 'This role works at a single sales point — pick a sales point.'
+      );
+      return;
+    }
+
     setIsSaving(true);
     try {
       // Update user basic info
@@ -324,6 +359,12 @@ export default function EditUserPage() {
         allowed_brands: selectedBrands,
         can_switch_brands: data.can_switch_brands,
         is_active: data.is_active,
+        // Pin (or clear) the sales point. Operational roles get the chosen
+        // channel; other roles clear it. Saved before setRole, which reads it.
+        assigned_sales_channel:
+          requiresSalesPoint && selectedSalesChannelId
+            ? Number(selectedSalesChannelId)
+            : null,
       });
 
       // Update profile with files if user has a profile
@@ -924,6 +965,40 @@ export default function EditUserPage() {
                       applied at the scope it implies (company / brand / sales point).
                     </p>
                   </div>
+
+                  {/* Sales point — required for operational roles (Employee / Cashier) */}
+                  {requiresSalesPoint && (
+                    <div className="space-y-2">
+                      <Label htmlFor="sales-point">Sales Point *</Label>
+                      <Select
+                        value={selectedSalesChannelId}
+                        onValueChange={setSelectedSalesChannelId}
+                        disabled={salesChannels.length === 0}
+                      >
+                        <SelectTrigger>
+                          <Store className="size-4 mr-2" />
+                          <SelectValue
+                            placeholder={
+                              salesChannels.length === 0
+                                ? 'Give the user brand access first'
+                                : 'Select a sales point'
+                            }
+                          />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {salesChannels.map(ch => (
+                            <SelectItem key={ch.id} value={String(ch.id)}>
+                              {ch.name} ({ch.brand_name})
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-l-text-3 dark:text-d-text-3">
+                        {selectedRole?.name} works at a single sales point — their
+                        orders and POS are confined to it.
+                      </p>
+                    </div>
+                  )}
 
                   <div className="space-y-2">
                     <Label htmlFor="company">Company</Label>

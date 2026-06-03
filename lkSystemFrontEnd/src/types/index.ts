@@ -151,6 +151,8 @@ export interface UserDetails {
   company_name: string | null;
   allowed_brands: number[];
   allowed_brand_names: string[];
+  assigned_sales_channel?: number | null;
+  assigned_sales_channel_name?: string | null;
   is_active: boolean;
   is_staff?: boolean;
   is_superuser?: boolean;
@@ -499,6 +501,8 @@ export interface UpdateUserFullRequest {
   last_name?: string;
   current_company?: number | null;
   allowed_brands?: number[];
+  /** Sales point for operational roles (Employee / Cashier); null to clear. */
+  assigned_sales_channel?: number | null;
   can_switch_brands?: boolean;
   is_active?: boolean;
 }
