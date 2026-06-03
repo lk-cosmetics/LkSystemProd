@@ -410,9 +410,15 @@ Get or update the currently authenticated user details.
             return Response(serializer.data)
         
         # For PATCH/PUT - update user data
-        # Restrict certain fields that users cannot change themselves
+        # Restrict authorization-relevant fields that users cannot change for
+        # themselves. ``assigned_sales_channel`` confines an operational account
+        # to a sales point, so self-service editing would let a Cashier/Employee
+        # re-scope their own data — it belongs with company/role/brands here.
         data = request.data.copy()
-        restricted_fields = ['current_company', 'allowed_brands', 'is_active', 'is_staff', 'is_superuser', 'matricule']
+        restricted_fields = [
+            'current_company', 'allowed_brands', 'assigned_sales_channel',
+            'is_active', 'is_staff', 'is_superuser', 'matricule',
+        ]
         for field in restricted_fields:
             data.pop(field, None)
         

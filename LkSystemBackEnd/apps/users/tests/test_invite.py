@@ -23,6 +23,7 @@ from apps.brands.models import Brand
 from apps.company.models import Company
 from apps.rbac.models import Role, UserRole
 from apps.rbac.provisioning import provision_company_roles
+from apps.sales_channels.models import SalesChannel
 from apps.users.api.serializers import InviteEmployeeSerializer
 
 User = get_user_model()
@@ -44,6 +45,11 @@ class InviteAuthorizationTests(TestCase):
 
         self.brand_a1 = Brand.objects.create(company=self.company_a, name='A1')
         self.brand_b1 = Brand.objects.create(company=self.company_b, name='B1')
+        # Operational roles (Employee/Cashier) are pinned to a sales point at
+        # invite time, so company A needs at least one channel for those tests.
+        self.channel_a1 = SalesChannel.objects.create(
+            brand=self.brand_a1, name='POS-A1', channel_type='POS',
+        )
 
         self.ceo_role_a = Role.objects.get(name='CEO', company=self.company_a)
         self.employee_a = Role.objects.get(name='Employee', company=self.company_a)
@@ -67,6 +73,7 @@ class InviteAuthorizationTests(TestCase):
         ok, errors = self._check({
             'email': 'e1@x.com', 'role_id': self.employee_a.id,
             'company_id': self.company_a.id,
+            'sales_channel_id': self.channel_a1.id,
         })
         self.assertTrue(ok, errors)
 

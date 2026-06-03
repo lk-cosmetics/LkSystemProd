@@ -444,7 +444,30 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
                 )
 
         return attrs
-    
+
+    def validate_cin_number(self, value):
+        """Normalise the CIN and reject duplicates/format errors with a 400.
+
+        This serializer redeclares ``cin_number`` as a plain ``CharField``,
+        which drops the model field's UniqueValidator AND RegexValidator. Without
+        this, a duplicate or malformed CIN reaches the DB as a raw IntegrityError
+        (HTTP 500) at create time instead of a clean field error. Mirrors
+        ``Profile.save()`` normalisation so blank/whitespace becomes NULL.
+        """
+        from django.core.validators import RegexValidator
+        from apps.users.models.profile import normalize_cin
+
+        cin = normalize_cin(value)
+        if cin is None:
+            return None
+        RegexValidator(
+            regex=r'^[A-Z0-9]+$',
+            message='CIN must contain only uppercase letters and numbers.',
+        )(cin)
+        if Profile.objects.filter(cin_number=cin).exists():
+            raise serializers.ValidationError('A profile with this CIN already exists.')
+        return cin
+
     def validate_allowed_brands(self, value):
         """
         CRITICAL VALIDATION: Ensure all brands belong to the user's company.
@@ -651,9 +674,10 @@ class UpdateUserSerializer(serializers.ModelSerializer):
                     })
 
         # ``assigned_sales_channel`` pins an operational account (Employee /
-        # Cashier) to a single sales point. Validate it against the effective
-        # company and the user's brand access so a sales point can never be set
-        # outside the tenant — or in a brand the user cannot reach.
+        # Cashier) to a single sales point. Validate it against (a) the effective
+        # company, (b) the user's brand access, and (c) the ACTOR's own reach, so
+        # a sales point can never be set outside the tenant, in a brand the user
+        # cannot reach, or beyond the editing manager's authority.
         channel = attrs.get('assigned_sales_channel')
         if channel is not None:
             eff_company_id = getattr(effective_company, 'id', None)
@@ -661,14 +685,35 @@ class UpdateUserSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'assigned_sales_channel': "Sales channel does not belong to the user's company.",
                 })
-            eff_brands = attrs.get('allowed_brands')
-            if eff_brands is None and instance is not None:
-                eff_brands = list(instance.allowed_brands.all())
-            eff_brand_ids = {getattr(b, 'id', b) for b in (eff_brands or [])}
-            if eff_brand_ids and channel.brand_id not in eff_brand_ids:
-                raise serializers.ValidationError({
-                    'assigned_sales_channel': "Sales channel must belong to one of the user's brands.",
-                })
+
+            # (b) The channel's brand must be one the user can reach. Skip only
+            # during a company move with no explicit brand list — the move
+            # cleanup in update() reconciles brands afterwards.
+            moving_company = (
+                instance is not None
+                and getattr(instance, 'current_company_id', None) != eff_company_id
+            )
+            if not (moving_company and 'allowed_brands' not in attrs):
+                eff_brands = attrs.get('allowed_brands')
+                if eff_brands is None and instance is not None:
+                    eff_brands = list(instance.allowed_brands.all())
+                eff_brand_ids = {getattr(b, 'id', b) for b in (eff_brands or [])}
+                if channel.brand_id not in eff_brand_ids:
+                    raise serializers.ValidationError({
+                        'assigned_sales_channel': "Sales channel must belong to one of the user's brands.",
+                    })
+
+            # (c) A non-platform actor may only pin a user to a sales point
+            # within their own reach — never escalate beyond their authority.
+            request = self.context.get('request')
+            actor = getattr(request, 'user', None) if request else None
+            if actor is not None and not self._is_platform_admin():
+                from apps.rbac.services import visible_sales_channel_ids
+                reachable = visible_sales_channel_ids(actor)
+                if reachable is not None and channel.id not in reachable:
+                    raise serializers.ValidationError({
+                        'assigned_sales_channel': 'That sales point is outside your scope.',
+                    })
         return attrs
 
     @transaction.atomic
@@ -734,18 +779,26 @@ class UpdateUserSerializer(serializers.ModelSerializer):
                 if changed:
                     ur.save(update_fields=['company', 'brand', 'sales_channel'])
 
-        # Keep channel-scoped role rows (e.g. Cashier) pinned to the user's
-        # current sales point. Changing ``assigned_sales_channel`` without a
-        # role change would otherwise leave the existing UserRole resolving
-        # permissions at the OLD sales point.
-        if 'assigned_sales_channel' in validated_data:
+            # The sales-point pin must not survive a tenant move — a channel from
+            # the old company would keep confining the user's data scope there.
+            if (user.assigned_sales_channel_id
+                    and user.assigned_sales_channel_id not in new_channel_ids):
+                user.assigned_sales_channel = None
+                user.save(update_fields=['assigned_sales_channel'])
+
+        # Keep channel-scoped role rows (e.g. Cashier) pinned COHERENTLY to the
+        # user's current sales point — company, brand AND sales_channel together,
+        # so the permission resolver and every scope read agree (setting only
+        # sales_channel would leave brand/company pointing at the old scope).
+        # Clearing the sales point is handled by a role change via set-role.
+        if 'assigned_sales_channel' in validated_data and user.assigned_sales_channel_id:
             from apps.rbac.models import UserRole
-            new_channel_id = user.assigned_sales_channel_id
-            if new_channel_id:
-                (UserRole.objects
-                 .filter(user=user, role__scope_type='channel')
-                 .exclude(sales_channel_id=new_channel_id)
-                 .update(sales_channel_id=new_channel_id))
+            channel = user.assigned_sales_channel
+            target_scope = (channel.brand.company_id, channel.brand_id, channel.id)
+            for ur in UserRole.objects.filter(user=user, role__scope_type='channel'):
+                if (ur.company_id, ur.brand_id, ur.sales_channel_id) != target_scope:
+                    ur.company_id, ur.brand_id, ur.sales_channel_id = target_scope
+                    ur.save(update_fields=['company', 'brand', 'sales_channel'])
 
         return user
 

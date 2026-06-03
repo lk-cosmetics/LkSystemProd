@@ -505,7 +505,7 @@ class AssignmentViewSet(viewsets.ViewSet):
         """
         from rest_framework.exceptions import PermissionDenied
         from django.db import transaction
-        from apps.rbac.services import scope_kwargs_for_role
+        from apps.rbac.services import role_requires_sales_point, scope_kwargs_for_role
 
         actor = request.user
         self._require_assign_permission(actor)
@@ -577,6 +577,13 @@ class AssignmentViewSet(viewsets.ViewSet):
                     role, company=company, brands=brands, sales_channel=sales_channel,
                 )
                 UserRole.objects.create(user=target, role=role, assigned_by=actor, **kwargs)
+
+            # Sync the user's sales-point pin to the new role: operational roles
+            # (Employee / Cashier) keep it; any other role must not leave the
+            # account confined to a POS, so clear it.
+            if not role_requires_sales_point(role) and target.assigned_sales_channel_id is not None:
+                target.assigned_sales_channel = None
+                target.save(update_fields=['assigned_sales_channel'])
 
         return Response({
             'detail': 'Role updated.',

@@ -178,19 +178,25 @@ class Command(BaseCommand):
         """
         from django.apps import apps
 
+        from apps.rbac.models import AppPermission
         from apps.rbac.provisioning import provision_company_roles
 
         Company = apps.get_model('company', 'Company')
+        # Build the permission map ONCE and reuse it across companies instead of
+        # re-scanning the table per company. Only CREATE missing copies here;
+        # ``_sync_company_role_copies`` (next step) owns permission flooring and
+        # ``--reset``, so we never set a copy's permissions twice.
+        perm_by_code = {p.codename: p for p in AppPermission.objects.all()}
         companies = 0
         created = 0
         for company in Company.objects.all():
-            touched = provision_company_roles(company, reset=self._reset)
+            touched = provision_company_roles(company, perm_by_code=perm_by_code)
             created += len(touched)
             companies += 1
 
         self.stdout.write(
             f'  Company role sets: ensured {companies} compan(y/ies) own every '
-            f'template role ({created} created/reset).'
+            f'template role ({created} created).'
         )
 
     # ── Per-company role copies ─────────────────────────────────────────
