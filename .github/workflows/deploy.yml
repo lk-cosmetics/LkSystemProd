@@ -79,6 +79,21 @@ jobs:
           VPS_PROJECT_PATH: ${{ secrets.VPS_PROJECT_PATH }}
           PRODUCTION_DOMAIN: ${{ secrets.PRODUCTION_DOMAIN }}
 
+      - name: Check SSH reachability
+        run: |
+          set -euo pipefail
+          port="${SSH_PORT:-22}"
+          echo "Checking SSH TCP reachability on configured host and port..."
+          getent ahosts "$SSH_HOST" | head -n 5 || true
+          if ! timeout 20 bash -c "cat < /dev/null > /dev/tcp/${SSH_HOST}/${port}"; then
+            echo "::error::Cannot reach SSH on the configured host/port. Check SSH_HOST, SSH_PORT, VPS firewall, hosting firewall, and whether GitHub Actions runners are allowed."
+            exit 1
+          fi
+          echo "SSH TCP port is reachable."
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -86,6 +101,8 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT || 22 }}
+          timeout: 30s
+          command_timeout: 20m
           # Stop the deploy as soon as anything goes wrong rather than ending
           # up with a half-rebuilt stack.
           script_stop: true
