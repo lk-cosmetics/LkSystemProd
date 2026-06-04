@@ -136,6 +136,7 @@ export default function CompaniesPage() {
   // Dialog states
   const [selectedCompany, setSelectedCompany] = useState<Company | null>(null);
   const [companyToDelete, setCompanyToDelete] = useState<CompanyListItem | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [companyToToggle, setCompanyToToggle] = useState<CompanyListItem | null>(null);
   const [editFormData, setEditFormData] = useState<Company | null>(null);
 
@@ -169,11 +170,24 @@ export default function CompaniesPage() {
 
     if (data !== undefined) {
       
-      // Handle field-specific errors
-      if (typeof data === 'object' && !Array.isArray(data) && data !== null) {
+      // Plain string body.
+      if (typeof data === 'string') {
+        return data;
+      }
+      // Object body — prefer DRF's standard top-level detail/message (e.g. the
+      // 409 "can't delete, still referenced" message) before falling back to
+      // per-field validation errors.
+      else if (typeof data === 'object' && data !== null && !Array.isArray(data)) {
+        const detail = (data as ApiError).detail;
+        if (typeof detail === 'string') return detail;
+        const topMsg = (data as ApiError).message;
+        if (typeof topMsg === 'string') return topMsg;
+
+        // Field-specific validation errors. ``status_code`` is appended to every
+        // error payload by the API's exception handler — skip it.
         const fieldErrors: string[] = [];
-        
         Object.entries(data as Record<string, unknown>).forEach(([field, messages]) => {
+          if (field === 'status_code') return;
           const fieldName = field.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
           if (Array.isArray(messages)) {
             messages.forEach(msg => fieldErrors.push(`${fieldName}: ${msg}`));
@@ -181,22 +195,10 @@ export default function CompaniesPage() {
             fieldErrors.push(`${fieldName}: ${messages}`);
           }
         });
-        
+
         if (fieldErrors.length > 0) {
           return 'Validation errors:\n\n' + fieldErrors.join('\n');
         }
-      }
-      // Handle string error
-      else if (typeof data === 'string') {
-        return data;
-      }
-      // Handle detail or message
-      else if (typeof data === 'object' && data !== null && 'detail' in data) {
-        const detail = (data as ApiError).detail;
-        if (typeof detail === 'string') return detail;
-      } else if (typeof data === 'object' && data !== null && 'message' in data) {
-        const msg = (data as ApiError).message;
-        if (typeof msg === 'string') return msg;
       }
     }
     // Handle network errors
@@ -321,6 +323,7 @@ export default function CompaniesPage() {
 
   const handleDelete = useCallback((company: CompanyListItem) => {
     setCompanyToDelete(company);
+    setDeleteConfirmText('');
     setDeleteDialog(true);
   }, []);
 
@@ -1210,20 +1213,49 @@ export default function CompaniesPage() {
       </Dialog>
 
       {/* Delete Confirmation Dialog */}
-      <AlertDialog open={deleteDialog} onOpenChange={setDeleteDialog}>
+      <AlertDialog
+        open={deleteDialog}
+        onOpenChange={open => {
+          setDeleteDialog(open);
+          if (!open) setDeleteConfirmText('');
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Company</AlertDialogTitle>
+            <AlertDialogTitle className="text-red-600 dark:text-red-500">
+              Delete company — this cannot be undone
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete <strong>{companyToDelete?.name}</strong>?
-              This action cannot be undone and will permanently remove the company and all associated data.
+              This permanently deletes <strong>{companyToDelete?.name}</strong> and{' '}
+              <strong>all of its data</strong> — brands, sales channels, products,
+              inventory, orders, clients, promotions, roles and its staff accounts.
+              There is no way to recover it.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <div className="space-y-1.5">
+            <p className="text-xs text-muted-foreground">
+              Type{' '}
+              <span className="font-mono font-semibold text-foreground">
+                {companyToDelete?.name}
+              </span>{' '}
+              to confirm
+            </p>
+            <Input
+              value={deleteConfirmText}
+              onChange={e => setDeleteConfirmText(e.target.value)}
+              placeholder={companyToDelete?.name ?? ''}
+              autoComplete="off"
+              autoFocus
+            />
+          </div>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={confirmDelete}
-              className="bg-red-600 hover:bg-red-700"
+              disabled={
+                deleteConfirmText.trim() !== (companyToDelete?.name ?? '').trim()
+              }
+              className="bg-red-600 hover:bg-red-700 disabled:pointer-events-none disabled:opacity-50"
             >
               Delete Company
             </AlertDialogAction>

@@ -4,10 +4,47 @@ Provides detailed error logging for API requests.
 """
 
 import logging
+from collections import Counter
+
+from django.db.models.deletion import ProtectedError, RestrictedError
+from rest_framework import status
+from rest_framework.response import Response
 from rest_framework.views import exception_handler
 from rest_framework.exceptions import APIException
 
 logger = logging.getLogger('rest_framework')
+
+
+def _protected_delete_response(exc):
+    """Turn a Django ``ProtectedError`` / ``RestrictedError`` into a clean 409.
+
+    These are raised on delete when a ``PROTECT`` / ``RESTRICT`` foreign key
+    still references the row (e.g. deleting a Company that still owns users,
+    brands or orders). They are *not* DRF exceptions, so the default handler
+    returns ``None`` and they would otherwise surface as a raw HTTP 500. We
+    return a 409 Conflict naming what still depends on the record so the UI can
+    show a helpful message instead of a server-error page.
+    """
+    blocking = list(
+        getattr(exc, 'protected_objects', None)
+        or getattr(exc, 'restricted_objects', None)
+        or []
+    )
+    counts = Counter(obj.__class__ for obj in blocking)
+    parts = [
+        f"{n} {model._meta.verbose_name if n == 1 else model._meta.verbose_name_plural}"
+        for model, n in counts.items()
+    ]
+    summary = ', '.join(str(p) for p in parts) or 'related records'
+    return Response(
+        {
+            'detail': (
+                "This record can't be deleted because other data still depends "
+                f"on it ({summary}). Remove or reassign them first."
+            ),
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
 
 
 def custom_exception_handler(exc, context):
@@ -16,7 +53,12 @@ def custom_exception_handler(exc, context):
     """
     # Call REST framework's default exception handler first
     response = exception_handler(exc, context)
-    
+
+    # Django delete-protection errors aren't DRF exceptions — translate them to
+    # a clean 409 instead of letting them bubble up as an opaque 500.
+    if response is None and isinstance(exc, (ProtectedError, RestrictedError)):
+        response = _protected_delete_response(exc)
+
     # Get request info for logging
     request = context.get('request')
     view = context.get('view')

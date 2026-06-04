@@ -207,7 +207,18 @@ class CompanyViewSet(viewsets.ModelViewSet):
         company = serializer.save()
         from apps.rbac.provisioning import provision_company_roles
         provision_company_roles(company, created_by=self.request.user)
-    
+
+    def perform_destroy(self, instance):
+        """Platform-admin-only full tenant wipe.
+
+        The default ``instance.delete()`` hits PROTECT foreign keys (orders,
+        users, …) and fails. ``CompanyDeletionService`` removes the whole tenant
+        — brands, channels, products, inventory, orders, clients, promotions,
+        roles, notifications, BI rows and the company's employees — atomically.
+        """
+        from apps.company.services import CompanyDeletionService
+        CompanyDeletionService.delete(instance, actor=self.request.user)
+
     @extend_schema(
         tags=['Companies'],
         summary='Get company brands',
