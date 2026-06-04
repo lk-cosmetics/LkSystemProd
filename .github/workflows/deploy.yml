@@ -41,8 +41,12 @@ jobs:
             VITE_API_BASE_URL=
 
   deploy:
-    name: SSH deploy
-    runs-on: ubuntu-latest
+    name: Deploy (self-hosted runner on the VPS)
+    # Runs on a self-hosted runner installed ON the production VPS, so the deploy
+    # no longer needs inbound SSH from GitHub's (rotating) cloud IPs — which is
+    # what made "Cannot reach SSH host/port" fail intermittently. Register a
+    # runner on the box with the `lksystem` label (see deploy/README.md).
+    runs-on: [self-hosted, lksystem]
     needs: pre-deploy-checks
     environment:
       name: production
@@ -63,68 +67,41 @@ jobs:
           PRODUCTION_DOMAIN: ${{ secrets.PRODUCTION_DOMAIN }}
 
       - name: Validate required secrets
-        # Fail fast with a readable message rather than letting ssh-action
-        # spit out a cryptic "missing key" trace half a minute later.
+        # No SSH secrets needed any more — the runner is already on the VPS.
         run: |
-          for v in SSH_HOST SSH_USER SSH_PRIVATE_KEY VPS_PROJECT_PATH PRODUCTION_DOMAIN; do
+          for v in VPS_PROJECT_PATH PRODUCTION_DOMAIN; do
             if [ -z "${!v}" ]; then
               echo "::error::Required secret $v is not set in the 'production' environment."
               exit 1
             fi
           done
         env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           VPS_PROJECT_PATH: ${{ secrets.VPS_PROJECT_PATH }}
           PRODUCTION_DOMAIN: ${{ secrets.PRODUCTION_DOMAIN }}
 
-      - name: Check SSH reachability
+      - name: Deploy
+        # Runs directly on the VPS (the self-hosted runner's host). No SSH.
+        env:
+          VPS_PROJECT_PATH: ${{ secrets.VPS_PROJECT_PATH }}
+          PRODUCTION_DOMAIN: ${{ secrets.PRODUCTION_DOMAIN }}
         run: |
           set -euo pipefail
-          port="${SSH_PORT:-22}"
-          echo "Checking SSH TCP reachability on configured host and port..."
-          getent ahosts "$SSH_HOST" | head -n 5 || true
-          if ! timeout 20 bash -c "cat < /dev/null > /dev/tcp/${SSH_HOST}/${port}"; then
-            echo "::error::Cannot reach SSH on the configured host/port. Check SSH_HOST, SSH_PORT, VPS firewall, hosting firewall, and whether GitHub Actions runners are allowed."
-            exit 1
-          fi
-          echo "SSH TCP port is reachable."
-        env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
+          cd "$VPS_PROJECT_PATH"
 
-      - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
-          timeout: 30s
-          command_timeout: 20m
-          # Stop the deploy as soon as anything goes wrong rather than ending
-          # up with a half-rebuilt stack.
-          script_stop: true
-          script: |
-            set -euo pipefail
-            cd "${{ secrets.VPS_PROJECT_PATH }}"
+          echo "── Pulling latest main ───────────────────────────────────"
+          git fetch --all --prune
+          git reset --hard origin/main
 
-            echo "── Pulling latest main ───────────────────────────────────"
-            git fetch --all --prune
-            git reset --hard origin/main
+          echo "── Building & restarting containers ──────────────────────"
+          # Runs as the self-hosted runner's user, which must be in the docker
+          # group. deploy-production.sh skips its root-only TLS pre-flight when
+          # not root; nginx still gets the cert via the root Docker daemon's
+          # bind-mount of /etc/letsencrypt (see docker-compose.prod.yml). DOMAIN
+          # feeds compose interpolation (cert path, ALLOWED_HOSTS, …).
+          DOMAIN="$PRODUCTION_DOMAIN" bash deploy/deploy-production.sh
 
-            echo "── Building & restarting containers ──────────────────────"
-            # No sudo: runs as the (docker-group) deploy user. deploy-production.sh
-            # skips its root-only TLS pre-flight when not root, and nginx still
-            # gets the cert via the root Docker daemon's bind-mount of
-            # /etc/letsencrypt (see docker-compose.prod.yml). DOMAIN mirrors the
-            # working manual run and feeds compose interpolation (cert path,
-            # ALLOWED_HOSTS, …). Requires the deploy user to be in the docker group.
-            DOMAIN="${{ secrets.PRODUCTION_DOMAIN }}" bash deploy/deploy-production.sh
-
-            echo "── Pruning dangling images ───────────────────────────────"
-            docker image prune -f
+          echo "── Pruning dangling images ───────────────────────────────"
+          docker image prune -f
 
       - name: Health check
         # Probe the public domain over HTTPS. Retry a few times to ride out
