@@ -515,13 +515,20 @@ DELIVERY_API_TIMEOUT = config('DELIVERY_API_TIMEOUT', default=15, cast=int)
 # WOOCOMMERCE ORDER STATUS PUSH (local → WooCommerce)
 # =============================================================================
 
-# Local is ALWAYS the source of truth. When this gate is False (the default),
-# the system records the intended push and parks the order in ``pending_sync``
-# WITHOUT making any network call — so dev / test / not-yet-configured
-# environments never touch WooCommerce. Flip WC_ORDER_PUSH_ENABLED=true in .env
-# once the live store credentials are verified. A failed push never rolls back
-# the local status; it is recorded for a retry (see WooCommerceSyncService).
-WC_ORDER_PUSH_ENABLED = config('WC_ORDER_PUSH_ENABLED', default=False, cast=bool)
+# Local is ALWAYS the source of truth. The push is enabled PER CHANNEL in the
+# database (``SalesChannel.wc_push_status_enabled``), right next to the store
+# credentials — so each store is toggled independently and no env config is
+# required. This setting is an OPTIONAL global override for ops:
+#   * unset (the default) -> the per-channel flag decides (recommended);
+#   * WC_ORDER_PUSH_ENABLED=false -> hard-disable ALL pushes (e.g. a staging box
+#     restored from a prod DB so it can never touch the live store);
+#   * WC_ORDER_PUSH_ENABLED=true  -> force-enable everywhere.
+# A failed push never rolls back the local status; it is recorded for a retry
+# (see WooCommerceSyncService).
+_wc_push_override = config('WC_ORDER_PUSH_ENABLED', default='').strip().lower()
+WC_ORDER_PUSH_ENABLED = (
+    None if _wc_push_override == '' else _wc_push_override in ('1', 'true', 'yes', 'on')
+)
 WC_ORDER_PUSH_TIMEOUT = config('WC_ORDER_PUSH_TIMEOUT', default=30, cast=int)
 
 # =============================================================================

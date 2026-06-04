@@ -44,15 +44,21 @@ def _permissions_for_template(cfg: dict, perm_by_code: dict) -> list:
     return [perm_by_code[c] for c in codes if c in perm_by_code]
 
 
-def provision_company_roles(company, *, created_by=None, reset: bool = False):
+def provision_company_roles(company, *, created_by=None, reset: bool = False,
+                            perm_by_code=None):
     """
     Ensure ``company`` owns its own copy of every business role.
 
     Idempotent: existing company roles are left untouched unless ``reset`` is
     ``True`` (in which case their permission set is forced back to the
     template). Returns the list of roles that were created or reset.
+
+    ``perm_by_code`` lets a caller provisioning many companies in a loop build
+    the ``{codename: AppPermission}`` map ONCE and reuse it, instead of this
+    function re-scanning the whole permission table on every call.
     """
-    perm_by_code = {p.codename: p for p in AppPermission.objects.all()}
+    if perm_by_code is None:
+        perm_by_code = {p.codename: p for p in AppPermission.objects.all()}
     touched: list = []
 
     for name, cfg in COMPANY_ROLE_TEMPLATES.items():

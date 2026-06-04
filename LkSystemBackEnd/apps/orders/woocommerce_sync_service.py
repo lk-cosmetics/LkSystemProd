@@ -34,8 +34,20 @@ class WooCommerceSyncService:
     # ── Configuration helpers ────────────────────────────────────────────────
 
     @staticmethod
-    def _push_enabled() -> bool:
-        return bool(getattr(settings, 'WC_ORDER_PUSH_ENABLED', False))
+    def _push_enabled(channel) -> bool:
+        """Whether the outbound status push is enabled for this order's channel.
+
+        The control lives in the DB on the channel (``wc_push_status_enabled``),
+        right next to the WooCommerce credentials — so each store is toggled
+        independently and nothing has to be configured via env.
+        ``settings.WC_ORDER_PUSH_ENABLED`` is an OPTIONAL global override: set it
+        to force pushes on/off everywhere (an ops kill-switch / CI safety); when
+        it is left unset (the default) the per-channel flag decides.
+        """
+        override = getattr(settings, 'WC_ORDER_PUSH_ENABLED', None)
+        if override is not None:
+            return bool(override)
+        return bool(channel and getattr(channel, 'wc_push_status_enabled', False))
 
     @staticmethod
     def _status_map(order: Order) -> dict:
@@ -92,8 +104,8 @@ class WooCommerceSyncService:
             order.sync_status = Order.SyncStatus.PENDING_SYNC
             order.save(update_fields=['sync_status', 'updated_at'])
 
-        if not cls._push_enabled() and not force:
-            # Parked for a later push; no network in this environment.
+        if not cls._push_enabled(order.sales_channel) and not force:
+            # Parked for a later push; this channel hasn't enabled the push.
             return order
 
         channel = order.sales_channel

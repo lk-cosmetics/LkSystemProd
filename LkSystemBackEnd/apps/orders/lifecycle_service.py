@@ -617,6 +617,12 @@ class OrderLifecycleService:
             details={'note': note},
         )
         cls._recompute_outcome(order, actor=actor)
+        # Reserve stock now so the POS (and any other order) can no longer sell
+        # the units this confirmed order commits to. Raises (rolling back the
+        # whole confirm) with a clear shortfall message if the stock is already
+        # gone — e.g. the POS sold it before the online order was confirmed.
+        from apps.orders.stock_service import OrderStockReservationService
+        OrderStockReservationService.reserve(order, actor=actor)
         return order
 
     @classmethod
@@ -694,6 +700,10 @@ class OrderLifecycleService:
             details={'cancellation_reason': reason, 'note': note},
         )
         cls._recompute_outcome(order, actor=actor)
+        # The order never completed, so release any stock it reserved at confirm
+        # back to available. Idempotent (no-op if it held no reservation).
+        from apps.orders.stock_service import OrderStockReservationService
+        OrderStockReservationService.release(order, actor=actor)
         return order
 
     @classmethod
@@ -1098,6 +1108,28 @@ class OrderLifecycleService:
             details={'items': [{'product_id': p, 'quantity': q} for p, q in desired.items()],
                      'movements': movements},
         )
+
+        # Packaging is this workflow's "sale" moment: the order is now COMPLETED +
+        # SUCCESSFUL_SALE, so convert any stock reservation into an actual sale —
+        # release the hold and decrement on-hand for the CUSTOMER lines. The
+        # engine skips packaging-type lines (their stock was already moved above
+        # by _apply_packaging_stock) and is idempotent (delta = desired - already
+        # moved), so a later delivery-delivered / POS path reconciles to a no-op
+        # instead of double-decrementing. Without this, a packaged order stayed
+        # reserved forever and was never actually sold.
+        from apps.orders.service import OrderIngestionError, OrderIngestionService
+        inventory_channel = order.pos_sales_channel or order.sales_channel
+        if inventory_channel:
+            try:
+                OrderIngestionService._sync_inventory_movements(
+                    order,
+                    list(order.lines.filter(is_deleted=False).select_related('product')),
+                    inventory_channel,
+                    actor,
+                )
+            except OrderIngestionError as exc:
+                raise LifecycleError(exc.message) from exc
+
         cls._recompute_workflow_status(order, actor=actor)
         return order
 

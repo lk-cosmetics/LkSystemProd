@@ -438,7 +438,28 @@ class DeliverySubmissionService:
             order.status = Order.Status.FAILED
             update_fields.append('status')
 
-        order.save(update_fields=update_fields)
+        from django.db import transaction
+        from apps.orders.service import OrderIngestionService
+
+        with transaction.atomic():
+            order.save(update_fields=update_fields)
+            # The provider marking an order DELIVERED is the point a website order
+            # becomes COMPLETED — and thus the point its lines must leave stock.
+            # Previously this method changed status without ever decrementing, so
+            # delivered website orders never reduced stock (systematic oversell).
+            # _sync_inventory_movements reconciles (delta = desired - already_moved):
+            # it decrements on DELIVERED→COMPLETED, no-ops when already decremented,
+            # and reverses stock if the provider reports RETURNED/CANCELLED/FAILED —
+            # same engine and channel resolution as the WooCommerce-completed and
+            # POS-validation paths, so it can never double-apply.
+            inventory_channel = order.pos_sales_channel or order.sales_channel
+            if inventory_channel:
+                lines = list(
+                    order.lines.filter(is_deleted=False).select_related('product')
+                )
+                OrderIngestionService._sync_inventory_movements(
+                    order, lines, inventory_channel, actor,
+                )
 
         action_map = {
             Order.DeliveryStatus.ACCEPTED:   OrderLog.Action.DELIVERY_ACCEPTED,

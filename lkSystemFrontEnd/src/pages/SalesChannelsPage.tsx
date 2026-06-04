@@ -22,6 +22,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import {
@@ -183,12 +184,14 @@ interface ChannelFormData {
   wc_consumer_key: string;
   wc_consumer_secret: string;
   delivery_api_key: string;
+  wc_push_status_enabled: boolean;
 }
 
 const EMPTY_FORM: ChannelFormData = {
   name: '', brand: '', channel_type: 'WOOCOMMERCE', is_active: true,
   state: '', city: '',
   wc_store_url: '', wc_consumer_key: '', wc_consumer_secret: '', delivery_api_key: '',
+  wc_push_status_enabled: false,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -271,6 +274,25 @@ function WooFields({ form, onChange, webhookToken, onRegenerateWebhook, regenera
         <p className="text-xs text-muted-foreground">
           Long JAX JWT tokens are supported and saved from this WooCommerce channel.
         </p>
+      </div>
+
+      {/* Outbound status push toggle (stored on the channel in the DB) */}
+      <div className="flex items-start justify-between gap-3 rounded-md border border-purple-200/60 dark:border-purple-800/40 bg-background/60 p-3">
+        <div className="space-y-0.5">
+          <Label htmlFor="woo-push-status" className="text-sm">
+            Push order status to WooCommerce
+          </Label>
+          <p className="text-xs text-muted-foreground">
+            When on, completing an order here (e.g. after packaging) marks the
+            matching order <span className="font-medium">completed</span> on this
+            store. A failed push never changes the local status.
+          </p>
+        </div>
+        <Switch
+          id="woo-push-status"
+          checked={form.wc_push_status_enabled}
+          onCheckedChange={v => onChange('wc_push_status_enabled', v)}
+        />
       </div>
 
       {/* Webhook token — only shown when editing */}
@@ -522,6 +544,7 @@ export default function SalesChannelsPage() {
       wc_consumer_key:  f.wc_consumer_key.trim(),
       wc_consumer_secret: f.wc_consumer_secret.trim(),
       delivery_api_key: f.delivery_api_key.trim(),
+      wc_push_status_enabled: f.wc_push_status_enabled,
     }),
   });
 
@@ -541,6 +564,7 @@ export default function SalesChannelsPage() {
       wc_consumer_key:    ch.wc_consumer_key ?? '',
       wc_consumer_secret: ch.wc_consumer_secret ?? '',
       delivery_api_key:   ch.delivery_api_key ?? '',
+      wc_push_status_enabled: ch.wc_push_status_enabled ?? false,
     });
     setEditDialog(true);
   }, []);

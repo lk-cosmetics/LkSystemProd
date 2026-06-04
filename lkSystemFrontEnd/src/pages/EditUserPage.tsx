@@ -50,7 +50,13 @@ import { companyService } from '@/services/company.service';
 import { brandService } from '@/services/brand.service';
 import { rbacService, type RBACRole } from '@/services/rbac.service';
 import { salesChannelService } from '@/services/salesChannel.service';
-import type { UserDetails, CompanyListItem, Brand, SalesChannel } from '@/types';
+import type {
+  UserDetails,
+  CompanyListItem,
+  Brand,
+  SalesChannel,
+  UpdateUserFullRequest,
+} from '@/types';
 import { toast } from 'sonner';
 
 // Tunisia cities constant
@@ -179,11 +185,20 @@ export default function EditUserPage() {
   useEffect(() => {
     if (selectedBrands.length === 0) {
       setSalesChannels([]);
+      setSelectedSalesChannelId('');
       return;
     }
     salesChannelService
       .getAllChannels()
-      .then(all => setSalesChannels(all.filter(ch => selectedBrands.includes(ch.brand))))
+      .then(all => {
+        const forBrands = all.filter(ch => selectedBrands.includes(ch.brand));
+        setSalesChannels(forBrands);
+        // Drop a stale selection that no longer belongs to the user's brands
+        // (e.g. after a brand/company change) so an invalid id is never sent.
+        setSelectedSalesChannelId(prev =>
+          prev && forBrands.some(ch => String(ch.id) === prev) ? prev : ''
+        );
+      })
       .catch(() => setSalesChannels([]));
   }, [selectedBrands]);
 
@@ -350,8 +365,11 @@ export default function EditUserPage() {
 
     setIsSaving(true);
     try {
-      // Update user basic info
-      await userService.updateUserFull(user.id, {
+      // Update user basic info. Only PIN the sales point for an operational
+      // role with a valid selection; never send null on an ordinary save —
+      // set-role clears it server-side when switching to a non-operational
+      // role, so an unrelated edit can't wipe an operational user's sales point.
+      const payload: UpdateUserFullRequest = {
         email: data.email,
         first_name: data.first_name,
         last_name: data.last_name,
@@ -359,13 +377,11 @@ export default function EditUserPage() {
         allowed_brands: selectedBrands,
         can_switch_brands: data.can_switch_brands,
         is_active: data.is_active,
-        // Pin (or clear) the sales point. Operational roles get the chosen
-        // channel; other roles clear it. Saved before setRole, which reads it.
-        assigned_sales_channel:
-          requiresSalesPoint && selectedSalesChannelId
-            ? Number(selectedSalesChannelId)
-            : null,
-      });
+      };
+      if (requiresSalesPoint && selectedSalesChannelId) {
+        payload.assigned_sales_channel = Number(selectedSalesChannelId);
+      }
+      await userService.updateUserFull(user.id, payload);
 
       // Update profile with files if user has a profile
       if (user.profile?.id) {

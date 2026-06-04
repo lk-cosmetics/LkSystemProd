@@ -450,6 +450,10 @@ class Order(models.Model):
         null=True, blank=True,
         related_name='orders_stock_restored',
     )
+    # True while this order holds a stock reservation (reserved at confirm for
+    # online / manual-delivery orders, released at completion or cancellation).
+    # Idempotency flag for OrderStockReservationService.reserve/release.
+    stock_reserved = models.BooleanField(default=False, db_index=True)
     return_exchange_status = models.CharField(
         max_length=20,
         choices=ReturnExchangeStatus.choices,

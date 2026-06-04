@@ -7,6 +7,21 @@ from django.db import models
 from django.core.validators import RegexValidator
 
 
+def normalize_cin(value):
+    """Normalise a CIN value: trimmed string, or ``None`` when blank.
+
+    ``Profile.cin_number`` is UNIQUE, so an absent CIN must be stored as NULL
+    (Postgres treats NULLs as distinct) rather than ``''`` or a whitespace-only
+    string — both are real values that can exist only once and would collide on
+    the second CIN-less profile. Centralised here so every write path (model
+    ``save()`` and the create serializers) normalises identically.
+    """
+    if value is None:
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
 class Profile(models.Model):
     """
     Extended user profile for HR data.
@@ -250,12 +265,9 @@ class Profile(models.Model):
     
     def save(self, *args, **kwargs):
         """Update is_complete flag before saving."""
-        # ``cin_number`` is unique, so a blank value MUST be stored as NULL,
-        # never as ''. Postgres treats NULLs as distinct but '' as a single
-        # real value — so two profiles saved without a CIN would collide on the
-        # unique constraint and raise an IntegrityError (HTTP 500). Normalising
-        # '' → None lets any number of profiles legitimately have no CIN.
-        if not self.cin_number:
-            self.cin_number = None
+        # A blank/whitespace CIN must be stored as NULL, never '' — see
+        # ``normalize_cin``. Without this, a second CIN-less profile collides on
+        # the unique constraint and raises an IntegrityError (HTTP 500).
+        self.cin_number = normalize_cin(self.cin_number)
         self.is_complete = self.check_completeness()
         super().save(*args, **kwargs)

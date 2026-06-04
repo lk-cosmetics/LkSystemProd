@@ -779,22 +779,47 @@ class OrderIngestionService:
             for line in OrderLine.all_objects.select_for_update().filter(order=order)
             if line.external_line_id
         }
+        # POS and manual sales are priced by the SERVER from the product
+        # catalogue (with any active promotion applied) — the client price is
+        # never trusted and a submitted price below the server price is rejected.
+        # WooCommerce orders keep the price the customer was actually charged.
+        server_priced = order.source in (Order.Source.POS, Order.Source.MANUAL)
         lines = []
         for position, item in enumerate(line_items):
             product   = self._resolve_product(item, sales_channel)
             qty       = max(1, int(item.get('quantity', 1)))
-            unit_price = self._dec(item.get('price', '0'))
-            subtotal   = (
-                self._dec(item.get('subtotal'))
-                if item.get('subtotal') is not None
-                else unit_price * qty
-            )
             tax   = self._dec(item.get('total_tax', '0'))
-            total = (
-                self._dec(item.get('total'))
-                if item.get('total') is not None
-                else subtotal + tax
-            )
+            if server_priced and product is not None:
+                server_price = self._server_unit_price(product, sales_channel)
+                submitted = (
+                    self._dec(item.get('price'))
+                    if item.get('price') is not None else None
+                )
+                if submitted is not None and submitted < server_price:
+                    raise OrderIngestionError(
+                        f'Price for "{product.name}" is below the allowed price.',
+                        {
+                            'error_code': 'PRICE_BELOW_MINIMUM',
+                            'product_id': product.id,
+                            'submitted': str(submitted),
+                            'minimum': str(server_price),
+                        },
+                    )
+                unit_price = server_price
+                subtotal   = unit_price * qty
+                total      = subtotal + tax
+            else:
+                unit_price = self._dec(item.get('price', '0'))
+                subtotal   = (
+                    self._dec(item.get('subtotal'))
+                    if item.get('subtotal') is not None
+                    else unit_price * qty
+                )
+                total = (
+                    self._dec(item.get('total'))
+                    if item.get('total') is not None
+                    else subtotal + tax
+                )
             line_key = self._line_key(item, position)
             seen_keys.add(line_key)
             line = existing.get(line_key) or OrderLine(order=order, external_line_id=line_key)
@@ -815,6 +840,39 @@ class OrderIngestionService:
             external_line_id__in=seen_keys,
         ).update(is_deleted=True)
         return lines
+
+    def _server_unit_price(self, product, sales_channel) -> Decimal:
+        """Server-authoritative unit price for a POS/manual line.
+
+        Starts from the product catalogue price and applies the BEST currently
+        active promotion for this product on this sales channel. The client can
+        therefore never set or under-price a line — it can only be sold at the
+        catalogue price or a legitimate promotional price.
+        """
+        base = self._dec(getattr(product, 'sales_price', None) or '0')
+        if sales_channel is None:
+            return base
+
+        from django.db.models import Q
+        from django.utils import timezone
+        from apps.promotions.models import Promotion, PromotionStatus
+
+        now = timezone.now()
+        candidates = Promotion.objects.filter(
+            product=product,
+            is_active=True,
+            status=PromotionStatus.ACTIVE,
+            start_date__lte=now,
+        ).filter(Q(end_date__isnull=True) | Q(end_date__gte=now))
+
+        best = base
+        for promo in candidates:
+            if not promo.is_within_usage_limit:
+                continue
+            price = self._dec(promo.calculate_discounted_price(base, sales_channel.id))
+            if price < best:
+                best = price
+        return best
 
     def _resolve_product(
         self,
@@ -1100,6 +1158,15 @@ class OrderIngestionService:
         sales_channel: SalesChannel,
         created_by,
     ) -> None:
+        # Reconciling real stock movements supersedes any pre-completion
+        # reservation this order held, so release it first — otherwise the unit
+        # would be double-counted (reserved AND sold) and the order's own
+        # reservation could block its SALE availability check. release() reads
+        # the flag under a row lock and is a no-op when nothing is reserved, so
+        # it is safe to call unconditionally (and on a possibly-stale instance).
+        from apps.orders.stock_service import OrderStockReservationService
+        OrderStockReservationService.release(order, actor=created_by)
+
         desired = {}
         if order.status in WC_MOVEMENT_STATUSES:
             desired = cls._line_quantities_by_product(lines)

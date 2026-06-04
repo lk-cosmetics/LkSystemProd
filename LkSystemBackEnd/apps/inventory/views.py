@@ -7,6 +7,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+import django_filters
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django.db.models import Sum, F, Q
@@ -209,6 +210,20 @@ class SalesChannelInventoryViewSet(ActionPermissionMixin, viewsets.ModelViewSet)
         })
 
 
+class InventoryMovementFilter(django_filters.FilterSet):
+    """Filters for the movements list, including a date range over ``created_at``.
+
+    ``?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD`` is inclusive by calendar date,
+    alongside the existing channel / product / type / status filters.
+    """
+    start_date = django_filters.DateFilter(field_name='created_at', lookup_expr='date__gte')
+    end_date = django_filters.DateFilter(field_name='created_at', lookup_expr='date__lte')
+
+    class Meta:
+        model = InventoryMovement
+        fields = ['sales_channel', 'product', 'movement_type', 'status']
+
+
 class InventoryMovementViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     """
     ViewSet for managing inventory movements.
@@ -233,7 +248,7 @@ class InventoryMovementViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     ).all()
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['sales_channel', 'product', 'movement_type', 'status']
+    filterset_class = InventoryMovementFilter
     search_fields = ['reference_number', 'product__name', 'external_reference', 'notes']
     ordering_fields = ['created_at', 'quantity', 'movement_type']
     ordering = ['-created_at']
