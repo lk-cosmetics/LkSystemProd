@@ -46,6 +46,7 @@ import { productService } from '@/services/product.service';
 import { salesChannelService } from '@/services/salesChannel.service';
 import { useAuthStore } from '@/store/authStore';
 import { hasPermission } from '@/hooks/useAuth';
+import { useWebSocket } from '@/hooks/useWebSocket';
 import type {
   OrderListItem, OrderDetail, OrderEditLineInput, OrderEditRequest,
   OrderDiscountType, OrderSummary, OrderStatus, SalesChannel, ProductListItem,
@@ -79,8 +80,15 @@ const STATUS_STYLES: Record<string, string> = {
 void STATUS_STYLES;
 
 // How often the priority queue silently refetches so new orders (WooCommerce
-// webhooks, POS, manual) appear live without a manual refresh.
-const ORDERS_REFRESH_MS = 15000;
+// webhooks, POS, manual) appear live without a manual refresh. This is the
+// FALLBACK cadence used when the realtime WebSocket is down; when the socket is
+// connected we poll far less often (the socket drives immediacy) but never stop
+// entirely, so a missed/coalesced event still self-heals.
+const ORDERS_REFRESH_MS = 5000;
+const ORDERS_REFRESH_FALLBACK_MS = 20000;
+// A burst of WebSocket signals (e.g. a 1000-order WooCommerce import) is
+// coalesced into at most one silent refetch per this window.
+const WS_REFRESH_DEBOUNCE_MS = 600;
 
 const SOURCE_STYLES: Record<string, string> = {
   WOOCOMMERCE: 'bg-indigo-100 text-indigo-800',
@@ -530,17 +538,23 @@ export default function OrdersPage() {
   // orders show up live. A tick is skipped when the tab is hidden or the user is
   // mid-action (detail open, rows selected, or a mutation in flight) so the
   // refresh never disrupts them or wipes a selection.
+  // Realtime connection state — drives the "Live" badge and the fallback poll
+  // cadence (slow when the socket is up, fast when it's down).
+  const [wsConnected, setWsConnected] = useState(false);
+  const wsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const autoRefreshBlockedRef = useRef(false);
   autoRefreshBlockedRef.current =
     mutatingOrder || bulkBusy || selectedIds.size > 0 || !!viewOrder;
 
   useEffect(() => {
+    const pollMs = wsConnected ? ORDERS_REFRESH_FALLBACK_MS : ORDERS_REFRESH_MS;
     const tick = () => {
       if (typeof document !== 'undefined' && document.hidden) return;
       if (autoRefreshBlockedRef.current) return;
       fetchData({ silent: true });
     };
-    const id = window.setInterval(tick, ORDERS_REFRESH_MS);
+    const id = window.setInterval(tick, pollMs);
     const onVisible = () => {
       if (!document.hidden && !autoRefreshBlockedRef.current) fetchData({ silent: true });
     };
@@ -549,7 +563,42 @@ export default function OrdersPage() {
       window.clearInterval(id);
       document.removeEventListener('visibilitychange', onVisible);
     };
+  }, [fetchData, wsConnected]);
+
+  // ── Realtime push (WebSocket) ─────────────────────────────────────────────
+  // The daphne sidecar pushes a lightweight signal (order id + status) the
+  // instant an order is created/updated/deleted anywhere in the user's scope.
+  // Bursts (e.g. a 1000-order WooCommerce import) are coalesced into a single
+  // SILENT refetch, and we skip while the user is mid-action. The authoritative,
+  // server-scoped list still comes from REST, so the socket can never surface an
+  // order the user may not see. The interval poll above stays as an automatic
+  // fallback, so losing the socket is a non-event.
+  const requestSilentRefresh = useCallback(() => {
+    if (wsDebounceRef.current) return; // a refetch is already queued this window
+    wsDebounceRef.current = setTimeout(() => {
+      wsDebounceRef.current = null;
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (autoRefreshBlockedRef.current) return;
+      fetchData({ silent: true });
+    }, WS_REFRESH_DEBOUNCE_MS);
   }, [fetchData]);
+
+  useEffect(
+    () => () => {
+      if (wsDebounceRef.current) clearTimeout(wsDebounceRef.current);
+    },
+    [],
+  );
+
+  const handleWsStatus = useCallback((connected: boolean) => {
+    setWsConnected(connected);
+  }, []);
+
+  useWebSocket({
+    path: '/ws/orders/',
+    onMessage: requestSilentRefresh,
+    onStatusChange: handleWsStatus,
+  });
 
   useEffect(() => {
     if (!activeSyncEvent || activeSyncEvent.status !== 'RUNNING') return;
@@ -1785,16 +1834,26 @@ export default function OrdersPage() {
             <h2 className="text-sm font-semibold">Priority order queue</h2>
             <p className="text-xs text-muted-foreground">Rows are sorted by action needed, client points, then newest.</p>
           </div>
-          <span
-            className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-200"
-            title="New orders appear automatically"
-          >
-            <span className="relative flex size-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-              <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+          {wsConnected ? (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-200"
+              title="Connected — new orders appear instantly"
+            >
+              <span className="relative flex size-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+              </span>
+              Live
             </span>
-            Live
-          </span>
+          ) : (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-700 ring-1 ring-amber-200"
+              title="Realtime reconnecting — new orders still refresh automatically"
+            >
+              <span className="relative inline-flex size-2 rounded-full bg-amber-500" />
+              Auto
+            </span>
+          )}
         </div>
         <div className="overflow-x-auto">
           <Table>

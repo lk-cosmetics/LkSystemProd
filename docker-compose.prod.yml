@@ -95,7 +95,7 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       RUN_STARTUP_TASKS: "False"
-    command: ["celery", "-A", "core", "worker", "-l", "info", "-Q", "orders,delivery,default", "--concurrency=2"]
+    command: ["celery", "-A", "core", "worker", "-l", "info", "-Q", "orders,delivery,default", "--concurrency=4"]
     volumes:
       - media_volume:/app/mediafiles
     depends_on:
@@ -105,6 +105,42 @@ services:
         condition: service_healthy
       backend:
         condition: service_healthy
+    networks:
+      - app_net
+
+  # ── Real-time WebSocket sidecar ──────────────────────────────────────────
+  # Serves ONLY /ws/ (Django Channels / ASGI). gunicorn keeps serving every
+  # HTTP/REST path unchanged, so the proven request path carries zero risk.
+  # Shares the backend image, env and Redis channel layer.
+  ws:
+    build:
+      context: ./LkSystemBackEnd
+      dockerfile: Dockerfile
+    container_name: lksystem_prod_ws
+    restart: unless-stopped
+    env_file:
+      - ${LKSYSTEM_ENV_FILE:-./deploy/lksystem.env}
+    environment:
+      DEBUG: "False"
+      ALLOWED_HOSTS: ${DOMAIN},localhost,127.0.0.1
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      RUN_STARTUP_TASKS: "False"
+    command: ["daphne", "-b", "0.0.0.0", "-p", "9000", "core.asgi:application"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('127.0.0.1', 9000), 5).close()\""]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     networks:
       - app_net
 
@@ -118,12 +154,13 @@ services:
     restart: unless-stopped
     environment:
       BACKEND_UPSTREAM: backend:8000
+      WS_UPSTREAM: ws:9000
       PUBLIC_DOMAIN: ${DOMAIN}
       HTTPS_PORT_SUFFIX: ""
       SSL_CERTIFICATE: /etc/letsencrypt/live/${DOMAIN}/fullchain.pem
       SSL_CERTIFICATE_KEY: /etc/letsencrypt/live/${DOMAIN}/privkey.pem
       ENABLE_SELF_SIGNED_SSL: "false"
-      NGINX_ENVSUBST_FILTER: "BACKEND_UPSTREAM|PUBLIC_DOMAIN|HTTPS_PORT_SUFFIX|SSL_CERTIFICATE|SSL_CERTIFICATE_KEY"
+      NGINX_ENVSUBST_FILTER: "BACKEND_UPSTREAM|WS_UPSTREAM|PUBLIC_DOMAIN|HTTPS_PORT_SUFFIX|SSL_CERTIFICATE|SSL_CERTIFICATE_KEY"
     volumes:
       - media_volume:/usr/share/nginx/html/media:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
