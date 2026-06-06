@@ -495,6 +495,7 @@ CELERY_WORKER_MAX_TASKS_PER_CHILD = 200
 CELERY_TASK_ROUTES = {
     'orders.sync_orders_for_channel': {'queue': 'orders'},
     'orders.sync_all_channels':       {'queue': 'orders'},
+    'orders.process_wc_order_webhook':{'queue': 'orders'},
     'orders.submit_order_to_delivery':{'queue': 'delivery'},
     'orders.retry_failed_deliveries': {'queue': 'delivery'},
 }
