@@ -80,7 +80,7 @@ void STATUS_STYLES;
 
 // How often the priority queue silently refetches so new orders (WooCommerce
 // webhooks, POS, manual) appear live without a manual refresh.
-const ORDERS_REFRESH_MS = 15000;
+const ORDERS_REFRESH_MS = 5000;
 
 const SOURCE_STYLES: Record<string, string> = {
   WOOCOMMERCE: 'bg-indigo-100 text-indigo-800',

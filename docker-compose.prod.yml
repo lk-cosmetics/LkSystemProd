@@ -95,7 +95,7 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       RUN_STARTUP_TASKS: "False"
-    command: ["celery", "-A", "core", "worker", "-l", "info", "-Q", "orders,delivery,default", "--concurrency=2"]
+    command: ["celery", "-A", "core", "worker", "-l", "info", "-Q", "orders,delivery,default", "--concurrency=4"]
     volumes:
       - media_volume:/app/mediafiles
     depends_on:
