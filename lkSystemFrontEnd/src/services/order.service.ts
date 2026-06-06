@@ -153,6 +153,21 @@ export interface ProcessReturnOptions {
   lineConditions?: ReturnLineCondition[];
 }
 
+/** Bulk lifecycle actions runnable over a selection of orders. */
+export type BulkOrderAction = 'send_to_pos' | 'submit_delivery' | 'cancel' | 'delete';
+
+export interface BulkOrderResultItem {
+  id: number;
+  order_number?: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface BulkOrderResponse {
+  results: BulkOrderResultItem[];
+  summary: { total: number; succeeded: number; failed: number };
+}
+
 export const orderService = {
   /** List orders with filters. */
   async getAll(params?: OrderListParams) {
@@ -428,6 +443,24 @@ export const orderService = {
   async submitDelivery(id: number) {
     const { data } = await apiClient.post(
       `/api/v1/orders/${id}/submit-delivery/`
+    );
+    return data;
+  },
+
+  /**
+   * Run one lifecycle action over many orders at once. Each order is processed
+   * independently on the server; the response reports per-order success/failure
+   * so a partial batch is unambiguous.
+   */
+  async bulkAction(
+    action: BulkOrderAction,
+    ids: number[],
+    options?: { pos_sales_channel?: number; reason?: string }
+  ): Promise<BulkOrderResponse> {
+    const { data } = await apiClient.post<BulkOrderResponse>(
+      '/api/v1/orders/bulk/',
+      { action, ids, ...(options ?? {}) },
+      { timeout: 60_000 }
     );
     return data;
   },

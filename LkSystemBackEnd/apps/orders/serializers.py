@@ -122,6 +122,9 @@ class OrderListSerializer(serializers.ModelSerializer):
     sync_status_display = serializers.CharField(
         source='get_sync_status_display', read_only=True,
     )
+    order_source_display = serializers.CharField(
+        source='get_order_source_display', read_only=True,
+    )
 
     class Meta:
         model  = Order
@@ -133,7 +136,8 @@ class OrderListSerializer(serializers.ModelSerializer):
             'brand', 'brand_name',
             'client', 'client_id', 'client_email', 'client_phone', 'client_name',
             'client_points', 'client_is_blocked', 'client_return_count',
-            'status', 'wc_status', 'source', 'payment_status', 'payment_method',
+            'status', 'wc_status', 'source', 'order_source', 'order_source_display',
+            'payment_status', 'payment_method',
             'contact_status', 'return_exchange_status',
             'return_type', 'packaging_status', 'packaged_at', 'packaged_by',
             'packaged_by_name', 'final_outcome',
@@ -396,6 +400,9 @@ class ManualOrderCreateSerializer(POSOrderCreateSerializer):
     status = serializers.ChoiceField(
         choices=['pending', 'processing', 'completed'], default='processing',
     )
+    order_source = serializers.ChoiceField(
+        choices=Order.OrderSource.choices, required=False, allow_blank=True, default='',
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -568,7 +575,8 @@ class OrderSyncEventSerializer(serializers.ModelSerializer):
 
 class OrderLogSerializer(serializers.ModelSerializer):
     user_name = serializers.CharField(source='user.get_full_name', read_only=True, default=None)
+    action_display = serializers.CharField(source='get_action_display', read_only=True)
 
     class Meta:
         model  = OrderLog
-        fields = ['id', 'action', 'user', 'user_name', 'details', 'created_at']
+        fields = ['id', 'action', 'action_display', 'user', 'user_name', 'details', 'created_at']

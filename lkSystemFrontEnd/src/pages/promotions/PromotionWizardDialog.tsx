@@ -6,8 +6,8 @@
  *   Step 2 — Details:  shared name, code, description, schedule, status,
  *            stacking, usage cap, priority. End date is optional — empty
  *            means the promotion runs until manually deactivated.
- *   Step 3 — Channels & review: pick POS sales channels (filtered to the
- *            selected brand) and review before submitting.
+ *   Step 3 — Channels & review: pick sales channels (POS or WooCommerce,
+ *            filtered to the selected brand) and review before submitting.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -218,7 +218,7 @@ export function PromotionWizardDialog({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, initialGroup]);
 
-  /* Load POS channels for the selected brand. */
+  /* Load promotable (POS + WooCommerce) channels for the selected brand. */
   useEffect(() => {
     if (!brandId) {
       setChannels([]);
@@ -232,7 +232,7 @@ export function PromotionWizardDialog({
       .getChannelsByBrand(brandId)
       .then(rows => {
         if (cancelled) return;
-        setChannels(rows.filter(c => c.channel_type === 'POS' && c.is_active));
+        setChannels(rows.filter(c => (c.channel_type === 'POS' || c.channel_type === 'WOOCOMMERCE') && c.is_active));
       })
       .catch(() => {
         if (cancelled) return;
@@ -606,7 +606,7 @@ export function PromotionWizardDialog({
                 <div>
                   <Label className="text-sm font-medium">Sales channels</Label>
                   <p className="text-[11px] text-muted-foreground">
-                    Apply this promotion to the POS channels you check below.
+                    Apply this promotion to the channels you check below.
                     The same per-product discount is mirrored to every channel.
                   </p>
                 </div>
@@ -624,7 +624,7 @@ export function PromotionWizardDialog({
                   </div>
                 ) : channels.length === 0 ? (
                   <div className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
-                    No active POS channel under this brand. Create one first.
+                    No active POS or WooCommerce channel under this brand. Create one first.
                   </div>
                 ) : (
                   <ScrollArea className="max-h-[320px] rounded-md border">

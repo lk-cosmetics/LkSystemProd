@@ -406,6 +406,69 @@ class OrderStockAvailabilityService:
             'unlinked_lines': unlinked,
         }
 
+    # Open orders that still have to consume stock (a completed/canceled order
+    # drops out automatically — its demand becomes a SALE in the ledger).
+    OPEN_DEMAND_STATUSES = ('confirmed', 'preparing')
+
+    @classmethod
+    def open_order_demand(cls, *, orders=None, channel_id=None):
+        """Consolidated component-stock demand across all OPEN orders.
+
+        Sums the pack-aware required quantities (``_required_customer_quantities``
+        — packs are expanded to their components) over every order whose clean
+        ``order_status`` is still open (confirmed / preparing), then compares the
+        total against available stock. ``orders`` may be a pre-scoped queryset
+        (e.g. the viewset's tenant-scoped one); ``channel_id`` narrows both the
+        orders and the availability to one channel.
+
+        Returns rows sorted worst-shortfall-first, each with: required (summed
+        across open orders), available, shortfall, and how many open orders need
+        the product. A ``done`` order is intentionally absent — its demand has
+        moved to the movement ledger (the "history").
+        """
+        from apps.orders.models import Order
+
+        if orders is None:
+            orders = Order.objects.all()
+        orders = orders.filter(order_status__in=cls.OPEN_DEMAND_STATUSES)
+        if channel_id:
+            orders = orders.filter(sales_channel_id=channel_id)
+
+        demand: dict[int, dict[str, Any]] = {}
+        for order in orders:
+            required, meta, _unlinked = cls._required_customer_quantities(order)
+            for product_id, qty in required.items():
+                row = demand.setdefault(product_id, {
+                    'product_id': product_id,
+                    'product_name': meta.get(product_id, {}).get('product_name', ''),
+                    'barcode': meta.get(product_id, {}).get('barcode', ''),
+                    'required': 0,
+                    'order_count': 0,
+                })
+                row['required'] += qty
+                row['order_count'] += 1
+
+        product_ids = list(demand.keys())
+        available: dict[int, int] = {}
+        if product_ids:
+            inv_qs = SalesChannelInventory.objects.filter(product_id__in=product_ids)
+            if channel_id:
+                inv_qs = inv_qs.filter(sales_channel_id=channel_id)
+            for inv in inv_qs:
+                available[inv.product_id] = (
+                    available.get(inv.product_id, 0) + inv.available_quantity
+                )
+
+        rows = []
+        for product_id, row in demand.items():
+            row['available'] = available.get(product_id, 0)
+            row['shortfall'] = max(0, row['required'] - row['available'])
+            rows.append(row)
+        rows.sort(
+            key=lambda r: (-r['shortfall'], -r['required'], (r['product_name'] or '').lower())
+        )
+        return rows
+
 
 class OrderStockReservationService:
     """Reserve / release finished-product stock for confirmed online orders.

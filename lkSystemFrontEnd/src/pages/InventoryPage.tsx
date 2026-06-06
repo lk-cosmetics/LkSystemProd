@@ -82,6 +82,7 @@ import {
   inventoryMovementService,
 } from '@/services/inventory.service';
 import { salesChannelService } from '@/services/salesChannel.service';
+import { toast } from 'sonner';
 import { productService } from '@/services/product.service';
 import { useDebounce } from '@/hooks/useDebounce';
 import type {
@@ -856,7 +857,8 @@ type InventoryTab =
   | 'packs'
   | 'movements'
   | 'low-stock'
-  | 'daily-out';
+  | 'daily-out'
+  | 'demand';
 
 const todayISO = () => {
   const d = new Date();
@@ -864,6 +866,43 @@ const todayISO = () => {
     d.getDate(),
   ).padStart(2, '0')}`;
 };
+
+// A row in the bulk add/update editor.
+type BulkRow = {
+  product: number;
+  product_name: string;
+  product_barcode: string;
+  product_image: string | null;
+  mode: 'set' | 'add' | 'subtract';
+  quantity: string;
+  minimum_quantity: string;
+  maximum_quantity: string;
+  bin_location: string;
+};
+
+// Small square product thumbnail with a graceful icon fallback.
+function ProductThumb({
+  src,
+  size = 'h-9 w-9',
+}: Readonly<{ src?: string | null; size?: string }>) {
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt=""
+        loading="lazy"
+        className={`${size} flex-shrink-0 rounded border object-cover`}
+      />
+    );
+  }
+  return (
+    <div
+      className={`${size} flex flex-shrink-0 items-center justify-center rounded border bg-muted`}
+    >
+      <Package className="h-4 w-4 text-muted-foreground/50" />
+    </div>
+  );
+}
 
 // Canonical product taxonomy (matches Product.ProductType on the backend), used
 // by the inventory report tabs.
@@ -896,6 +935,12 @@ export default function InventoryPage() {
   // Daily Stock Out: outgoing units on a chosen day, by product type + channel.
   const [stockOutDate, setStockOutDate] = useState<string>(() => todayISO());
   const [stockOutChannelId, setStockOutChannelId] = useState('all');
+  // Order Demand: consolidated stock needed across all open orders (backend agg).
+  const [demandChannelId, setDemandChannelId] = useState('all');
+  const [demand, setDemand] = useState<
+    Awaited<ReturnType<typeof storeInventoryService.getOrderDemand>> | null
+  >(null);
+  const [demandLoading, setDemandLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<InventoryTab>('inventory');
   const [actionLoading, setActionLoading] = useState(false);
 
@@ -920,6 +965,15 @@ export default function InventoryPage() {
   const [viewMovement, setViewMovement] = useState<InventoryMovement | null>(
     null
   );
+
+  // Bulk add / update stock (multi-row editor) + multi-select delete.
+  const [bulkDialog, setBulkDialog] = useState(false);
+  const [bulkChannel, setBulkChannel] = useState('');
+  const [bulkRows, setBulkRows] = useState<BulkRow[]>([]);
+  const [bulkSearch, setBulkSearch] = useState('');
+  const [bulkSaving, setBulkSaving] = useState(false);
+  const [selectedInvIds, setSelectedInvIds] = useState<Set<number>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   // Add Inventory
   const [addDialog, setAddDialog] = useState(false);
@@ -1032,6 +1086,30 @@ export default function InventoryPage() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // Order Demand is a backend aggregation — fetch it when the tab is active or
+  // the channel filter changes.
+  useEffect(() => {
+    if (activeTab !== 'demand') return;
+    let cancelled = false;
+    setDemandLoading(true);
+    storeInventoryService
+      .getOrderDemand(
+        demandChannelId === 'all' ? {} : { sales_channel: Number(demandChannelId) },
+      )
+      .then(d => {
+        if (!cancelled) setDemand(d);
+      })
+      .catch(() => {
+        if (!cancelled) setDemand(null);
+      })
+      .finally(() => {
+        if (!cancelled) setDemandLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, demandChannelId]);
 
   useEffect(() => {
     if (isLoading) return;
@@ -1437,6 +1515,138 @@ export default function InventoryPage() {
     void openProductInventoryLookup(inventoryBarcodeQuery);
   };
 
+  // ── Bulk add/update + multi-select delete ────────────────────────────────
+  const openBulkDialog = () => {
+    setBulkChannel('');
+    setBulkRows([]);
+    setBulkSearch('');
+    setBulkDialog(true);
+  };
+  const addBulkProduct = (p: ProductListItem) => {
+    setBulkRows(rows => {
+      if (rows.some(r => r.product === p.id)) return rows; // already in the list
+      return [
+        ...rows,
+        {
+          product: p.id,
+          product_name: p.name,
+          product_barcode: p.barcode,
+          product_image: p.image || p.image_url || null,
+          mode: 'add',
+          quantity: '',
+          minimum_quantity: '',
+          maximum_quantity: '',
+          bin_location: '',
+        },
+      ];
+    });
+    setBulkSearch('');
+  };
+  const setBulkRow = (i: number, patch: Partial<BulkRow>) =>
+    setBulkRows(rows => rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  const removeBulkRow = (i: number) =>
+    setBulkRows(rows => rows.filter((_, idx) => idx !== i));
+  const bulkSearchResults = useMemo(() => {
+    const q = bulkSearch.trim().toLowerCase();
+    if (!q) return [] as ProductListItem[];
+    const added = new Set(bulkRows.map(r => r.product));
+    return products
+      .filter(
+        p =>
+          !added.has(p.id) &&
+          ((p.name || '').toLowerCase().includes(q) ||
+            (p.barcode || '').toLowerCase().includes(q)),
+      )
+      .slice(0, 25);
+  }, [bulkSearch, products, bulkRows]);
+  const handleBulkScanEnter = () => {
+    const q = bulkSearch.trim().toLowerCase();
+    if (!q) return;
+    const exact = products.find(p => (p.barcode || '').toLowerCase() === q);
+    if (exact) {
+      addBulkProduct(exact);
+      return;
+    }
+    if (bulkSearchResults.length === 1) addBulkProduct(bulkSearchResults[0]);
+  };
+  const saveBulk = async () => {
+    const channelId = Number(bulkChannel);
+    if (!channelId) {
+      toast.error('Pick a sales channel for the batch.');
+      return;
+    }
+    const items = bulkRows
+      .filter(r => r.quantity !== '' && !Number.isNaN(Number(r.quantity)))
+      .map(r => ({
+        sales_channel: channelId,
+        product: r.product,
+        mode: r.mode,
+        quantity: Number(r.quantity),
+        ...(r.minimum_quantity !== '' && !Number.isNaN(Number(r.minimum_quantity))
+          ? { minimum_quantity: Number(r.minimum_quantity) }
+          : {}),
+        ...(r.maximum_quantity !== '' && !Number.isNaN(Number(r.maximum_quantity))
+          ? { maximum_quantity: Number(r.maximum_quantity) }
+          : {}),
+        ...(r.bin_location.trim() ? { bin_location: r.bin_location.trim() } : {}),
+      }));
+    if (items.length === 0) {
+      toast.error('Add at least one product and set its quantity.');
+      return;
+    }
+    setBulkSaving(true);
+    try {
+      const res = await storeInventoryService.bulkUpsert(items);
+      toast.success(
+        `Saved ${res.total} row(s): ${res.created} added, ${res.updated} updated.`,
+      );
+      setBulkDialog(false);
+      await fetchData();
+    } catch (err) {
+      toast.error(extractErrorMessage(err));
+    } finally {
+      setBulkSaving(false);
+    }
+  };
+  // Current on-hand for a product on the chosen bulk channel (null = not stocked).
+  const bulkRowCurrent = (productId: number): number | null => {
+    if (!bulkChannel) return null;
+    const inv = inventories.find(
+      i => i.sales_channel === Number(bulkChannel) && i.product === productId,
+    );
+    return inv ? inv.quantity : null;
+  };
+  // Resulting on-hand after applying the row's operation.
+  const bulkRowResult = (row: BulkRow): number => {
+    const cur = bulkRowCurrent(row.product) ?? 0;
+    const q = Number(row.quantity) || 0;
+    if (row.mode === 'add') return cur + q;
+    if (row.mode === 'subtract') return Math.max(0, cur - q);
+    return q;
+  };
+
+  const toggleInvSelected = (id: number) =>
+    setSelectedInvIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const bulkDeleteSelected = async () => {
+    if (selectedInvIds.size === 0) return;
+    setBulkDeleting(true);
+    try {
+      const res = await storeInventoryService.bulkDelete([...selectedInvIds]);
+      toast.success(`Deleted ${res.deleted} inventory row(s).`);
+      setSelectedInvIds(new Set());
+      await fetchData();
+    } catch (err) {
+      toast.error(extractErrorMessage(err));
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
   const openAddDialog = () => {
     setAddForm({
       sales_channel: '',
@@ -1801,6 +2011,9 @@ export default function InventoryPage() {
           <Button size="sm" onClick={openAddDialog}>
             <Plus className="h-4 w-4 mr-1.5" /> Add Stock
           </Button>
+          <Button size="sm" variant="outline" onClick={openBulkDialog}>
+            <PackagePlus className="h-4 w-4 mr-1.5" /> Bulk Add
+          </Button>
           <Button
             size="sm"
             variant="outline"
@@ -1920,7 +2133,8 @@ export default function InventoryPage() {
           setActiveTab(value as InventoryTab)
         }
       >
-        <TabsList>
+        <div className="-mx-1 overflow-x-auto px-1 pb-1">
+          <TabsList className="w-max">
             <TabsTrigger value="inventory">
               <Package className="h-4 w-4 mr-1.5" /> Stock Levels
             </TabsTrigger>
@@ -1939,7 +2153,11 @@ export default function InventoryPage() {
             <TabsTrigger value="daily-out">
               <TrendingDown className="h-4 w-4 mr-1.5" /> Daily Stock Out
             </TabsTrigger>
-        </TabsList>
+            <TabsTrigger value="demand">
+              <BarChart3 className="h-4 w-4 mr-1.5" /> Order Demand
+            </TabsTrigger>
+          </TabsList>
+        </div>
 
         {/* ── Filters (shared row) ─────────────────────────────────────── */}
         <div className="flex flex-wrap items-end gap-3 mt-4">
@@ -2016,10 +2234,59 @@ export default function InventoryPage() {
 
         {/* ── TAB: Stock Levels ────────────────────────────────────────── */}
         <TabsContent value="inventory" className="mt-4 space-y-4">
+          {selectedInvIds.size > 0 && (
+            <div className="flex items-center justify-between rounded-md border bg-muted/40 px-3 py-2">
+              <span className="text-sm font-medium">
+                {selectedInvIds.size} selected
+              </span>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setSelectedInvIds(new Set())}
+                >
+                  Clear
+                </Button>
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  onClick={bulkDeleteSelected}
+                  disabled={bulkDeleting}
+                >
+                  {bulkDeleting ? (
+                    <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4 mr-1.5" />
+                  )}
+                  Delete selected
+                </Button>
+              </div>
+            </div>
+          )}
           <Card>
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-10">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 cursor-pointer align-middle"
+                      aria-label="Select all on this page"
+                      checked={
+                        paginatedInventories.length > 0 &&
+                        paginatedInventories.every(i => selectedInvIds.has(i.id))
+                      }
+                      onChange={e => {
+                        const pageIds = paginatedInventories.map(i => i.id);
+                        setSelectedInvIds(prev => {
+                          const next = new Set(prev);
+                          if (e.target.checked) pageIds.forEach(id => next.add(id));
+                          else pageIds.forEach(id => next.delete(id));
+                          return next;
+                        });
+                      }}
+                    />
+                  </TableHead>
                   <TableHead>Product</TableHead>
                   <TableHead>Channel</TableHead>
                   <TableHead className="text-right">Qty</TableHead>
@@ -2033,7 +2300,7 @@ export default function InventoryPage() {
               <TableBody>
                 {filteredInventories.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="text-center py-12">
+                    <TableCell colSpan={9} className="text-center py-12">
                       {searchQuery || channelFilter !== 'all' || stockFilter !== 'all' ? (
                         <div className="flex flex-col items-center gap-2 text-muted-foreground">
                           <Filter className="h-10 w-10 opacity-30" />
@@ -2070,7 +2337,20 @@ export default function InventoryPage() {
                   </TableRow>
                 ) : (
                   paginatedInventories.map(inv => (
-                    <TableRow key={inv.id} className="group">
+                    <TableRow
+                      key={inv.id}
+                      className="group"
+                      data-state={selectedInvIds.has(inv.id) ? 'selected' : undefined}
+                    >
+                      <TableCell className="w-10">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 cursor-pointer align-middle"
+                          checked={selectedInvIds.has(inv.id)}
+                          onChange={() => toggleInvSelected(inv.id)}
+                          aria-label={`Select ${inv.product_name}`}
+                        />
+                      </TableCell>
                       <TableCell>
                         <div className="flex flex-col">
                           <span className="font-medium text-sm">
@@ -2674,6 +2954,125 @@ export default function InventoryPage() {
           )}
         </TabsContent>
 
+        {/* ── TAB: Order Demand (stock needed across all open orders) ───── */}
+        <TabsContent value="demand" className="mt-4 space-y-4">
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="min-w-[200px]">
+              <Label className="text-xs text-muted-foreground mb-1 block">
+                Sales channel
+              </Label>
+              <Select value={demandChannelId} onValueChange={setDemandChannelId}>
+                <SelectTrigger className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All channels</SelectItem>
+                  {channels.map(ch => (
+                    <SelectItem key={ch.id} value={String(ch.id)}>
+                      {ch.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <p className="pb-2 text-xs text-muted-foreground">
+              Stock needed to fulfil all <span className="font-medium">open</span>{' '}
+              orders (confirmed &amp; preparing). When an order is completed it
+              leaves this total — its consumption moves to the Daily Stock Out /
+              Movements history.
+            </p>
+          </div>
+
+          {demandLoading ? (
+            <Card className="p-10 text-center text-sm text-muted-foreground">
+              <Loader2 className="mx-auto h-6 w-6 animate-spin opacity-50" />
+              <p className="mt-2">Calculating demand…</p>
+            </Card>
+          ) : !demand || demand.rows.length === 0 ? (
+            <Card className="p-10 text-center">
+              <CheckCircle2 className="mx-auto h-10 w-10 text-green-500 opacity-50" />
+              <p className="mt-3 text-sm font-medium">No open-order demand</p>
+              <p className="mx-auto mt-1 max-w-sm text-xs text-muted-foreground">
+                There are no confirmed / preparing orders needing stock
+                {demandChannelId === 'all' ? '' : ' on this channel'}.
+              </p>
+            </Card>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                {[
+                  { label: 'Open orders', value: demand.totals.open_orders, red: false },
+                  { label: 'Products needed', value: demand.totals.products, red: false },
+                  { label: 'Short products', value: demand.totals.short_products, red: true },
+                  { label: 'Total shortfall', value: demand.totals.total_shortfall, red: true },
+                ].map(c => (
+                  <Card key={c.label} className="p-4">
+                    <p className="text-xs text-muted-foreground">{c.label}</p>
+                    <p
+                      className={`text-2xl font-semibold tabular-nums ${
+                        c.red && c.value > 0 ? 'text-red-600' : ''
+                      }`}
+                    >
+                      {c.value.toLocaleString()}
+                    </p>
+                  </Card>
+                ))}
+              </div>
+
+              <Card>
+                <div className="max-h-[520px] overflow-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Product</TableHead>
+                        <TableHead className="text-right">In orders</TableHead>
+                        <TableHead className="text-right">Required</TableHead>
+                        <TableHead className="text-right">Available</TableHead>
+                        <TableHead className="text-right">Shortfall</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {demand.rows.map(r => (
+                        <TableRow
+                          key={r.product_id}
+                          className={r.shortfall > 0 ? 'bg-red-50/40 dark:bg-red-950/10' : ''}
+                        >
+                          <TableCell>
+                            <div className="flex flex-col">
+                              <span className="text-sm font-medium">
+                                {r.product_name}
+                              </span>
+                              <span className="font-mono text-xs text-muted-foreground">
+                                {r.barcode}
+                              </span>
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-right font-mono text-sm">
+                            {r.order_count}
+                          </TableCell>
+                          <TableCell className="text-right font-mono text-sm font-semibold">
+                            {r.required}
+                          </TableCell>
+                          <TableCell className="text-right font-mono text-sm">
+                            {r.available}
+                          </TableCell>
+                          <TableCell className="text-right font-mono text-sm font-semibold">
+                            {r.shortfall > 0 ? (
+                              <span className="text-red-600">-{r.shortfall}</span>
+                            ) : (
+                              <span className="text-green-600">OK</span>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </Card>
+            </>
+          )}
+        </TabsContent>
+
       </Tabs>
 
       {/* ── Product Inventory Lookup Dialog ────────────────────────────── */}
@@ -2859,7 +3258,7 @@ export default function InventoryPage() {
         open={!!viewInventory}
         onOpenChange={() => setViewInventory(null)}
       >
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-h-[90vh] overflow-y-auto max-w-lg">
           <DialogHeader>
             <DialogTitle>Inventory Detail</DialogTitle>
             <DialogDescription>
@@ -2888,7 +3287,7 @@ export default function InventoryPage() {
 
       {/* ── Movement Detail Dialog ─────────────────────────────────────── */}
       <Dialog open={!!viewMovement} onOpenChange={() => setViewMovement(null)}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-h-[90vh] overflow-y-auto max-w-lg">
           <DialogHeader>
             <DialogTitle>Movement Detail</DialogTitle>
             <DialogDescription>
@@ -2908,6 +3307,209 @@ export default function InventoryPage() {
       </Dialog>
 
       {/* ── Add Stock / Inventory Record ───────────────────────────────── */}
+      {/* Bulk add / update stock — scan/search to add, set qty + min/max/bin */}
+      <Dialog open={bulkDialog} onOpenChange={setBulkDialog}>
+        <DialogContent className="flex max-h-[92vh] w-[calc(100vw-1.5rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
+          <DialogHeader className="border-b p-4 sm:p-5">
+            <DialogTitle>Bulk add / update stock</DialogTitle>
+            <DialogDescription>
+              Pick a channel, scan or search products to add rows, then set each
+              quantity (and optional min / max / bin) and save them all at once.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 space-y-3 overflow-y-auto p-4 sm:p-5">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">Sales channel *</Label>
+                <Select value={bulkChannel} onValueChange={setBulkChannel}>
+                  <SelectTrigger className="h-9">
+                    <SelectValue placeholder="Select a channel…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {channels.map(ch => (
+                      <SelectItem key={ch.id} value={String(ch.id)}>
+                        {ch.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">Scan or search product</Label>
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    className="h-9 pl-9"
+                    placeholder="Barcode or name…"
+                    value={bulkSearch}
+                    onChange={e => setBulkSearch(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleBulkScanEnter();
+                      }
+                    }}
+                    autoFocus
+                  />
+                </div>
+              </div>
+            </div>
+
+            {bulkSearch.trim() && (
+              <div className="max-h-56 divide-y overflow-auto rounded-md border">
+                {bulkSearchResults.length === 0 ? (
+                  <p className="p-3 text-xs text-muted-foreground">
+                    No products match “{bulkSearch.trim()}”.
+                  </p>
+                ) : (
+                  bulkSearchResults.map(p => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => addBulkProduct(p)}
+                      className="flex w-full items-center gap-3 p-2 text-left hover:bg-muted/60"
+                    >
+                      <ProductThumb src={p.image || p.image_url} />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium">{p.name}</p>
+                        <p className="font-mono text-xs text-muted-foreground">
+                          {p.barcode || '—'}
+                        </p>
+                      </div>
+                      <Plus className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+
+            {bulkRows.length === 0 ? (
+              <div className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
+                No products added yet — scan or search above to add them to the batch.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {bulkRows.map((row, i) => {
+                  const current = bulkRowCurrent(row.product);
+                  return (
+                    <div key={row.product} className="rounded-md border p-2.5">
+                      <div className="flex items-center gap-3">
+                        <ProductThumb src={row.product_image} />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium">{row.product_name}</p>
+                          <p className="font-mono text-xs text-muted-foreground">
+                            {row.product_barcode || '—'}
+                          </p>
+                        </div>
+                        {bulkChannel && (
+                          <span
+                            className={`flex-shrink-0 rounded px-2 py-0.5 text-xs ${
+                              current === null
+                                ? 'bg-blue-100 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300'
+                                : 'bg-muted text-muted-foreground'
+                            }`}
+                          >
+                            {current === null ? 'New' : `In stock: ${current}`}
+                          </span>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 flex-shrink-0"
+                          onClick={() => removeBulkRow(i)}
+                        >
+                          <Trash2 className="h-4 w-4 text-muted-foreground" />
+                        </Button>
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-12">
+                        <div className="space-y-1 sm:col-span-3">
+                          <Label className="text-[11px] text-muted-foreground">Operation</Label>
+                          <Select
+                            value={row.mode}
+                            onValueChange={v => setBulkRow(i, { mode: v as BulkRow['mode'] })}
+                          >
+                            <SelectTrigger className="h-8">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="add">Add (+)</SelectItem>
+                              <SelectItem value="subtract">Remove (−)</SelectItem>
+                              <SelectItem value="set">Set to</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-1 sm:col-span-2">
+                          <Label className="text-[11px] text-muted-foreground">Qty *</Label>
+                          <Input
+                            type="number" min={0} className="h-8"
+                            value={row.quantity}
+                            onChange={e => setBulkRow(i, { quantity: e.target.value })}
+                            placeholder="0"
+                          />
+                        </div>
+                        <div className="space-y-1 sm:col-span-2">
+                          <Label className="text-[11px] text-muted-foreground">Min</Label>
+                          <Input
+                            type="number" min={0} className="h-8"
+                            value={row.minimum_quantity}
+                            onChange={e => setBulkRow(i, { minimum_quantity: e.target.value })}
+                            placeholder="—"
+                          />
+                        </div>
+                        <div className="space-y-1 sm:col-span-2">
+                          <Label className="text-[11px] text-muted-foreground">Max</Label>
+                          <Input
+                            type="number" min={0} className="h-8"
+                            value={row.maximum_quantity}
+                            onChange={e => setBulkRow(i, { maximum_quantity: e.target.value })}
+                            placeholder="—"
+                          />
+                        </div>
+                        <div className="space-y-1 sm:col-span-3">
+                          <Label className="text-[11px] text-muted-foreground">Bin</Label>
+                          <Input
+                            className="h-8"
+                            value={row.bin_location}
+                            onChange={e => setBulkRow(i, { bin_location: e.target.value })}
+                            placeholder="—"
+                          />
+                        </div>
+                      </div>
+                      {bulkChannel && row.quantity !== '' && (
+                        <p className="mt-1.5 text-xs text-muted-foreground">
+                          New on-hand:{' '}
+                          <span className="font-semibold tabular-nums text-foreground">
+                            {bulkRowResult(row)}
+                          </span>
+                          {row.mode !== 'set' && current !== null && (
+                            <span> (was {current})</span>
+                          )}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="gap-2 border-t p-4 sm:p-5">
+            <Button variant="outline" onClick={() => setBulkDialog(false)} disabled={bulkSaving}>
+              Cancel
+            </Button>
+            <Button onClick={saveBulk} disabled={bulkSaving || bulkRows.length === 0}>
+              {bulkSaving ? (
+                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              ) : (
+                <PackagePlus className="h-4 w-4 mr-1.5" />
+              )}
+              Save {bulkRows.length || ''} row{bulkRows.length === 1 ? '' : 's'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={addDialog} onOpenChange={setAddDialog}>
         <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
@@ -3164,7 +3766,7 @@ export default function InventoryPage() {
 
       {/* ── Adjust Stock Dialog ────────────────────────────────────────── */}
       <Dialog open={adjustDialog} onOpenChange={setAdjustDialog}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-h-[90vh] overflow-y-auto max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <PackagePlus className="h-5 w-5" /> Adjust Stock
@@ -3287,7 +3889,7 @@ export default function InventoryPage() {
 
       {/* ── Edit Inventory Dialog ──────────────────────────────────────── */}
       <Dialog open={editDialog} onOpenChange={setEditDialog}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="max-h-[90vh] overflow-y-auto max-w-sm">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Pencil className="h-5 w-5" /> Edit Inventory Settings
@@ -3762,7 +4364,7 @@ export default function InventoryPage() {
 
       {/* ── Complete Movement Dialog ───────────────────────────────────── */}
       <Dialog open={completeDialog} onOpenChange={setCompleteDialog}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="max-h-[90vh] overflow-y-auto max-w-sm">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <CheckCircle2 className="h-5 w-5 text-green-600" /> Complete
