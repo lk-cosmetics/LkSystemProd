@@ -479,8 +479,11 @@ class DeliverySubmissionService:
 
         OrderLifecycleService._recompute_outcome(order, actor=actor)
 
-        # On terminal SUCCESSFUL_SALE, grant loyalty points (idempotent).
-        if order.final_outcome == Order.FinalOutcome.SUCCESSFUL_SALE:
+        # Grant loyalty points ONLY when the order is actually DELIVERED — not on
+        # earlier delivery updates (submit / accepted), which already carry the
+        # SUCCESSFUL_SALE outcome that packaging set. Points belong to a sale that
+        # actually reached the customer. (idempotent)
+        if new_status == Order.DeliveryStatus.DELIVERED:
             try:
                 OrderLifecycleService.grant_loyalty_points(order, actor=actor)
             except Exception as exc:  # pragma: no cover — non-fatal

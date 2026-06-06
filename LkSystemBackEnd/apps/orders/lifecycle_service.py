@@ -859,6 +859,14 @@ class OrderLifecycleService:
             },
         )
         cls._recompute_outcome(order, actor=actor)
+
+        # POS pickup is a completed sale — grant loyalty points now (idempotent).
+        # Previously POS-validated orders never earned points; only delivered
+        # orders did (and those granted too early).
+        try:
+            cls.grant_loyalty_points(order, actor=actor)
+        except Exception:  # pragma: no cover — non-fatal
+            pass
         return order
 
     # ── Packaging step ───────────────────────────────────────────────────────

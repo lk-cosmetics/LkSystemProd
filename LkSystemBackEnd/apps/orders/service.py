@@ -915,12 +915,15 @@ class OrderIngestionService:
                 self._product_cache[cache_key] = product
                 return product
 
-            # Product not found locally — try async fetch from WooCommerce
-            # This queues a Celery task in production, no blocking
+            # Product not found locally — fetch it from WooCommerce SYNCHRONOUSLY
+            # so the order line is linked to a real product right now. The async
+            # path returns None (the product would only be created later by a
+            # Celery task), which left webhook order lines unlinked while the API
+            # Sync — which pre-creates products — linked them fine.
             product = ProductSyncService.get_or_fetch_product(
                 wc_product_id=wc_pid,
                 sales_channel=sales_channel,
-                async_if_missing=True,  # Queue task instead of blocking
+                async_if_missing=False,  # Block + link now; never leave the line unlinked
             )
             self._product_cache[cache_key] = product
             if product:
