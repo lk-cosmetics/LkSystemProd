@@ -179,13 +179,31 @@ class Client(models.Model):
         return self.state
 
     def recalculate_metrics(self, *, save: bool = True):
-        """Recalculate points and counters from all non-deleted linked orders."""
+        """Recompute counters and loyalty points from this client's orders.
+
+        Loyalty points are EARNED ONLY on completed (``done``) orders. They are
+        DERIVED here from the current set of done, non-deleted orders — never
+        added while an order is still pending/processing/preparing, and removed
+        automatically when an order leaves ``done`` (canceled, returned,
+        exchanged) or is soft-deleted. Deriving the total rather than mutating
+        it per event makes points self-healing: ``points`` can never drift away
+        from the orders that justify them, and this method is the single writer
+        of ``client.points``.
+        """
+        from decimal import Decimal
+
+        from django.conf import settings
         from django.db.models import Count, Q, Sum
+
         from apps.orders.models import Order
 
         qs = Order.all_objects.filter(client=self, is_deleted=False)
         agg = qs.aggregate(
-            total_points=Sum('total'),
+            # Money from COMPLETED orders only — the basis for loyalty points.
+            done_total=Sum(
+                'total',
+                filter=Q(order_status=Order.OrderStatus.DONE),
+            ),
             order_count=Count('id'),
             return_count=Count(
                 'id',
@@ -199,7 +217,9 @@ class Client(models.Model):
                 ),
             ),
         )
-        self.points = int(agg['total_points'] or 0)
+        per_unit = Decimal(str(getattr(settings, 'LOYALTY_POINTS_PER_UNIT', 1)))
+        done_total = agg['done_total'] or Decimal('0')
+        self.points = int(done_total * per_unit) if per_unit > 0 else 0
         self.number_of_orders = agg['order_count'] or 0
         self.number_of_returns = agg['return_count'] or 0
         self.is_blocked = self.number_of_returns >= self.RETURN_BLOCK_THRESHOLD

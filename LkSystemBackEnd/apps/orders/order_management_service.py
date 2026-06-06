@@ -118,13 +118,38 @@ class OrderManagementService:
         order._actor = actor
         order.soft_delete(user=actor, reason=reason)
         OrderManagementService._sync_bi_for_order(order)
+        # A soft-deleted order no longer counts toward loyalty points; recompute
+        # so a deleted COMPLETED order's points drop off the client immediately.
+        OrderManagementService._recalc_client_points(order)
 
     @staticmethod
     def restore_order(*, order: Order, actor=None) -> Order:
         order._actor = actor
         order.restore(user=actor)
         OrderManagementService._sync_bi_for_order(order)
+        # Restoring brings the order back into scope; recompute so a restored
+        # COMPLETED order's points return to the client.
+        OrderManagementService._recalc_client_points(order)
         return order
+
+    @staticmethod
+    def _recalc_client_points(order: Order) -> None:
+        """Refresh the order's client metrics (points + counters). Best-effort:
+        loyalty bookkeeping must never block or break an order mutation."""
+        client_id = getattr(order, 'client_id', None)
+        if not client_id:
+            return
+        try:
+            from apps.clients.models import Client
+            client = Client.objects.filter(pk=client_id).first()
+            if client is not None:
+                client.recalculate_metrics()
+        except Exception:  # pragma: no cover — defensive
+            import logging
+            logging.getLogger(__name__).warning(
+                'client points recalc after order mutation failed for order %s',
+                getattr(order, 'pk', None), exc_info=True,
+            )
 
     @staticmethod
     def _sync_bi_for_order(order: Order) -> None:
