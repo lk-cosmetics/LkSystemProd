@@ -145,6 +145,23 @@ class ProductSyncService:
                 "Product %s %s from WooCommerce: wc_id=%s, name=%s, channel=%s",
                 product.id, action, wc_id, product.name, sales_channel.name
             )
+
+            # Link the product to this channel's inventory so it appears in the
+            # brand's stock / catalogue and is resolved on the next order (order
+            # lines look products up via SalesChannelInventory). Idempotent.
+            try:
+                from apps.inventory.models import SalesChannelInventory
+                SalesChannelInventory.objects.get_or_create(
+                    sales_channel=sales_channel,
+                    product=product,
+                    defaults={'quantity': 0},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not link product %s to channel %s inventory: %s",
+                    product.id, sales_channel.id, exc,
+                )
+
             return product
         
         except Exception as exc:

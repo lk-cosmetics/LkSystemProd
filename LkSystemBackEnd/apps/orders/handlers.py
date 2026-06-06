@@ -82,6 +82,19 @@ def register_webhook_handlers():
                     payload.get('id'), action, order.order_number,
                 )
 
+                # New orders are notified by the post_save 'created' signal. An
+                # EXISTING order that arrives/updates via webhook (created=False)
+                # would otherwise be silent, so notify the team explicitly here.
+                if not created:
+                    try:
+                        from apps.notifications.services import NotificationService
+                        NotificationService.order_imported(order)
+                    except Exception:
+                        logger.exception(
+                            "order_imported notification failed for webhook order %s",
+                            getattr(order, 'pk', None),
+                        )
+
                 # Auto-enqueue delivery for PROCESSING orders
                 _maybe_enqueue_delivery(order)
 
