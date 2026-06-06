@@ -477,20 +477,11 @@ class DeliverySubmissionService:
 
         from apps.orders.lifecycle_service import OrderLifecycleService
 
+        # Recompute the canonical status. When delivery becomes DELIVERED the
+        # order_status flips to DONE, and _recompute_order_status grants the
+        # loyalty points there (single source of truth) — not on earlier
+        # submit/accepted updates.
         OrderLifecycleService._recompute_outcome(order, actor=actor)
-
-        # Grant loyalty points ONLY when the order is actually DELIVERED — not on
-        # earlier delivery updates (submit / accepted), which already carry the
-        # SUCCESSFUL_SALE outcome that packaging set. Points belong to a sale that
-        # actually reached the customer. (idempotent)
-        if new_status == Order.DeliveryStatus.DELIVERED:
-            try:
-                OrderLifecycleService.grant_loyalty_points(order, actor=actor)
-            except Exception as exc:  # pragma: no cover — non-fatal
-                logger.warning(
-                    "Failed to grant loyalty points for order %s: %s",
-                    order.order_number, exc,
-                )
 
     # ─── payload builder ──────────────────────────────────────────────────────
 
