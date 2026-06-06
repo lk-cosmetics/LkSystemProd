@@ -403,6 +403,23 @@ class OrderLifecycleService:
                     user=actor,
                     details={'old': old_os, 'new': new_os},
                 )
+
+        # ── Loyalty points follow the canonical order status ──────────────────
+        # Earned exactly once when the order first reaches DONE (completed); removed
+        # if it later becomes CANCELED / RETURNED / EXCHANGED. This is the SINGLE
+        # place points are decided, so every path (POS, delivery, packaging,
+        # cancel, return) stays consistent. Both helpers are idempotent, so no
+        # double credit and no double removal.
+        if new_os != old_os:
+            OS = Order.OrderStatus
+            try:
+                if new_os == OS.DONE:
+                    cls.grant_loyalty_points(order, actor=actor)
+                elif new_os in (OS.CANCELED, OS.RETURNED, OS.EXCHANGED):
+                    cls.reverse_loyalty_points(order, actor=actor)
+            except Exception:  # pragma: no cover — points must never block a transition
+                pass
+
         return order.order_status
 
     # ── Transition matrix (validation gate for direct workflow changes) ──────
@@ -858,15 +875,9 @@ class OrderLifecycleService:
                 'sales_channel_name': inventory_channel.name,
             },
         )
+        # order_status becomes DONE here → _recompute_order_status grants the
+        # loyalty points (single source of truth).
         cls._recompute_outcome(order, actor=actor)
-
-        # POS pickup is a completed sale — grant loyalty points now (idempotent).
-        # Previously POS-validated orders never earned points; only delivered
-        # orders did (and those granted too early).
-        try:
-            cls.grant_loyalty_points(order, actor=actor)
-        except Exception:  # pragma: no cover — non-fatal
-            pass
         return order
 
     # ── Packaging step ───────────────────────────────────────────────────────
@@ -1309,15 +1320,9 @@ class OrderLifecycleService:
             else:
                 cls._restore_stock_locked(order, actor=actor)
 
+        # order_status becomes RETURNED/EXCHANGED here → _recompute_order_status
+        # reverses any loyalty points that were granted (single source of truth).
         cls._recompute_outcome(order, actor=actor)
-        # If this order had loyalty points granted (it was a successful sale
-        # before the return), reverse them so the customer's points reflect
-        # only kept-and-paid orders.
-        if order.loyalty_points_granted:
-            try:
-                cls.reverse_loyalty_points(order, actor=actor)
-            except Exception:
-                pass  # non-fatal
         return order
 
     @classmethod
