@@ -78,6 +78,10 @@ const STATUS_STYLES: Record<string, string> = {
 };
 void STATUS_STYLES;
 
+// How often the priority queue silently refetches so new orders (WooCommerce
+// webhooks, POS, manual) appear live without a manual refresh.
+const ORDERS_REFRESH_MS = 15000;
+
 const SOURCE_STYLES: Record<string, string> = {
   WOOCOMMERCE: 'bg-indigo-100 text-indigo-800',
   POS:         'bg-teal-100 text-teal-800',
@@ -455,8 +459,8 @@ export default function OrdersPage() {
     setOrdering(DEFAULT_ORDERING);
   }, []);
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
+  const fetchData = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
+    if (!silent) setLoading(true);
     try {
       const sharedFilters = {
         ...(statusFilter !== 'all' ? { status: statusFilter as OrderStatus } : {}),
@@ -495,14 +499,16 @@ export default function OrdersPage() {
     } catch (err) {
       console.error('Failed to fetch orders', err);
     }
-    try {
-      const ch = await salesChannelService.getAllChannels();
-      setChannels(ch);
-    } catch (err) {
-      console.error('Failed to fetch channels', err);
-    } finally {
-      setLoading(false);
+    // Channels change rarely — skip them on silent auto-refresh ticks.
+    if (!silent) {
+      try {
+        const ch = await salesChannelService.getAllChannels();
+        setChannels(ch);
+      } catch (err) {
+        console.error('Failed to fetch channels', err);
+      }
     }
+    if (!silent) setLoading(false);
   }, [
     brandFilter,
     canViewDeleted,
@@ -518,6 +524,32 @@ export default function OrdersPage() {
   ]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  // ── Real-time auto-refresh ────────────────────────────────────────────────
+  // The priority queue refetches SILENTLY (no spinner) on an interval so new
+  // orders show up live. A tick is skipped when the tab is hidden or the user is
+  // mid-action (detail open, rows selected, or a mutation in flight) so the
+  // refresh never disrupts them or wipes a selection.
+  const autoRefreshBlockedRef = useRef(false);
+  autoRefreshBlockedRef.current =
+    mutatingOrder || bulkBusy || selectedIds.size > 0 || !!viewOrder;
+
+  useEffect(() => {
+    const tick = () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (autoRefreshBlockedRef.current) return;
+      fetchData({ silent: true });
+    };
+    const id = window.setInterval(tick, ORDERS_REFRESH_MS);
+    const onVisible = () => {
+      if (!document.hidden && !autoRefreshBlockedRef.current) fetchData({ silent: true });
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [fetchData]);
 
   useEffect(() => {
     if (!activeSyncEvent || activeSyncEvent.status !== 'RUNNING') return;
@@ -1533,7 +1565,7 @@ export default function OrdersPage() {
               <RefreshCw className="size-4" /> Sync WC
             </Button>
           )}
-          <Button variant="outline" size="sm" onClick={fetchData} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => fetchData()} disabled={loading}>
             <RefreshCw className={`size-4 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
             Refresh
           </Button>
@@ -1753,6 +1785,16 @@ export default function OrdersPage() {
             <h2 className="text-sm font-semibold">Priority order queue</h2>
             <p className="text-xs text-muted-foreground">Rows are sorted by action needed, client points, then newest.</p>
           </div>
+          <span
+            className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-200"
+            title="New orders appear automatically"
+          >
+            <span className="relative flex size-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+            </span>
+            Live
+          </span>
         </div>
         <div className="overflow-x-auto">
           <Table>
