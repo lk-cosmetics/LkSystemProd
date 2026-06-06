@@ -47,6 +47,11 @@ def register_webhook_handlers():
             
             wc_status = (payload.get('status') or '').lower()
             if wc_status != WC_IMPORT_STATUS:
+                logger.info(
+                    "WooCommerce order WC#%s received via webhook but NOT imported — "
+                    "its status is '%s' (only '%s' orders are imported).",
+                    payload.get('id'), wc_status or 'unknown', WC_IMPORT_STATUS,
+                )
                 return {
                     'detail': f'Order ignored until {WC_IMPORT_STATUS}',
                     'status': wc_status or None,
@@ -62,6 +67,10 @@ def register_webhook_handlers():
                     source=Order.Source.WOOCOMMERCE,
                 )
                 action = 'created' if created else 'updated'
+                logger.info(
+                    "WooCommerce order WC#%s %s via webhook → local order %s",
+                    payload.get('id'), action, order.order_number,
+                )
 
                 # Auto-enqueue delivery for PROCESSING orders
                 _maybe_enqueue_delivery(order)

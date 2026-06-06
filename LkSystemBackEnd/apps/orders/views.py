@@ -622,6 +622,12 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Record the social channel the order came in on (Instagram, WhatsApp…).
+        order_source = data.get('order_source') or ''
+        if order_source and order.order_source != order_source:
+            order.order_source = order_source
+            order.save(update_fields=['order_source', 'updated_at'])
+
         return Response(OrderDetailSerializer(order).data, status=status.HTTP_201_CREATED)
 
     # ── Status update ────────────────────────────────────────────────────
@@ -770,6 +776,139 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         self._require_permission(request.user, 'view_orders', order)
         logs_qs = order.logs.select_related('user').all()
         return Response(OrderLogSerializer(logs_qs, many=True).data)
+
+    @action(detail=False, methods=['get'], url_path='stock-demand')
+    def stock_demand(self, request):
+        """Consolidated stock demand across all OPEN orders (confirmed/preparing).
+
+        Pack-aware; sorted worst-shortfall-first. ``?sales_channel=<id>`` narrows
+        to one channel. The completed-order side ("history") lives in the
+        inventory movement ledger / Daily Stock Out tab.
+        """
+        from apps.orders.stock_service import OrderStockAvailabilityService
+
+        self._require_permission(request.user, 'view_orders')
+        channel_id = request.query_params.get('sales_channel') or None
+        if channel_id:
+            try:
+                channel_id = int(channel_id)
+            except (TypeError, ValueError):
+                channel_id = None
+
+        scoped = self._scope_queryset(Order.objects.all(), request.user, 'view_orders')
+        rows = OrderStockAvailabilityService.open_order_demand(
+            orders=scoped, channel_id=channel_id,
+        )
+        open_orders = scoped.filter(
+            order_status__in=OrderStockAvailabilityService.OPEN_DEMAND_STATUSES,
+        )
+        if channel_id:
+            open_orders = open_orders.filter(sales_channel_id=channel_id)
+        return Response({
+            'rows': rows,
+            'totals': {
+                'products': len(rows),
+                'short_products': sum(1 for r in rows if r['shortfall'] > 0),
+                'total_required': sum(r['required'] for r in rows),
+                'total_shortfall': sum(r['shortfall'] for r in rows),
+                'open_orders': open_orders.count(),
+            },
+        })
+
+    @action(detail=False, methods=['post'], url_path='bulk')
+    def bulk(self, request):
+        """Run one lifecycle action over many orders at once.
+
+        Body: ``{"ids": [...], "action": "send_to_pos" | "submit_delivery" |
+        "cancel" | "delete", "pos_sales_channel"?, "reason"?}``. Each order is
+        tenant-scoped, permission-checked and processed independently, so the
+        response reports per-order success/failure — a partial batch is never
+        ambiguous. Per-order eligibility (e.g. only confirmed orders route to
+        POS / delivery) is enforced by the lifecycle service.
+        """
+        from rest_framework.exceptions import PermissionDenied as DRFPermissionDenied
+        from apps.orders.delivery_service import DeliveryError
+        from apps.orders.lifecycle_service import LifecycleError, OrderLifecycleService
+
+        ids = request.data.get('ids')
+        action_name = request.data.get('action')
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {'detail': 'Provide a non-empty "ids" list.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        perm_by_action = {
+            'send_to_pos': 'send_to_pos_orders',
+            'submit_delivery': 'send_to_delivery_orders',
+            'cancel': 'cancel_orders_lifecycle',
+            'delete': 'soft_delete_orders',
+        }
+        if action_name not in perm_by_action:
+            return Response(
+                {'detail': f'Unknown bulk action "{action_name}".'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        pos_channel = None
+        if action_name == 'send_to_pos':
+            from apps.sales_channels.models import SalesChannel
+            pos_channel = SalesChannel.objects.filter(
+                id=request.data.get('pos_sales_channel') or 0,
+            ).first()
+            if pos_channel is None:
+                return Response(
+                    {'detail': 'pos_sales_channel is required to send orders to POS.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        reason = (request.data.get('reason') or '').strip()
+        scoped = self._scope_queryset(Order.objects.all(), request.user, 'view_orders')
+        by_id = {o.id: o for o in scoped.filter(id__in=ids)}
+
+        results = []
+        for raw_id in ids:
+            order = by_id.get(raw_id)
+            if order is None:
+                results.append({'id': raw_id, 'ok': False, 'error': 'Not found or not permitted.'})
+                continue
+            entry = {'id': order.id, 'order_number': order.order_number}
+            try:
+                self._require_permission(request.user, perm_by_action[action_name], order)
+                if action_name == 'send_to_pos':
+                    OrderLifecycleService.send_to_pos(
+                        order, pos_sales_channel=pos_channel, actor=request.user,
+                    )
+                elif action_name == 'submit_delivery':
+                    OrderLifecycleService.submit_delivery(order, actor=request.user)
+                elif action_name == 'cancel':
+                    OrderLifecycleService.cancel(
+                        order, actor=request.user, reason=reason or 'Bulk cancellation',
+                    )
+                else:  # delete
+                    OrderManagementService.soft_delete_order(
+                        order=order, actor=request.user, reason=reason or 'Bulk delete',
+                    )
+                entry['ok'] = True
+            except (LifecycleError, DeliveryError) as exc:
+                entry['ok'] = False
+                entry['error'] = getattr(exc, 'message', str(exc))
+            except DRFPermissionDenied:
+                entry['ok'] = False
+                entry['error'] = 'You do not have permission for this order.'
+            except Exception as exc:  # noqa: BLE001 — never let one order kill the batch
+                entry['ok'] = False
+                entry['error'] = str(exc)
+            results.append(entry)
+
+        succeeded = sum(1 for r in results if r.get('ok'))
+        return Response({
+            'results': results,
+            'summary': {
+                'total': len(results),
+                'succeeded': succeeded,
+                'failed': len(results) - succeeded,
+            },
+        })
 
     @staticmethod
     def _lock_payload(order: Order) -> dict:

@@ -16,7 +16,10 @@ import {
   CreditCard, Calendar, User, MapPin, Percent, MessageSquare,
   Phone, MessageCircleMore, CalendarClock, Ban, ThumbsUp, Clock,
   ChevronLeft, ChevronRight, Truck, ShieldAlert, ScanLine,
+  Lock, Unlock, RotateCcw, Send, PackageCheck, AlertTriangle,
+  Award, Link2, Unlink, ArrowRight, Tag,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -45,6 +48,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { getMediaUrl } from '@/utils/helpers';
 import { productService } from '@/services/product.service';
+import { promotionService } from '@/services/promotion.service';
 import { useAuthStore } from '@/store/authStore';
 import { POSCameraScanner } from '../pos/POSCameraScanner';
 import { OrderClientSelector } from './OrderClientSelector';
@@ -52,8 +56,9 @@ import { CleanStatusBadge, SyncStatusBadge } from './orderStatusBadges';
 import type {
   OrderDetail, OrderLine, OrderEditRequest, OrderLogEntry, OrderDiscountType,
   ProductListItem, SalesChannel, OrderStatus, OrderStockByChannel,
-  POSOrderCreateRequest, Client,
+  POSOrderCreateRequest, Client, OrderSocialSource, DiscountCalculationResult,
 } from '@/types';
+import { ORDER_SOCIAL_SOURCES } from '@/types';
 import type { OrderStatusFieldsPayload, WooCommerceOrderPreviewResponse } from '@/services/order.service';
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
@@ -2920,6 +2925,13 @@ export function CreateOrderDialog({
   const [discountType, setDiscountType] = useState<OrderDiscountType>('NONE');
   const [discountValue, setDiscountValue] = useState('');
   const [customerNote, setCustomerNote] = useState('');
+  const [orderSource, setOrderSource] = useState<OrderSocialSource | ''>('');
+  // Auto-applied promotions, keyed by product id (the best active promo for the
+  // chosen channel). `manualPriceIds` marks lines the user hand-edited so a promo
+  // refresh never clobbers a deliberate price override.
+  const [promoByProduct, setPromoByProduct] = useState<Record<number, DiscountCalculationResult>>({});
+  const [promoLoading, setPromoLoading] = useState(false);
+  const [manualPriceIds, setManualPriceIds] = useState<Set<number>>(new Set());
 
   // Distinct brands reachable through the (already tenant-scoped) channel list.
   const brandOptions = useMemo(() => {
@@ -2949,7 +2961,8 @@ export function CreateOrderDialog({
     if (open) return;
     setBrandFilter(''); setChannelId(''); setProducts([]); setLines([]); setScanFeedback(null);
     setClient(null); setPaymentMethod('cash'); setOrderStatus('processing');
-    setDiscountType('NONE'); setDiscountValue(''); setCustomerNote('');
+    setDiscountType('NONE'); setDiscountValue(''); setCustomerNote(''); setOrderSource('');
+    setPromoByProduct({}); setManualPriceIds(new Set()); setPromoLoading(false);
   }, [open]);
 
   // On open, focus the brand: prefer the user's active workspace brand; with no
@@ -2982,6 +2995,7 @@ export function CreateOrderDialog({
     let cancelled = false;
     setLoadingProducts(true);
     setLines([]);
+    setManualPriceIds(new Set());
     // A brand change may also mean a different company; drop any picked client
     // so we never submit a cross-tenant customer (the backend rejects it too).
     setClient(null);
@@ -3024,11 +3038,53 @@ export function CreateOrderDialog({
     )));
   }, []);
   const updatePrice = useCallback((productId: number, price: string) => {
+    // A hand-typed price wins over any promo and must not be auto-overwritten.
+    setManualPriceIds(prev => (prev.has(productId) ? prev : new Set(prev).add(productId)));
     setLines(prev => prev.map(l => (l.product.id === productId ? { ...l, price } : l)));
   }, []);
   const removeLine = useCallback((productId: number) => {
     setLines(prev => prev.filter(l => l.product.id !== productId));
   }, []);
+
+  // ── Auto-apply promotions (same engine POS uses) ─────────────────────────
+  // Fetch the best active promotion for each line's product on the chosen
+  // channel and use the discounted price. The backend re-applies this
+  // authoritatively when the order is saved; this keeps the preview honest.
+  const productIdsKey = useMemo(
+    () => Array.from(new Set(lines.map(l => l.product.id))).sort((a, b) => a - b).join(','),
+    [lines],
+  );
+
+  useEffect(() => {
+    if (!channelId || !productIdsKey) { setPromoByProduct({}); return; }
+    const productIds = productIdsKey.split(',').map(Number);
+    let cancelled = false;
+    setPromoLoading(true);
+    promotionService
+      .batchCalculateDiscounts({ product_ids: productIds, sales_channel_id: Number(channelId) })
+      .then(res => { if (!cancelled) setPromoByProduct(res.results || {}); })
+      .catch(() => { if (!cancelled) setPromoByProduct({}); })
+      .finally(() => { if (!cancelled) setPromoLoading(false); });
+    return () => { cancelled = true; };
+  }, [channelId, productIdsKey]);
+
+  // Push the promo price onto each line — but never over a manual override.
+  useEffect(() => {
+    setLines(prev => {
+      let changed = false;
+      const next = prev.map(l => {
+        if (manualPriceIds.has(l.product.id)) return l;
+        const promo = promoByProduct[l.product.id];
+        const target = promo ? promo.discounted_price : String(l.product.sales_price ?? '0');
+        if (l.price === target) return l;
+        changed = true;
+        return { ...l, price: target };
+      });
+      return changed ? next : prev;
+    });
+    // Keyed on promoByProduct only: a manual edit must not retrigger this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [promoByProduct]);
 
   const subtotal = useMemo(
     () => lines.reduce((sum, l) => sum + l.quantity * (parseFloat(l.price) || 0), 0),
@@ -3076,6 +3132,7 @@ export function CreateOrderDialog({
         paymentMethod === 'cash' ? 'Cash' : paymentMethod === 'card' ? 'Card' : 'Bank Transfer',
       customer_note: customerNote,
       status: orderStatus,
+      order_source: orderSource || '',
       discount_type: discountType,
       discount_value:
         discountType === 'NONE' ? '0.00' : (parseFloat(discountValue) || 0).toFixed(2),
@@ -3083,7 +3140,7 @@ export function CreateOrderDialog({
     onSubmit(payload);
   }, [
     channelId, lines, client, paymentMethod, customerNote,
-    orderStatus, discountType, discountValue, discountInvalid, onSubmit,
+    orderStatus, orderSource, discountType, discountValue, discountInvalid, onSubmit,
   ]);
 
   return (
@@ -3194,6 +3251,11 @@ export function CreateOrderDialog({
             </div>
           )}
 
+          {promoLoading && lines.length > 0 && (
+            <p className="flex items-center gap-1 text-[11px] text-muted-foreground">
+              <Loader2 className="size-3 animate-spin" /> Checking for promotions…
+            </p>
+          )}
           {lines.length > 0 && (
             <div className="divide-y rounded-lg border">
               {lines.map(l => (
@@ -3202,6 +3264,15 @@ export function CreateOrderDialog({
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium whitespace-normal break-words leading-snug">{l.product.name}</p>
                     <p className="text-[11px] text-muted-foreground">{l.product.barcode || '—'}</p>
+                    {promoByProduct[l.product.id] && (
+                      <span className="mt-1 inline-flex items-center gap-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                        <Tag className="size-2.5" />
+                        {promoByProduct[l.product.id].discount_type.toLowerCase().includes('percent')
+                          ? `-${Number(promoByProduct[l.product.id].discount_value)}%`
+                          : `-${Number(promoByProduct[l.product.id].discount_value).toFixed(2)} TND`}
+                        <span className="font-normal opacity-70">· was {Number(promoByProduct[l.product.id].original_price).toFixed(2)}</span>
+                      </span>
+                    )}
                   </div>
                   <div className="flex flex-shrink-0 items-center gap-2">
                     <Input
@@ -3271,6 +3342,25 @@ export function CreateOrderDialog({
                 </SelectContent>
               </Select>
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label className="text-xs font-medium">Order source (optional)</Label>
+            <Select
+              value={orderSource || 'none'}
+              onValueChange={v => setOrderSource(v === 'none' ? '' : (v as OrderSocialSource))}
+              disabled={isLoading}
+            >
+              <SelectTrigger className="h-9">
+                <SelectValue placeholder="Where did this order come from?" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">Not specified</SelectItem>
+                {ORDER_SOCIAL_SOURCES.map(s => (
+                  <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
           <div className="space-y-1.5">
@@ -3582,14 +3672,234 @@ export function PreviewDialog({
 /* LOGS DIALOG — Timeline layout                                             */
 /* ═══════════════════════════════════════════════════════════════════════════ */
 
-const LOG_COLORS: Record<string, string> = {
-  CREATED: 'bg-green-500',
-  UPDATED: 'bg-blue-500',
-  STATUS_CHANGED: 'bg-indigo-500',
-  DISCOUNT_APPLIED: 'bg-purple-500',
-  SOFT_DELETED: 'bg-red-500',
-  RESTORED: 'bg-emerald-500',
+/** Visual tone palette for a log entry's icon chip + accents. */
+type LogTone = 'green' | 'blue' | 'indigo' | 'purple' | 'amber' | 'red' | 'slate' | 'sky';
+
+const TONE_STYLES: Record<LogTone, { chip: string; icon: string }> = {
+  green:  { chip: 'bg-emerald-100 dark:bg-emerald-950/50', icon: 'text-emerald-600 dark:text-emerald-400' },
+  blue:   { chip: 'bg-blue-100 dark:bg-blue-950/50',       icon: 'text-blue-600 dark:text-blue-400' },
+  indigo: { chip: 'bg-indigo-100 dark:bg-indigo-950/50',   icon: 'text-indigo-600 dark:text-indigo-400' },
+  purple: { chip: 'bg-purple-100 dark:bg-purple-950/50',   icon: 'text-purple-600 dark:text-purple-400' },
+  amber:  { chip: 'bg-amber-100 dark:bg-amber-950/50',     icon: 'text-amber-600 dark:text-amber-400' },
+  red:    { chip: 'bg-red-100 dark:bg-red-950/50',         icon: 'text-red-600 dark:text-red-400' },
+  slate:  { chip: 'bg-slate-100 dark:bg-slate-800/60',     icon: 'text-slate-500 dark:text-slate-400' },
+  sky:    { chip: 'bg-sky-100 dark:bg-sky-950/50',         icon: 'text-sky-600 dark:text-sky-400' },
 };
+
+/** Per-action presentation: a friendly label, an icon and a tone. */
+const LOG_META: Record<string, { label: string; tone: LogTone; icon: LucideIcon }> = {
+  CREATED:                    { label: 'Order created',                 tone: 'green',  icon: Plus },
+  UPDATED:                    { label: 'Order updated',                 tone: 'blue',   icon: Pencil },
+  SOFT_DELETED:               { label: 'Order deleted',                 tone: 'red',    icon: Trash2 },
+  RESTORED:                   { label: 'Order restored',                tone: 'green',  icon: Undo2 },
+  DISCOUNT_APPLIED:           { label: 'Discount applied',              tone: 'purple', icon: Percent },
+  STATUS_CHANGED:             { label: 'Status changed',                tone: 'indigo', icon: RefreshCw },
+  WOOCOMMERCE_STATUS_CHANGED: { label: 'WooCommerce status changed',    tone: 'sky',    icon: Globe },
+  LOCAL_STATUS_CHANGED:       { label: 'Local status changed',          tone: 'indigo', icon: RefreshCw },
+  CONTACT_STATUS_CHANGED:     { label: 'Contact status changed',        tone: 'blue',   icon: Phone },
+  DELAY_DATE_CHANGED:         { label: 'Delay date changed',            tone: 'amber',  icon: CalendarClock },
+  RETURN_EXCHANGE_CHANGED:    { label: 'Return / exchange changed',     tone: 'amber',  icon: RotateCcw },
+  EDIT_LOCK_ACQUIRED:         { label: 'Edit lock acquired',            tone: 'slate',  icon: Lock },
+  EDIT_LOCK_RELEASED:         { label: 'Edit lock released',            tone: 'slate',  icon: Unlock },
+  EDIT_LOCK_TAKEN_OVER:       { label: 'Edit lock taken over',          tone: 'amber',  icon: Lock },
+  OUTCOME_CONFIRMED:          { label: 'Order confirmed',               tone: 'green',  icon: ThumbsUp },
+  OUTCOME_DELAYED:            { label: 'Order delayed',                 tone: 'amber',  icon: Clock },
+  OUTCOME_CANCELLED:          { label: 'Order cancelled',               tone: 'red',    icon: Ban },
+  SYNC_RECEIVED:              { label: 'Synced from WooCommerce',       tone: 'sky',    icon: RefreshCw },
+  SYNC_FAILED:                { label: 'Sync failed',                   tone: 'red',    icon: AlertTriangle },
+  DELIVERY_QUEUED:            { label: 'Queued for delivery',           tone: 'blue',   icon: Truck },
+  DELIVERY_SUBMITTED:         { label: 'Submitted to provider',         tone: 'blue',   icon: Send },
+  DELIVERY_ACCEPTED:          { label: 'Accepted by provider',          tone: 'green',  icon: CheckCircle },
+  DELIVERY_FAILED:            { label: 'Delivery failed',               tone: 'red',    icon: XCircle },
+  DELIVERY_DELIVERED:         { label: 'Delivered',                     tone: 'green',  icon: PackageCheck },
+  DELIVERY_RETURNED:          { label: 'Returned to sender',            tone: 'amber',  icon: Undo2 },
+  SENT_TO_POS:                { label: 'Sent to POS',                   tone: 'blue',   icon: Store },
+  POS_VALIDATED:              { label: 'POS validated',                 tone: 'green',  icon: CheckCircle },
+  RETURN_PROCESSED:           { label: 'Return processed',              tone: 'amber',  icon: RotateCcw },
+  STOCK_RESTORED:             { label: 'Stock restored',                tone: 'green',  icon: Boxes },
+  PACKAGED:                   { label: 'Packaged',                      tone: 'green',  icon: Package },
+  PACKAGING_UPDATED:          { label: 'Packaging updated',             tone: 'blue',   icon: Package },
+  PACKAGING_REVERSED:         { label: 'Packaging reversed',            tone: 'amber',  icon: Undo2 },
+  RETURN_TYPE_SET:            { label: 'Return type set',               tone: 'amber',  icon: RotateCcw },
+  FINAL_OUTCOME_CHANGED:      { label: 'Final outcome changed',         tone: 'indigo', icon: TrendingUp },
+  DAMAGED_STOCK_RECORDED:     { label: 'Damaged stock recorded',        tone: 'red',    icon: AlertTriangle },
+  REPLACEMENT_DEDUCTED:       { label: 'Replacement deducted',          tone: 'amber',  icon: Boxes },
+  WORKFLOW_STATUS_CHANGED:    { label: 'Workflow status changed',       tone: 'indigo', icon: RefreshCw },
+  AUTO_CANCELLED:             { label: 'Auto-cancelled (system)',       tone: 'red',    icon: Ban },
+  POINTS_GRANTED:             { label: 'Loyalty points granted',        tone: 'purple', icon: Award },
+  POINTS_REVERSED:            { label: 'Loyalty points reversed',       tone: 'amber',  icon: Award },
+  WC_PRODUCT_LINKED:          { label: 'WooCommerce product linked',    tone: 'sky',    icon: Link2 },
+  WC_PRODUCT_UNLINKED:        { label: 'WooCommerce product unlinked',  tone: 'slate',  icon: Unlink },
+  ORDER_STATUS_CHANGED:       { label: 'Order status changed',          tone: 'indigo', icon: RefreshCw },
+  MANUAL_STATUS_OVERRIDE:     { label: 'Manual status override',        tone: 'amber',  icon: ShieldAlert },
+  WC_CANCEL_SYNCED:           { label: 'Cancellation synced to WooCommerce', tone: 'sky', icon: Globe },
+  WC_SYNC_RETRIED:            { label: 'WooCommerce sync retried',      tone: 'sky',    icon: RefreshCw },
+};
+
+function logMeta(action: string, fallbackLabel?: string): { label: string; tone: LogTone; icon: LucideIcon } {
+  return LOG_META[action] ?? {
+    label: fallbackLabel || action.replace(/_/g, ' ').toLowerCase().replace(/^./, (c) => c.toUpperCase()),
+    tone: 'slate',
+    icon: History,
+  };
+}
+
+/** snake_case / kebab-case key → "Title case" label. */
+function humanizeKey(key: string): string {
+  const spaced = key.replace(/[_-]+/g, ' ').trim();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+/** Humanize a status-like token, but leave free text (with spaces) untouched. */
+function humanizeToken(value: string): string {
+  if (!value || value.includes(' ')) return value;
+  const spaced = value.replace(/[_-]+/g, ' ').trim();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+/** Render any JSON detail value as a compact, readable string. */
+function formatLogValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '—';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (typeof value === 'number') return String(value);
+  if (typeof value === 'string') {
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value)) {
+      const d = new Date(value);
+      if (!Number.isNaN(d.getTime())) {
+        return d.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+      }
+    }
+    return humanizeToken(value);
+  }
+  if (Array.isArray(value)) {
+    return value.length ? value.map((v) => formatLogValue(v)).join(', ') : '—';
+  }
+  if (typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([k, v]) => `${humanizeKey(k)}: ${formatLogValue(v)}`)
+      .join(' · ');
+  }
+  return String(value);
+}
+
+/** Pairs of detail keys that represent a "before → after" transition. */
+const LOG_TRANSITIONS: ReadonlyArray<{ from: string; to: string; label: string }> = [
+  { from: 'old_order_status', to: 'new_order_status', label: 'Order status' },
+  { from: 'old_status',       to: 'new_status',       label: 'Status' },
+  { from: 'from_status',      to: 'to_status',        label: 'Status' },
+  { from: 'previous_status',  to: 'new_status',       label: 'Status' },
+  { from: 'old_wc_status',    to: 'new_wc_status',    label: 'WooCommerce status' },
+  { from: 'old_workflow',     to: 'new_workflow',     label: 'Workflow' },
+  { from: 'old_value',        to: 'new_value',        label: 'Value' },
+  { from: 'old',              to: 'new',              label: 'Change' },
+  { from: 'from',             to: 'to',               label: 'Change' },
+  { from: 'previous',         to: 'current',          label: 'Change' },
+];
+
+/** Detail keys best shown as a free-text block rather than a one-line row. */
+const LOG_TEXT_KEYS = new Set([
+  'reason', 'note', 'message', 'error', 'detail', 'details', 'cancellation_reason',
+  'delay_reason', 'return_reason', 'error_message', 'sync_error_message', 'comment',
+]);
+
+/** A clear WooCommerce sync-status pill for sync-related entries (or any entry whose details carry a sync_status). */
+function syncPillFor(log: OrderLogEntry): { label: string; tone: LogTone; icon: LucideIcon } | null {
+  switch (log.action) {
+    case 'SYNC_RECEIVED':   return { label: 'Synced from WooCommerce', tone: 'green', icon: CheckCircle };
+    case 'SYNC_FAILED':     return { label: 'Sync failed', tone: 'red', icon: XCircle };
+    case 'WC_CANCEL_SYNCED':return { label: 'Cancellation pushed to WooCommerce', tone: 'sky', icon: Globe };
+    case 'WC_SYNC_RETRIED': return { label: 'Sync retried', tone: 'sky', icon: RefreshCw };
+    case 'WOOCOMMERCE_STATUS_CHANGED': return { label: 'WooCommerce updated', tone: 'sky', icon: Globe };
+    default: break;
+  }
+  const ss = log.details?.sync_status;
+  if (typeof ss === 'string' && ss) {
+    const norm = ss.toLowerCase();
+    if (norm.includes('fail')) return { label: 'Sync failed', tone: 'red', icon: XCircle };
+    if (norm.includes('pending') || norm.includes('queue')) return { label: 'Pending sync', tone: 'amber', icon: Clock };
+    if (norm.includes('sync') || norm.includes('success') || norm.includes('done') || norm.includes('complete')) {
+      return { label: 'Synced', tone: 'green', icon: CheckCircle };
+    }
+  }
+  return null;
+}
+
+function SyncPill({ pill }: Readonly<{ pill: { label: string; tone: LogTone; icon: LucideIcon } }>) {
+  const t = TONE_STYLES[pill.tone];
+  const Icon = pill.icon;
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${t.chip} ${t.icon}`}>
+      <Icon className="size-3" />
+      {pill.label}
+    </span>
+  );
+}
+
+/** Human-readable rendering of a log entry's `details` blob (never raw JSON). */
+function LogDetails({ details, hideKeys }: Readonly<{ details: Record<string, unknown>; hideKeys?: Set<string> }>) {
+  const present = (k: string) => k in details && details[k] !== null && details[k] !== undefined && details[k] !== '';
+
+  const consumed = new Set<string>(hideKeys ?? []);
+  const transitions: Array<{ label: string; from: unknown; to: unknown }> = [];
+  for (const t of LOG_TRANSITIONS) {
+    if (consumed.has(t.from) || consumed.has(t.to)) continue;
+    if (present(t.from) && present(t.to)) {
+      transitions.push({ label: t.label, from: details[t.from], to: details[t.to] });
+      consumed.add(t.from);
+      consumed.add(t.to);
+    }
+  }
+
+  const rows = Object.entries(details).filter(
+    ([k, v]) => !consumed.has(k) && v !== null && v !== undefined && v !== '',
+  );
+
+  if (transitions.length === 0 && rows.length === 0) return null;
+
+  return (
+    <div className="mt-2 space-y-1.5 rounded-lg border bg-muted/40 px-2.5 py-2">
+      {transitions.map((t) => (
+        <div key={`t-${t.label}`} className="flex flex-wrap items-center gap-1.5 text-[11px]">
+          <span className="text-muted-foreground">{t.label}</span>
+          <span className="rounded bg-background px-1.5 py-0.5 font-medium text-muted-foreground line-through decoration-muted-foreground/40">
+            {formatLogValue(t.from)}
+          </span>
+          <ArrowRight className="size-3 text-muted-foreground" />
+          <span className="rounded bg-primary/10 px-1.5 py-0.5 font-semibold text-foreground">
+            {formatLogValue(t.to)}
+          </span>
+        </div>
+      ))}
+      {rows.map(([k, v]) => {
+        const asText = LOG_TEXT_KEYS.has(k) || (typeof v === 'string' && v.length > 36);
+        if (asText) {
+          return (
+            <div key={k} className="text-[11px]">
+              <span className="text-muted-foreground">{humanizeKey(k)}</span>
+              <p className="mt-0.5 whitespace-pre-wrap break-words rounded bg-background px-2 py-1 text-foreground">
+                {formatLogValue(v)}
+              </p>
+            </div>
+          );
+        }
+        return (
+          <div key={k} className="flex items-start justify-between gap-3 text-[11px]">
+            <span className="shrink-0 text-muted-foreground">{humanizeKey(k)}</span>
+            <span className="break-words text-right font-medium text-foreground">{formatLogValue(v)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function formatLogTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString('en-GB', {
+    day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+}
 
 interface LogsDialogProps {
   open: boolean;
@@ -3601,45 +3911,51 @@ interface LogsDialogProps {
 
 export function LogsDialog({ open, onOpenChange, orderNumber, logs, isLoading }: Readonly<LogsDialogProps>) {
   return (
-    <ResponsiveSheet open={open} onOpenChange={onOpenChange} title={`Logs — ${orderNumber ?? ''}`} description="Audit trail">
+    <ResponsiveSheet
+      open={open}
+      onOpenChange={onOpenChange}
+      title={`Activity — ${orderNumber ?? ''}`}
+      description="A timeline of everything that happened to this order."
+    >
       {isLoading ? (
-        <div className="flex flex-col items-center justify-center py-12 gap-2">
+        <div className="flex flex-col items-center justify-center gap-2 py-12">
           <Loader2 className="size-5 animate-spin text-muted-foreground" />
-          <p className="text-xs text-muted-foreground">Loading logs...</p>
+          <p className="text-xs text-muted-foreground">Loading activity…</p>
         </div>
       ) : logs.length === 0 ? (
-        <div className="text-center py-12 space-y-2">
-          <History className="size-6 text-muted-foreground/30 mx-auto" />
-          <p className="text-sm text-muted-foreground">No audit logs found</p>
+        <div className="space-y-2 py-12 text-center">
+          <History className="mx-auto size-6 text-muted-foreground/30" />
+          <p className="text-sm text-muted-foreground">No activity recorded yet</p>
         </div>
       ) : (
-        <div className="relative">
-          {/* Timeline line */}
-          <div className="absolute left-[7px] top-2 bottom-2 w-px bg-border" />
+        <div className="relative pl-1">
+          {/* Spine that threads through the icon chips */}
+          <div className="absolute left-[15px] top-3 bottom-3 w-px bg-border" />
 
-          <div className="space-y-0">
+          <div className="space-y-3">
             {logs.map((log) => {
-              const dotColor = LOG_COLORS[log.action] ?? 'bg-gray-400';
+              const meta = logMeta(log.action, log.action_display);
+              const tone = TONE_STYLES[meta.tone];
+              const Icon = meta.icon;
+              const pill = syncPillFor(log);
+              // Avoid showing the sync_status key twice when the pill already conveys it.
+              const hideKeys = pill ? new Set(['sync_status']) : undefined;
               return (
-                <div key={log.id} className="relative pl-7 pb-5 last:pb-0">
-                  {/* Dot */}
-                  <div className={`absolute left-0 top-1.5 size-[15px] rounded-full border-2 border-background ${dotColor}`} />
-
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-semibold">{log.action.replace(/_/g, ' ')}</span>
-                      <span className="text-[11px] text-muted-foreground tabular-nums">
-                        {new Date(log.created_at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
-                      </span>
+                <div key={log.id} className="relative flex gap-3">
+                  <div className={`relative z-10 flex size-7 shrink-0 items-center justify-center rounded-full ring-4 ring-background ${tone.chip}`}>
+                    <Icon className={`size-3.5 ${tone.icon}`} />
+                  </div>
+                  <div className="min-w-0 flex-1 pb-1">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className="text-sm font-semibold leading-tight">{meta.label}</span>
+                      {pill && <SyncPill pill={pill} />}
                     </div>
-                    <p className="text-xs text-muted-foreground">
-                      by <span className="font-medium text-foreground">{log.user_name || 'System'}</span>
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                      {formatLogTime(log.created_at)}
+                      {' · '}
+                      <span className="font-medium text-foreground">{log.user_name || 'System'}</span>
                     </p>
-                    {Object.keys(log.details).length > 0 && (
-                      <pre className="text-[11px] font-mono bg-muted rounded-md p-2 mt-1.5 max-h-20 overflow-auto whitespace-pre-wrap break-words text-muted-foreground">
-                        {JSON.stringify(log.details, null, 2)}
-                      </pre>
-                    )}
+                    <LogDetails details={log.details} hideKeys={hideKeys} />
                   </div>
                 </div>
               );

@@ -96,6 +96,63 @@ class StoreInventoryService {
   }
 
   /**
+   * Consolidated stock demand across all OPEN orders (confirmed / preparing).
+   * Pack-aware, sorted worst-shortfall-first. ``sales_channel`` narrows scope.
+   */
+  async getOrderDemand(params?: { sales_channel?: number }): Promise<{
+    rows: Array<{
+      product_id: number;
+      product_name: string;
+      barcode: string;
+      required: number;
+      available: number;
+      shortfall: number;
+      order_count: number;
+    }>;
+    totals: {
+      products: number;
+      short_products: number;
+      total_required: number;
+      total_shortfall: number;
+      open_orders: number;
+    };
+  }> {
+    const response = await apiClient.get('/api/v1/orders/stock-demand/', { params });
+    return response.data;
+  }
+
+  /**
+   * Create or update many inventory rows at once (atomic; reserved untouched).
+   */
+  async bulkUpsert(
+    items: Array<{
+      sales_channel: number;
+      product: number;
+      quantity: number;
+      /** How quantity is applied: overwrite, add to, or subtract from on-hand. */
+      mode?: 'set' | 'add' | 'subtract';
+      minimum_quantity?: number;
+      maximum_quantity?: number | null;
+      bin_location?: string;
+    }>,
+  ): Promise<{ created: number; updated: number; total: number }> {
+    const response = await apiClient.post(
+      `${STORE_INVENTORY_ENDPOINT}bulk-upsert/`,
+      { items },
+    );
+    return response.data;
+  }
+
+  /** Delete many inventory rows by id (channel-scoped on the server). */
+  async bulkDelete(ids: number[]): Promise<{ deleted: number }> {
+    const response = await apiClient.post(
+      `${STORE_INVENTORY_ENDPOINT}bulk-delete/`,
+      { ids },
+    );
+    return response.data;
+  }
+
+  /**
    * Get sales channel inventory by ID
    */
   async getStoreInventoryById(id: number): Promise<SalesChannelInventory> {

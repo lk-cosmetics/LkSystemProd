@@ -16,7 +16,7 @@ import {
   CheckCircle, Clock, Package, Pencil, History, Trash2,
   Undo2, Loader2, TrendingUp,
   Truck, Store, RotateCcw, Star, ArrowUpDown, ArrowUp, ArrowDown,
-  X, SlidersHorizontal, AlertTriangle, Phone, ShieldAlert, Plus,
+  X, SlidersHorizontal, AlertTriangle, Phone, ShieldAlert, Plus, Ban,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -51,7 +51,7 @@ import type {
   OrderDiscountType, OrderSummary, OrderStatus, SalesChannel, ProductListItem,
   OrderLogEntry, CleanOrderStatus, POSOrderCreateRequest,
 } from '@/types';
-import type { OrderStatusFieldsPayload, OrderSyncEvent, WooCommerceOrderPreviewResponse } from '@/services/order.service';
+import type { OrderStatusFieldsPayload, OrderSyncEvent, WooCommerceOrderPreviewResponse, BulkOrderAction } from '@/services/order.service';
 
 import {
   OrderDetailDialog, SyncDialog, PreviewDialog, LogsDialog, MessageAlert,
@@ -82,6 +82,15 @@ const SOURCE_STYLES: Record<string, string> = {
   WOOCOMMERCE: 'bg-indigo-100 text-indigo-800',
   POS:         'bg-teal-100 text-teal-800',
   MANUAL:      'bg-slate-100 text-slate-700',
+};
+
+// Social channel a manual order came in on (Instagram, WhatsApp, …).
+const ORDER_SOURCE_STYLES: Record<string, string> = {
+  instagram: 'bg-pink-100 text-pink-700',
+  whatsapp:  'bg-green-100 text-green-700',
+  facebook:  'bg-blue-100 text-blue-700',
+  tiktok:    'bg-neutral-200 text-neutral-800',
+  other:     'bg-slate-100 text-slate-600',
 };
 
 const PAYMENT_STYLES: Record<string, string> = {
@@ -219,6 +228,15 @@ function SourceBadge({ source }: { source: string }) {
   );
 }
 
+function OrderSourceBadge({ source, label }: { source: string; label?: string }) {
+  if (!source) return null;
+  return (
+    <Badge variant="outline" className={`text-[10px] border-transparent ${ORDER_SOURCE_STYLES[source] ?? 'bg-slate-100 text-slate-600'}`}>
+      {label || source}
+    </Badge>
+  );
+}
+
 function PaymentBadge({ status }: { status: string }) {
   return (
     <Badge variant="outline" className={`text-xs border-transparent ${PAYMENT_STYLES[status] ?? ''}`}>
@@ -306,6 +324,14 @@ export default function OrdersPage() {
   const [sendPOSDialog, setSendPOSDialog] = useState(false);
   const [sendPOSOrder, setSendPOSOrder] = useState<OrderDetail | null>(null);
   const [selectedPOSChannel, setSelectedPOSChannel] = useState('');
+
+  // ── Bulk selection + group actions ───────────────────────────────────────
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkPosOpen, setBulkPosOpen] = useState(false);
+  const [bulkPosChannel, setBulkPosChannel] = useState('');
+  const [bulkConfirm, setBulkConfirm] = useState<'cancel' | 'delete' | null>(null);
+  const [bulkReason, setBulkReason] = useState('');
   const [sendingPOS, setSendingPOS] = useState(false);
   const [returnLookupDialog, setReturnLookupDialog] = useState(false);
   const [returnLookupLoading, setReturnLookupLoading] = useState(false);
@@ -998,6 +1024,110 @@ export default function OrdersPage() {
     }
   };
 
+  /* ── Bulk selection + group actions ─── */
+  // Only non-deleted rows are selectable; deleted orders are excluded everywhere.
+  const selectableOrders = useMemo(() => orders.filter(o => !o.is_deleted), [orders]);
+  const allVisibleSelected =
+    selectableOrders.length > 0 && selectableOrders.every(o => selectedIds.has(o.id));
+  const someVisibleSelected = selectableOrders.some(o => selectedIds.has(o.id));
+
+  // Any time the visible order set is replaced (page, filter, sort, refetch),
+  // drop the selection so we never act on rows the user can no longer see.
+  useEffect(() => { setSelectedIds(new Set()); }, [orders]);
+
+  const toggleSelectAll = () => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (selectableOrders.every(o => next.has(o.id))) {
+        selectableOrders.forEach(o => next.delete(o.id));
+      } else {
+        selectableOrders.forEach(o => next.add(o.id));
+      }
+      return next;
+    });
+  };
+  const toggleSelectOne = (id: number) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const clearSelection = () => setSelectedIds(new Set());
+
+  const selectedOrders = useMemo(
+    () => orders.filter(o => selectedIds.has(o.id)),
+    [orders, selectedIds],
+  );
+  // Mirror the per-row gates: only confirmed orders not already routed qualify.
+  const posEligibleIds = useMemo(
+    () => selectedOrders
+      .filter(o => !o.is_deleted && o.outcome === 'CONFIRMED' && !o.sent_to_pos_at && !o.delivery_reference)
+      .map(o => o.id),
+    [selectedOrders],
+  );
+  const deliveryEligibleIds = useMemo(
+    () => selectedOrders
+      .filter(o => !o.is_deleted && o.outcome === 'CONFIRMED' && !o.in_store_pickup && !o.delivery_reference)
+      .map(o => o.id),
+    [selectedOrders],
+  );
+  const bulkPosChannels = useMemo(
+    () => channels.filter(c => c.is_active && c.channel_type === 'POS'),
+    [channels],
+  );
+
+  const runBulk = async (
+    action: BulkOrderAction,
+    ids: number[],
+    options: { pos_sales_channel?: number; reason?: string } | undefined,
+    verbPast: string,
+  ) => {
+    if (ids.length === 0) return;
+    setBulkBusy(true);
+    try {
+      const res = await orderService.bulkAction(action, ids, options);
+      const { succeeded, failed, total } = res.summary;
+      await fetchData(); // refreshes the table and clears the selection
+      if (failed === 0) {
+        setSuccessMessage(`${verbPast} ${succeeded} order${succeeded !== 1 ? 's' : ''}.`);
+      } else {
+        const firstErr = res.results.find(r => !r.ok && r.error)?.error;
+        setSuccessMessage(
+          `${verbPast} ${succeeded} of ${total} order${total !== 1 ? 's' : ''}. `
+          + `${failed} skipped${firstErr ? ` — e.g. "${firstErr}"` : ''}.`,
+        );
+      }
+      setSuccessDialog(true);
+    } catch (err) {
+      setErrorMessage(extractErrorMessage(err, 'Bulk action failed.'));
+      setErrorDialog(true);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const handleBulkDelivery = () =>
+    runBulk('submit_delivery', deliveryEligibleIds, undefined, 'Sent to delivery');
+  const openBulkPos = () => { setBulkPosChannel(''); setBulkPosOpen(true); };
+  const handleBulkPos = async () => {
+    if (!bulkPosChannel) return;
+    await runBulk('send_to_pos', posEligibleIds, { pos_sales_channel: Number(bulkPosChannel) }, 'Sent to POS');
+    setBulkPosOpen(false);
+  };
+  const handleBulkCancelOrDelete = async () => {
+    if (!bulkConfirm) return;
+    const ids = Array.from(selectedIds);
+    const reason = bulkReason.trim() || undefined;
+    if (bulkConfirm === 'cancel') {
+      await runBulk('cancel', ids, { reason }, 'Cancelled');
+    } else {
+      await runBulk('delete', ids, { reason }, 'Deleted');
+    }
+    setBulkConfirm(null);
+    setBulkReason('');
+  };
+
   /* ── manual rollback + WC re-sync (Phase D) ─── */
   const openManualRollback = (order: OrderListItem | OrderDetail) => {
     const targets = MANUAL_TRANSITIONS[order.order_status] ?? [];
@@ -1628,6 +1758,14 @@ export default function OrdersPage() {
           <Table>
             <TableHeader>
               <TableRow className="bg-muted/30">
+                <TableHead className="h-10 w-10 px-2">
+                  <Checkbox
+                    checked={allVisibleSelected ? true : (someVisibleSelected ? 'indeterminate' : false)}
+                    onCheckedChange={toggleSelectAll}
+                    disabled={selectableOrders.length === 0}
+                    aria-label="Select all orders on this page"
+                  />
+                </TableHead>
                 <SortableHead label="Priority" field="lifecycle_priority" ordering={ordering} onSort={handleSort} />
                 <SortableHead label="Order #" field="order_number" ordering={ordering} onSort={handleSort} />
                 <SortableHead label="Client" field="client__last_name" ordering={ordering} onSort={handleSort} />
@@ -1644,7 +1782,7 @@ export default function OrdersPage() {
             <TableBody>
               {loading && (
                 <TableRow>
-                  <TableCell colSpan={11} className="py-16">
+                  <TableCell colSpan={12} className="py-16">
                     <div className="flex flex-col items-center gap-2">
                       <Loader2 className="size-6 animate-spin text-muted-foreground" />
                       <span className="text-sm text-muted-foreground">Loading orders...</span>
@@ -1654,7 +1792,7 @@ export default function OrdersPage() {
               )}
               {!loading && orders.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={11} className="text-center py-16 text-muted-foreground">
+                  <TableCell colSpan={12} className="text-center py-16 text-muted-foreground">
                     No orders found.
                   </TableCell>
                 </TableRow>
@@ -1665,6 +1803,14 @@ export default function OrdersPage() {
                   className={`group hover:bg-muted/30 cursor-pointer transition-colors ${o.is_deleted ? 'opacity-50' : ''}`}
                   onClick={() => openDetail(o.id)}
                 >
+                  <TableCell className="px-2" onClick={e => e.stopPropagation()}>
+                    <Checkbox
+                      checked={selectedIds.has(o.id)}
+                      onCheckedChange={() => toggleSelectOne(o.id)}
+                      disabled={o.is_deleted}
+                      aria-label={`Select order ${o.order_number}`}
+                    />
+                  </TableCell>
                   <TableCell><PriorityBadge priority={o.lifecycle_priority} /></TableCell>
                   <TableCell className="font-mono text-xs font-semibold">{o.order_number}</TableCell>
                   <TableCell>
@@ -1689,7 +1835,12 @@ export default function OrdersPage() {
                     </Badge>
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground hidden md:table-cell">{o.sales_channel_name}</TableCell>
-                  <TableCell className="hidden sm:table-cell"><SourceBadge source={o.source} /></TableCell>
+                  <TableCell className="hidden sm:table-cell">
+                    <div className="flex flex-col items-start gap-1">
+                      <SourceBadge source={o.source} />
+                      {o.order_source && <OrderSourceBadge source={o.order_source} label={o.order_source_display} />}
+                    </div>
+                  </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-1.5 flex-wrap">
                       {/* Phase D — ONE canonical lifecycle chip (the derived
@@ -1939,6 +2090,141 @@ export default function OrdersPage() {
         onSubmit={handleSendPOS}
         isLoading={sendingPOS || mutatingOrder}
       />
+
+      {/* ── Floating bulk action bar ─── */}
+      {selectedIds.size > 0 && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-4 z-40 flex justify-center px-4">
+          <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-1.5 rounded-xl border bg-background/95 p-2 shadow-lg ring-1 ring-black/5 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+            <span className="whitespace-nowrap px-2 text-sm font-semibold">
+              {selectedIds.size} selected
+            </span>
+            <span aria-hidden className="mx-0.5 h-6 w-px bg-border" />
+            {canSendToPos && (
+              <Button
+                size="sm" variant="outline" className="h-8 gap-1.5"
+                disabled={bulkBusy || posEligibleIds.length === 0}
+                title={posEligibleIds.length === 0 ? 'Only confirmed orders that are not yet routed can go to POS' : undefined}
+                onClick={openBulkPos}
+              >
+                <Store className="size-3.5" /> POS
+                {posEligibleIds.length > 0 && <span className="tabular-nums">({posEligibleIds.length})</span>}
+              </Button>
+            )}
+            {canSendToDelivery && (
+              <Button
+                size="sm" variant="outline" className="h-8 gap-1.5"
+                disabled={bulkBusy || deliveryEligibleIds.length === 0}
+                title={deliveryEligibleIds.length === 0 ? 'Only confirmed orders that are not yet routed can go to delivery' : undefined}
+                onClick={handleBulkDelivery}
+              >
+                <Truck className="size-3.5" /> Delivery
+                {deliveryEligibleIds.length > 0 && <span className="tabular-nums">({deliveryEligibleIds.length})</span>}
+              </Button>
+            )}
+            {canCancelOrders && (
+              <Button
+                size="sm" variant="outline" className="h-8 gap-1.5 text-amber-700 hover:text-amber-800"
+                disabled={bulkBusy}
+                onClick={() => { setBulkReason(''); setBulkConfirm('cancel'); }}
+              >
+                <Ban className="size-3.5" /> Cancel
+              </Button>
+            )}
+            {canSoftDelete && (
+              <Button
+                size="sm" variant="outline" className="h-8 gap-1.5 text-destructive hover:text-destructive"
+                disabled={bulkBusy}
+                onClick={() => { setBulkReason(''); setBulkConfirm('delete'); }}
+              >
+                <Trash2 className="size-3.5" /> Delete
+              </Button>
+            )}
+            <span aria-hidden className="mx-0.5 h-6 w-px bg-border" />
+            {bulkBusy ? (
+              <Loader2 className="mx-1 size-4 animate-spin text-muted-foreground" />
+            ) : (
+              <Button size="icon" variant="ghost" className="size-8" onClick={clearSelection} aria-label="Clear selection">
+                <X className="size-4" />
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Bulk: send selected to POS ─── */}
+      <Dialog open={bulkPosOpen} onOpenChange={(o) => { if (!bulkBusy) setBulkPosOpen(o); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Send {posEligibleIds.length} order{posEligibleIds.length !== 1 ? 's' : ''} to POS</DialogTitle>
+            <DialogDescription>
+              Pick the point of sale that will fulfil the selected confirmed orders. Any selected order that isn't eligible is skipped.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <Label className="text-xs font-medium">POS location</Label>
+            <Select value={bulkPosChannel} onValueChange={setBulkPosChannel} disabled={bulkBusy}>
+              <SelectTrigger><SelectValue placeholder="Choose a POS location" /></SelectTrigger>
+              <SelectContent>
+                {bulkPosChannels.length === 0 && (
+                  <div className="px-2 py-1.5 text-xs text-muted-foreground">No active POS locations.</div>
+                )}
+                {bulkPosChannels.map(c => (
+                  <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkPosOpen(false)} disabled={bulkBusy}>Cancel</Button>
+            <Button onClick={handleBulkPos} disabled={bulkBusy || !bulkPosChannel || posEligibleIds.length === 0} className="gap-1.5">
+              {bulkBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />}
+              Send to POS
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Bulk: cancel / delete confirm ─── */}
+      <Dialog open={bulkConfirm !== null} onOpenChange={(o) => { if (!o && !bulkBusy) { setBulkConfirm(null); setBulkReason(''); } }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {bulkConfirm === 'cancel' ? 'Cancel' : 'Delete'} {selectedIds.size} order{selectedIds.size !== 1 ? 's' : ''}?
+            </DialogTitle>
+            <DialogDescription>
+              {bulkConfirm === 'cancel'
+                ? 'The selected orders will be marked cancelled. Orders that cannot be cancelled from their current status are skipped.'
+                : 'The selected orders will be soft-deleted (they remain recoverable). Orders you cannot delete are skipped.'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <Label className="text-xs font-medium">Reason (optional)</Label>
+            <Textarea
+              value={bulkReason}
+              onChange={e => setBulkReason(e.target.value)}
+              rows={2}
+              placeholder={bulkConfirm === 'cancel' ? 'Why are these being cancelled?' : 'Why are these being deleted?'}
+              disabled={bulkBusy}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setBulkConfirm(null); setBulkReason(''); }} disabled={bulkBusy}>
+              Keep orders
+            </Button>
+            <Button
+              variant={bulkConfirm === 'delete' ? 'destructive' : 'default'}
+              onClick={handleBulkCancelOrDelete}
+              disabled={bulkBusy}
+              className="gap-1.5"
+            >
+              {bulkBusy
+                ? <Loader2 className="size-4 animate-spin" />
+                : (bulkConfirm === 'cancel' ? <Ban className="size-4" /> : <Trash2 className="size-4" />)}
+              {bulkConfirm === 'cancel' ? 'Cancel orders' : 'Delete orders'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <ReturnLookupDialog
         open={returnLookupDialog}

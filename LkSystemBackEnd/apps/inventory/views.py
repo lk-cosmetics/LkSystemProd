@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 import django_filters
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
+from django.db import transaction
 from django.db.models import Sum, F, Q
 
 from apps.inventory.models import (
@@ -64,6 +65,8 @@ class SalesChannelInventoryViewSet(ActionPermissionMixin, viewsets.ModelViewSet)
     action_permissions = {
         'create': 'create_inventory',
         'destroy': 'delete_inventory',
+        'bulk_upsert': 'create_inventory',
+        'bulk_delete': 'delete_inventory',
     }
     default_write_permission = 'edit_inventory'
 
@@ -94,7 +97,103 @@ class SalesChannelInventoryViewSet(ActionPermissionMixin, viewsets.ModelViewSet)
         if allowed_channel_ids is not None:
             queryset = queryset.filter(sales_channel_id__in=allowed_channel_ids)
         return queryset
-    
+
+    @action(detail=False, methods=['post'], url_path='bulk-upsert')
+    def bulk_upsert(self, request):
+        """Create or update many channel-inventory rows in one atomic call.
+
+        Body: ``{"items": [{"sales_channel", "product", "quantity",
+        "minimum_quantity"?, "maximum_quantity"?, "bin_location"?}, ...]}``.
+        Each (sales_channel, product) pair is upserted — existing rows have their
+        quantity/settings set, new ones are created. Channels outside the user's
+        reach are rejected. All-or-nothing: any invalid row rolls back the batch.
+        ``reserved_quantity`` is never touched (it is system-managed).
+        """
+        items = request.data.get('items')
+        if not isinstance(items, list) or not items:
+            return Response(
+                {'detail': 'Provide a non-empty "items" list.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        allowed = _allowed_sales_channel_ids(request.user)
+        created, updated, errors = 0, 0, []
+        with transaction.atomic():
+            for idx, item in enumerate(items):
+                try:
+                    channel_id = int(item.get('sales_channel'))
+                    product_id = int(item.get('product'))
+                    quantity = int(item.get('quantity'))
+                except (TypeError, ValueError):
+                    errors.append({'index': idx, 'error': 'sales_channel, product and quantity are required.'})
+                    continue
+                if quantity < 0:
+                    errors.append({'index': idx, 'error': 'Quantity cannot be negative.'})
+                    continue
+                if allowed is not None and channel_id not in allowed:
+                    errors.append({'index': idx, 'error': 'You cannot manage this sales channel.'})
+                    continue
+
+                # ``mode`` controls how ``quantity`` is applied to the existing
+                # on-hand: ``set`` (overwrite), ``add`` (+), ``subtract`` (−,
+                # floored at 0). The current row is locked so concurrent bulk
+                # edits can't lose an increment.
+                mode = str(item.get('mode') or 'set').lower()
+                existing = (
+                    SalesChannelInventory.objects.select_for_update()
+                    .filter(sales_channel_id=channel_id, product_id=product_id)
+                    .first()
+                )
+                current = existing.quantity if existing else 0
+                if mode == 'add':
+                    new_qty = current + quantity
+                elif mode in ('subtract', 'decrease', 'remove'):
+                    new_qty = max(0, current - quantity)
+                else:  # 'set'
+                    new_qty = quantity
+
+                fields = {'quantity': new_qty}
+                for opt in ('minimum_quantity', 'maximum_quantity', 'bin_location'):
+                    if item.get(opt) not in (None, ''):
+                        fields[opt] = item[opt]
+
+                if existing:
+                    for key, value in fields.items():
+                        setattr(existing, key, value)
+                    existing.save()
+                    updated += 1
+                else:
+                    SalesChannelInventory.objects.create(
+                        sales_channel_id=channel_id, product_id=product_id, **fields,
+                    )
+                    created += 1
+            if errors:
+                transaction.set_rollback(True)
+        if errors:
+            return Response(
+                {'detail': 'No changes were saved — fix the highlighted rows.', 'errors': errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({'created': created, 'updated': updated, 'total': created + updated})
+
+    @action(detail=False, methods=['post'], url_path='bulk-delete')
+    def bulk_delete(self, request):
+        """Delete many channel-inventory rows by id. Body: ``{"ids": [...]}``.
+
+        Only rows the user can reach (channel-scoped via ``get_queryset``) are
+        deleted, so this can never remove another tenant's stock rows.
+        """
+        ids = request.data.get('ids')
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {'detail': 'Provide a non-empty "ids" list.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        qs = self.get_queryset().filter(id__in=ids)
+        deleted = qs.count()
+        qs.delete()
+        return Response({'deleted': deleted})
+
+
     @action(detail=True, methods=['post'])
     def adjust(self, request, pk=None):
         """

@@ -63,9 +63,11 @@ class PromotionChannelRuleInputSerializer(serializers.Serializer):
     )
 
     def validate_sales_channel(self, value):
-        if value.channel_type != SalesChannel.ChannelType.POS:
+        if value.channel_type not in (
+            SalesChannel.ChannelType.POS, SalesChannel.ChannelType.WOOCOMMERCE,
+        ):
             raise serializers.ValidationError(
-                'Promotions can only be applied to POS sales channels.'
+                'Promotions can only be applied to POS or WooCommerce sales channels.'
             )
         return value
 
@@ -456,18 +458,19 @@ class BulkCreatePromotionsSerializer(serializers.Serializer):
                 'items': 'Duplicate products are not allowed.',
             })
 
-        # All channels must exist and be POS
+        # All channels must exist and be a promotable type (POS or WooCommerce).
         channel_ids = list(dict.fromkeys(attrs['sales_channels']))  # de-dupe, keep order
         channels = list(SalesChannel.objects.filter(pk__in=channel_ids))
         if len(channels) != len(channel_ids):
             raise serializers.ValidationError({
                 'sales_channels': 'One or more sales channels do not exist.',
             })
-        non_pos = [c.name for c in channels if c.channel_type != 'POS']
-        if non_pos:
+        allowed = (SalesChannel.ChannelType.POS, SalesChannel.ChannelType.WOOCOMMERCE)
+        invalid = [c.name for c in channels if c.channel_type not in allowed]
+        if invalid:
             raise serializers.ValidationError({
                 'sales_channels':
-                    f'Promotions only apply to POS channels. Invalid: {", ".join(non_pos)}',
+                    f'Promotions only apply to POS or WooCommerce channels. Invalid: {", ".join(invalid)}',
             })
 
         attrs['_channels'] = channels
@@ -696,11 +699,12 @@ class UpdatePromotionGroupSerializer(serializers.Serializer):
             raise serializers.ValidationError({
                 'sales_channels': 'One or more sales channels do not exist.',
             })
-        non_pos = [c.name for c in channels if c.channel_type != 'POS']
-        if non_pos:
+        allowed = (SalesChannel.ChannelType.POS, SalesChannel.ChannelType.WOOCOMMERCE)
+        invalid = [c.name for c in channels if c.channel_type not in allowed]
+        if invalid:
             raise serializers.ValidationError({
                 'sales_channels':
-                    f'Promotions only apply to POS channels. Invalid: {", ".join(non_pos)}',
+                    f'Promotions only apply to POS or WooCommerce channels. Invalid: {", ".join(invalid)}',
             })
         attrs['_channels'] = channels
         return attrs

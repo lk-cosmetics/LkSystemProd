@@ -117,9 +117,34 @@ class OrderManagementService:
     def soft_delete_order(*, order: Order, actor=None, reason: str = '') -> None:
         order._actor = actor
         order.soft_delete(user=actor, reason=reason)
+        OrderManagementService._sync_bi_for_order(order)
 
     @staticmethod
     def restore_order(*, order: Order, actor=None) -> Order:
         order._actor = actor
         order.restore(user=actor)
+        OrderManagementService._sync_bi_for_order(order)
         return order
+
+    @staticmethod
+    def _sync_bi_for_order(order: Order) -> None:
+        """Immediately refresh BI rollups + bust the dashboard cache for this
+        order's (company, brand, day) bucket, so a delete/restore shows on the
+        dashboard right away instead of waiting on the async post-save signal.
+
+        Best-effort: BI must never block or break an order mutation.
+        """
+        try:
+            from apps.bi import cache as bi_cache
+            from apps.bi.services.aggregation import recompute_for_order
+            recompute_for_order(order)
+            bi_cache.invalidate_for(
+                getattr(order, 'company_id', None),
+                getattr(order, 'brand_id', None),
+            )
+        except Exception:  # pragma: no cover — defensive; never break the mutation
+            import logging
+            logging.getLogger(__name__).warning(
+                'BI sync after order mutation failed for order %s',
+                getattr(order, 'pk', None), exc_info=True,
+            )

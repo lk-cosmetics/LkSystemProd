@@ -1263,6 +1263,20 @@ export type OrderStatus =
 
 export type OrderSource = 'WOOCOMMERCE' | 'POS' | 'MANUAL';
 
+/**
+ * Social channel a manual / back-office order originated from. Distinct from
+ * `OrderSource` (which records the *system* the order entered through).
+ */
+export type OrderSocialSource = 'instagram' | 'whatsapp' | 'facebook' | 'tiktok' | 'other';
+
+export const ORDER_SOCIAL_SOURCES: ReadonlyArray<{ value: OrderSocialSource; label: string }> = [
+  { value: 'instagram', label: 'Instagram' },
+  { value: 'whatsapp', label: 'WhatsApp' },
+  { value: 'facebook', label: 'Facebook' },
+  { value: 'tiktok', label: 'TikTok' },
+  { value: 'other', label: 'Other' },
+];
+
 export type PaymentStatus = 'UNPAID' | 'PAID' | 'PARTIAL' | 'REFUNDED';
 
 export type OrderDiscountType = 'NONE' | 'FIXED' | 'PERCENTAGE';
@@ -1362,6 +1376,9 @@ export interface OrderListItem {
   status: OrderStatus;
   wc_status: string;
   source: OrderSource;
+  /** Social channel a manual order came in on (Instagram, WhatsApp…); '' when N/A. */
+  order_source: OrderSocialSource | '';
+  order_source_display: string;
   payment_status: PaymentStatus;
   payment_method: string;
   contact_status: OrderContactStatus;
@@ -1621,6 +1638,8 @@ export interface OrderEditRequest {
 export interface OrderLogEntry {
   id: number;
   action: string;
+  /** Human label from the backend `Action` enum (fallback when the UI has no mapping). */
+  action_display?: string;
   user: number | null;
   user_name: string | null;
   details: Record<string, unknown>;
@@ -1660,6 +1679,8 @@ export interface POSOrderCreateRequest {
   payment_method_title?: string;
   customer_note?: string;
   status?: 'pending' | 'processing' | 'completed';
+  /** Manual orders only — social channel the order came in on. */
+  order_source?: OrderSocialSource | '';
   subtotal?: string;
   total_tax?: string;
   shipping_total?: string;

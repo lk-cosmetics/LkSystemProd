@@ -94,29 +94,30 @@ def invalidate_for(company_id: Optional[int], brand_id: Optional[int]) -> None:
     suffixes (e.g. ``:limit:N`` on top-products) are also cleared.
     """
 
+    # Broad pattern sweep first (django-redis): clear EVERY cached dashboard
+    # entry for this company — all kinds, brands and periods, including custom
+    # date windows and suffixed keys (e.g. ``:limit:N``) — plus the platform-wide
+    # ('all') bucket. This guarantees no stale read survives a recompute,
+    # regardless of which period the client requested.
+    try:
+        for cid in (company_id, None):
+            cache.delete_pattern(f'dashboard:*:company:{_norm(cid)}:*')  # type: ignore[attr-defined]
+        return
+    except Exception as exc:  # pragma: no cover — backend without pattern delete
+        logger.debug('BI cache pattern delete unavailable (%s) — using exact keys', exc)
+
+    # Fallback (non-django-redis backends): delete the known predefined-period
+    # keys exactly. Custom-window keys self-heal via the short TTL.
     periods = ('7d', '30d', '3m', 'ytd')
     kinds = (
         'summary', 'sales_chart', 'sales_channels',
         'sales_channel_chart', 'resale_types',
         'top_products', 'trending_products',
     )
-
-    # Try pattern delete first (django-redis). Falls back to exact-key delete
-    # if the backend doesn't support patterns.
-    patterns = []
     keys = []
     for kind in kinds:
         for p in periods:
             for cid in (company_id, None):
                 for bid in (brand_id, None):
-                    base = build_key(kind, company_id=cid, brand_id=bid, period=p)
-                    keys.append(base)
-                    patterns.append(f'{base}*')
-
-    try:
-        for pattern in patterns:
-            cache.delete_pattern(pattern)  # type: ignore[attr-defined]
-        return
-    except (AttributeError, Exception) as exc:  # pragma: no cover — fallback
-        logger.debug('BI cache pattern delete unavailable (%s) — using exact keys', exc)
-        invalidate_keys(keys)
+                    keys.append(build_key(kind, company_id=cid, brand_id=bid, period=p))
+    invalidate_keys(keys)

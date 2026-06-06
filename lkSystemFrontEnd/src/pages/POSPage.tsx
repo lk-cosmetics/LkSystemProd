@@ -734,13 +734,16 @@ export default function POSPage() {
     [activePickupOrder, discountedPrices, pickupLinePrices],
   );
 
-  /* ── Promotions (POS-only) ──────────────────────────────────────────── */
+  /* ── Promotions (POS + WooCommerce channels) ─────────────────────────── */
   useEffect(() => {
     if (activePickupOrder) {
       applyDiscountedPrices({});
       return;
     }
-    if (!channelId || !selectedChannel || selectedChannel.channel_type !== 'POS') {
+    if (
+      !channelId || !selectedChannel ||
+      (selectedChannel.channel_type !== 'POS' && selectedChannel.channel_type !== 'WOOCOMMERCE')
+    ) {
       applyDiscountedPrices({});
       return;
     }

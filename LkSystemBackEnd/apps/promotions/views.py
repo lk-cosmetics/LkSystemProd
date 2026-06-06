@@ -35,7 +35,7 @@ from .serializers import (
     PromotionGroupDetailSerializer,
     UpdatePromotionGroupSerializer,
 )
-from .permissions import CanManagePromotions, CanViewPromotionAnalytics
+from .permissions import CanManagePromotions, CanCalculateDiscount, CanViewPromotionAnalytics
 
 
 # =============================================================================
@@ -233,9 +233,11 @@ class PromotionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
         
-        if rule.sales_channel.channel_type != SalesChannel.ChannelType.POS:
+        if rule.sales_channel.channel_type not in (
+            SalesChannel.ChannelType.POS, SalesChannel.ChannelType.WOOCOMMERCE,
+        ):
             return Response(
-                {'error': 'Promotions can only be applied to POS sales channels.'},
+                {'error': 'Promotions can only be applied to POS or WooCommerce sales channels.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -274,7 +276,8 @@ class PromotionViewSet(viewsets.ModelViewSet):
     # Discount Calculation
     # ──────────────────────────────────────────────────────────────────────────
 
-    @action(detail=False, methods=['post'], url_path='calculate_discount')
+    @action(detail=False, methods=['post'], url_path='calculate_discount',
+            permission_classes=[IsAuthenticated, CanCalculateDiscount])
     def calculate_discount(self, request):
         """POST /promotions/calculate_discount/ – calculate discount for product/channel."""
         serializer = CalculateDiscountSerializer(data=request.data)
@@ -295,9 +298,11 @@ class PromotionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        if channel.channel_type != SalesChannel.ChannelType.POS:
+        if channel.channel_type not in (
+            SalesChannel.ChannelType.POS, SalesChannel.ChannelType.WOOCOMMERCE,
+        ):
             return Response(
-                {'error': 'Promotions are only available for POS sales channels.'},
+                {'error': 'Promotions are only available for POS or WooCommerce sales channels.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -353,7 +358,8 @@ class PromotionViewSet(viewsets.ModelViewSet):
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    @action(detail=False, methods=['post'], url_path='batch_calculate_discounts')
+    @action(detail=False, methods=['post'], url_path='batch_calculate_discounts',
+            permission_classes=[IsAuthenticated, CanCalculateDiscount])
     def batch_calculate_discounts(self, request):
         """
         POST /promotions/batch_calculate_discounts/
@@ -384,9 +390,11 @@ class PromotionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        if channel.channel_type != SalesChannel.ChannelType.POS:
+        if channel.channel_type not in (
+            SalesChannel.ChannelType.POS, SalesChannel.ChannelType.WOOCOMMERCE,
+        ):
             return Response(
-                {'error': 'Promotions are only available for POS sales channels.'},
+                {'error': 'Promotions are only available for POS or WooCommerce sales channels.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 

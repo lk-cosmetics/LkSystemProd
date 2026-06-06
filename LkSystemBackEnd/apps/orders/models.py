@@ -71,6 +71,16 @@ class Order(models.Model):
         POS         = 'POS',         'Point of Sale'
         MANUAL      = 'MANUAL',      'Manual Entry'
 
+    # Where a (manual) order actually came from — the social channel the
+    # customer reached out on. Distinct from ``source`` (the technical ingestion
+    # path). Blank for WooCommerce / POS orders.
+    class OrderSource(models.TextChoices):
+        INSTAGRAM = 'instagram', 'Instagram'
+        WHATSAPP  = 'whatsapp',  'WhatsApp'
+        FACEBOOK  = 'facebook',  'Facebook'
+        TIKTOK    = 'tiktok',    'TikTok'
+        OTHER     = 'other',     'Other'
+
     # ── Payment Status ───────────────────────────────────────────────────────
     class PaymentStatus(models.TextChoices):
         UNPAID   = 'UNPAID',   'Unpaid'
@@ -268,6 +278,10 @@ class Order(models.Model):
     )
     source = models.CharField(
         max_length=20, choices=Source.choices, default=Source.MANUAL,
+    )
+    order_source = models.CharField(
+        max_length=20, choices=OrderSource.choices, blank=True, default='',
+        help_text='Social channel a manual order originated from (Instagram, …).',
     )
 
     # ── Payment ──────────────────────────────────────────────────────────────
