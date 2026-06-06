@@ -214,6 +214,15 @@ class OrderIngestionService:
         ticket_id = str(payload.get('ticket_id', '') or '').strip()
         client_ticket_uuid = str(payload.get('client_ticket_uuid', '') or '').strip()
         import_hash = self._stable_import_hash(payload, sales_channel)
+
+        # Serialize concurrent ingests of the SAME order so an async webhook task
+        # and the API Sync (or two webhook tasks for one order) can't both pass
+        # the "does it exist?" check below and each INSERT a row. A
+        # transaction-scoped Postgres advisory lock keyed on the order's natural
+        # identity does this WITHOUT blocking ingestion of *different* orders, and
+        # is released automatically when this atomic block commits/rolls back.
+        self._lock_natural_key(company.id, external_id, client_ticket_uuid, ticket_id)
+
         order, is_new = self._idempotency_check(
             external_id, wc_order_key, import_hash, company, sales_channel,
             ticket_id=ticket_id,
@@ -333,6 +342,26 @@ class OrderIngestionService:
             raise OrderIngestionError("Order must contain at least one line_item.")
 
     # ─── idempotency ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _lock_natural_key(company_id, external_id='', client_ticket_uuid='', ticket_id=''):
+        """Take a transaction-scoped advisory lock on an order's natural identity
+        (the same keys the idempotency check matches on) so concurrent ingests of
+        the same order serialize. Different orders hash to different keys, so this
+        never blocks parallel ingestion of distinct orders. Postgres only."""
+        key_source = external_id or client_ticket_uuid or ticket_id
+        if not key_source:
+            return
+        import hashlib
+        from django.db import connection
+        if connection.vendor != 'postgresql':
+            return
+        digest = hashlib.blake2b(
+            f'{company_id}:{key_source}'.encode('utf-8'), digest_size=8,
+        ).digest()
+        lock_key = int.from_bytes(digest, 'big', signed=True)
+        with connection.cursor() as cur:
+            cur.execute('SELECT pg_advisory_xact_lock(%s)', [lock_key])
 
     def _idempotency_check(
         self,
