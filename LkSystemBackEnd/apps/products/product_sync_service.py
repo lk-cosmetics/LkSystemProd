@@ -125,17 +125,30 @@ class ProductSyncService:
             logger.warning("WooCommerce product data missing 'id'")
             return None
         
+        # First product image (if any) → image_url so the product card renders.
+        images = wc_data.get('images') or []
+        image_url = (
+            images[0].get('src', '')
+            if images and isinstance(images[0], dict) else ''
+        )
         try:
             product, created = Product.objects.update_or_create(
                 wc_product_id=wc_id,
                 defaults={
                     'brand': sales_channel.brand,
                     'name': wc_data.get('name', f'Product {wc_id}'),
-                    'description': wc_data.get('description', ''),
-                    'short_description': wc_data.get('short_description', ''),
                     'barcode': wc_data.get('sku', ''),
-                    'cost_price': cls._get_decimal(wc_data.get('cost', '0')),
-                    'selling_price': cls._get_decimal(wc_data.get('price', '0')),
+                    'product_link': wc_data.get('permalink', '') or '',
+                    # NOTE: the model fields are purchase_price / sales_price — NOT
+                    # cost_price / selling_price. Using the wrong names made the
+                    # CREATE path raise (TypeError on unknown kwargs), so brand-new
+                    # WooCommerce products silently failed to create and their order
+                    # lines were left unlinked.
+                    'purchase_price': cls._get_decimal(wc_data.get('cost', '0')),
+                    'sales_price': cls._get_decimal(
+                        wc_data.get('price') or wc_data.get('regular_price') or '0'
+                    ),
+                    'image_url': image_url,
                     'status': cls._map_wc_status(wc_data.get('status', 'draft')),
                 },
             )
