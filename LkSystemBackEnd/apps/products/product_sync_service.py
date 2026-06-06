@@ -88,7 +88,15 @@ class ProductSyncService:
         
         try:
             response = api.get(f"products/{wc_product_id}")
-            return response
+            status = getattr(response, 'status_code', None)
+            if status is not None and status >= 400:
+                logger.warning(
+                    "WooCommerce returned HTTP %s fetching product %s for channel=%s",
+                    status, wc_product_id, sales_channel.id,
+                )
+                return None
+            data = response.json()
+            return data if isinstance(data, dict) and data.get('id') else None
         except Exception as exc:
             logger.error(
                 "Failed to fetch product %s from WooCommerce: %s",
