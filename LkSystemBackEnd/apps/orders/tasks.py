@@ -330,6 +330,62 @@ def sync_orders_for_channel(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# WEBHOOK INGESTION TASK — one WooCommerce order event, off the request path
+# ═════════════════════════════════════════════════════════════════════════════
+
+@_task(
+    bind=True,
+    name='orders.process_wc_order_webhook',
+    max_retries=3,
+    default_retry_delay=30,
+    soft_time_limit=120,
+    time_limit=150,
+    acks_late=True,
+)
+def process_wc_order_webhook(self, sales_channel_id: int, payload: dict, topic: str):
+    """Ingest a single WooCommerce order webhook in the background.
+
+    Enqueued by the webhook handler so the HTTP response is instant even when
+    WooCommerce fires hundreds/thousands of order events at once — the heavy
+    fetch + ingest + delivery-enqueue happen here, on the Celery worker.
+
+    Idempotent: OrderIngestionService dedupes by external order id, so a retry
+    (acks_late) updates the existing order instead of duplicating it.
+    """
+    from apps.sales_channels.models import SalesChannel
+    from apps.orders import handlers as order_handlers
+
+    try:
+        channel = SalesChannel.objects.select_related('brand__company').get(
+            pk=sales_channel_id, channel_type='WOOCOMMERCE', is_active=True,
+        )
+    except SalesChannel.DoesNotExist:
+        logger.error(
+            "process_wc_order_webhook: channel %s not found or inactive", sales_channel_id,
+        )
+        return {'error': f'Channel {sales_channel_id} not found'}
+
+    try:
+        result = order_handlers.dispatch_wc_order_webhook(channel, payload, topic)
+        logger.info(
+            "process_wc_order_webhook done channel=%s topic=%s → %s",
+            sales_channel_id, topic, (result or {}).get('detail'),
+        )
+        return result
+    except Exception as exc:
+        logger.exception(
+            "process_wc_order_webhook failed (channel=%s topic=%s): %s",
+            sales_channel_id, topic, exc,
+        )
+        if celery_app is not None:
+            try:
+                raise self.retry(exc=exc)
+            except Exception:
+                pass
+        return {'error': str(exc)}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # DELIVERY SUBMISSION TASK
 # ═════════════════════════════════════════════════════════════════════════════
 
