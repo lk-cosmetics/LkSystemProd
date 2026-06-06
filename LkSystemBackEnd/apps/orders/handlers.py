@@ -18,6 +18,7 @@ from apps.orders.models import Order
 logger = logging.getLogger(__name__)
 
 WC_IMPORT_STATUS = 'processing'
+WC_API_TIMEOUT_SECONDS = 15
 
 
 def register_webhook_handlers():
@@ -44,7 +45,16 @@ def register_webhook_handlers():
             payload = context.payload
             if not payload or 'id' not in payload:
                 return {'detail': 'No order data in payload'}
-            
+
+            # Pull the authoritative, COMPLETE order straight from the WooCommerce
+            # REST API (full billing/client + line items) — exactly like the manual
+            # "Sync" button. Webhook payloads can be slim or lag the final order
+            # state; the API gives us the same data the sync ingests successfully.
+            # Falls back to the webhook's own payload if the API can't be reached.
+            full = _fetch_full_wc_order(context.sales_channel, payload.get('id'))
+            if full:
+                payload = full
+
             wc_status = (payload.get('status') or '').lower()
             if wc_status != WC_IMPORT_STATUS:
                 logger.info(
@@ -169,6 +179,50 @@ def register_webhook_handlers():
 
     except Exception as exc:
         logger.error("Failed to register order webhook handlers: %s", exc)
+
+
+def _fetch_full_wc_order(sales_channel, wc_order_id):
+    """Fetch one complete order from the WooCommerce REST API — the same
+    authoritative source the manual *Sync* uses (full client + product data).
+
+    Returns the order dict, or ``None`` when it can't be fetched (the channel has
+    no API credentials, or a network / HTTP error) so the caller can fall back to
+    the webhook's own payload. Never raises.
+    """
+    if not wc_order_id:
+        return None
+    url    = getattr(sales_channel, 'wc_store_url', '') or ''
+    key    = getattr(sales_channel, 'wc_consumer_key', '') or ''
+    secret = getattr(sales_channel, 'wc_consumer_secret', '') or ''
+    if not (url and key and secret):
+        logger.info(
+            "Channel %s has no WooCommerce API credentials — using the webhook "
+            "payload as-is for order %s.", getattr(sales_channel, 'id', '?'), wc_order_id,
+        )
+        return None
+    try:
+        from woocommerce import API as WooCommerceAPI
+        client = WooCommerceAPI(
+            url=url, consumer_key=key, consumer_secret=secret,
+            version='wc/v3', timeout=WC_API_TIMEOUT_SECONDS,
+        )
+        resp = client.get(f'orders/{wc_order_id}')
+        if resp.status_code >= 400:
+            logger.warning(
+                "WC API fetch for order %s returned HTTP %s — using webhook payload instead.",
+                wc_order_id, resp.status_code,
+            )
+            return None
+        data = resp.json()
+        if isinstance(data, dict) and data.get('id'):
+            return data
+        return None
+    except Exception as exc:  # network / auth / JSON — must never break the webhook
+        logger.warning(
+            "Could not fetch order %s from the WC API (%s) — using webhook payload instead.",
+            wc_order_id, exc,
+        )
+        return None
 
 
 def _maybe_enqueue_delivery(order: Order) -> None:
