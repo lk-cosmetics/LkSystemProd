@@ -7,6 +7,7 @@ from django.dispatch import receiver
 
 from .logging_service import OrderLoggingService
 from .models import Order, OrderLine, OrderLog
+from .realtime import broadcast_order_event
 
 
 @receiver(pre_save, sender=Order)
@@ -126,6 +127,18 @@ def order_post_save(sender, instance: Order, created: bool, **kwargs):
         or 'return_exchange_status' in changed
     ):
         instance.client.recalculate_metrics()
+
+
+@receiver(post_save, sender=Order)
+def order_realtime_broadcast(sender, instance: Order, created: bool, **kwargs):
+    """Push a lightweight real-time signal so connected order-queue clients
+    refetch immediately. Kept separate from audit logging and fully best-effort:
+    ``broadcast_order_event`` never raises and defers the send to
+    ``transaction.on_commit``, so this can never interfere with the save."""
+    event = 'created' if created else (
+        'deleted' if getattr(instance, 'is_deleted', False) else 'updated'
+    )
+    broadcast_order_event(instance, event=event)
 
 
 @receiver(pre_save, sender=OrderLine)
