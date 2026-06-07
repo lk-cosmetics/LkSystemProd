@@ -37,6 +37,10 @@ def _build_user_payload(user) -> dict:
         'can_switch_brands': 'switch_brands' in perms,
         'company_id': user.current_company_id,
         'company_name': user.current_company.name if user.current_company_id else None,
+        'company_logo': (
+            user.current_company.logo.url
+            if user.current_company_id and user.current_company.logo else None
+        ),
         'current_brand_id': user.current_brand_id,
         'allowed_brand_ids': user.get_allowed_brand_ids(),
     }

@@ -101,6 +101,8 @@ export interface User {
   company_id?: number;
   /** Name of the active company, for the workspace indicator in the UI. */
   company_name?: string | null;
+  /** Active company logo (media URL); drives the dynamic sidebar logo. */
+  company_logo?: string | null;
   /** Active brand workspace; null/undefined means whole-company focus. */
   current_brand_id?: number | null;
   allowed_brand_ids?: number[];

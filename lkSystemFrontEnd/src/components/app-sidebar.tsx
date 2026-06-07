@@ -30,6 +30,7 @@ import {
 } from '@/components/ui/sidebar';
 import { useAuthStore } from '@/store/authStore';
 import { userService } from '@/services/user.service';
+import { getMediaUrl } from '@/utils/helpers';
 
 // Static navigation data (doesn't depend on user state)
 const navMain = [
@@ -154,7 +155,9 @@ const navSecondary = [
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const { user: currentUser } = useAuthStore();
-  const [avatarPath, setAvatarPath] = React.useState<string>('/avatars/shadcn.jpg');
+  // Empty by default so NavUser falls back to the user's initials when there is
+  // no real profile picture (instead of showing a placeholder face).
+  const [avatarPath, setAvatarPath] = React.useState<string>('');
 
   React.useEffect(() => {
     userService.getCurrentUser().then(details => {
@@ -173,10 +176,23 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     [currentUser?.full_name, currentUser?.email, avatarPath]
   );
 
+  // Current company's own logo; falls back to the default app logo. object-contain
+  // + max constraints let any logo (square or wide) auto-fit the header neatly.
+  const companyLogo =
+    (currentUser?.company_logo && getMediaUrl(currentUser.company_logo)) || '/logo.svg';
+
   return (
     <Sidebar collapsible="offcanvas" {...props}>
-      <SidebarHeader className="flex justify-center items-center">
-        <img src="/logo.svg" alt="Logo" className="size-30" />
+      <SidebarHeader className="flex items-center justify-center p-3">
+        <img
+          src={companyLogo}
+          alt={currentUser?.company_name || 'Company logo'}
+          className="max-h-20 max-w-full object-contain"
+          onError={e => {
+            const img = e.currentTarget as HTMLImageElement;
+            if (!img.src.endsWith('/logo.svg')) img.src = '/logo.svg';
+          }}
+        />
       </SidebarHeader>
       <SidebarContent>
         <NavMain items={navMain} />
