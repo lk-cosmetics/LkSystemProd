@@ -254,9 +254,9 @@ export function POSProductGrid({
               <div>
                 <p className="text-sm font-medium">Orders waiting for this POS checkout</p>
                 <p className="text-xs text-muted-foreground">
-                  {selectedChannel?.channel_type === 'POS'
+                  {selectedChannel
                     ? `Showing orders assigned to ${selectedChannel.name}.`
-                    : 'Select a POS sales channel to see assigned orders.'}
+                    : 'Select a sales channel to see assigned orders.'}
                 </p>
               </div>
               <Button

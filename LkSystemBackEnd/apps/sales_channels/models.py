@@ -244,3 +244,56 @@ class Expense(models.Model):
 
     def __str__(self):
         return f"Dépense {self.amount} {self.get_category_display()} ({self.occurred_at.strftime('%Y-%m-%d')})"
+
+
+class CashDeposit(models.Model):
+    """Incoming cash into a POS register ("alimentation de caisse") — the opening
+    float put in before work, or a top-up added during the day. Each row
+    increases the caisse balance for the day it was booked. Mirrors ``Expense``
+    (which is the cash-OUT side).
+    """
+
+    class Kind(models.TextChoices):
+        OPENING = "OPENING", "Opening float / Fond de caisse"
+        TOP_UP  = "TOP_UP",  "Cash added / Alimentation"
+        OTHER   = "OTHER",   "Other / Autre"
+
+    company = models.ForeignKey(
+        "company.Company", on_delete=models.CASCADE,
+        related_name="cash_deposits",
+    )
+    sales_channel = models.ForeignKey(
+        "sales_channels.SalesChannel",
+        on_delete=models.CASCADE,
+        related_name="cash_deposits",
+        help_text="POS register the cash was added to.",
+    )
+    amount = models.DecimalField(max_digits=14, decimal_places=3, default=Decimal("0.000"))
+    kind = models.CharField(max_length=24, choices=Kind.choices, default=Kind.TOP_UP)
+    note = models.TextField(blank=True, default="")
+    occurred_at = models.DateTimeField(db_index=True, help_text="When the cash went into the till.")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="cash_deposits_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = "sales_channels"
+        db_table = "pos_cash_deposit"
+        ordering = ["-occurred_at", "-id"]
+        indexes = [
+            models.Index(fields=["sales_channel", "occurred_at"]),
+            models.Index(fields=["company", "occurred_at"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(amount__gt=Decimal("0")),
+                name="cash_deposit_amount_gt_zero",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Alimentation {self.amount} {self.get_kind_display()} ({self.occurred_at.strftime('%Y-%m-%d')})"

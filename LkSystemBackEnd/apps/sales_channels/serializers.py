@@ -212,7 +212,7 @@ class WebhookTokenSerializer(serializers.Serializer):
 # CAISSE EXPENSES
 # ──────────────────────────────────────────────────────────────────────
 
-from .models import Expense  # noqa: E402
+from .models import CashDeposit, Expense  # noqa: E402
 
 
 class ExpenseSerializer(serializers.ModelSerializer):
@@ -235,10 +235,35 @@ class ExpenseSerializer(serializers.ModelSerializer):
         sc = attrs.get('sales_channel')
         if sc is None:
             raise serializers.ValidationError({'sales_channel': 'Required.'})
-        if sc.channel_type != SalesChannel.ChannelType.POS:
-            raise serializers.ValidationError(
-                {'sales_channel': 'Expenses can only be recorded against a POS sales channel.'}
-            )
+        # Caisse/expenses are available on every sales channel (POS and
+        # WooCommerce alike) — the POS page operates on any channel.
+        amount = attrs.get('amount')
+        if amount is None or amount <= 0:
+            raise serializers.ValidationError({'amount': 'Amount must be greater than zero.'})
+        return attrs
+
+
+class CashDepositSerializer(serializers.ModelSerializer):
+    """Caisse funding (alimentation) — cash IN. Mirror of ``ExpenseSerializer``."""
+    kind_display = serializers.CharField(source='get_kind_display', read_only=True)
+    sales_channel_name = serializers.CharField(source='sales_channel.name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, default=None)
+
+    class Meta:
+        model = CashDeposit
+        fields = [
+            'id', 'company', 'sales_channel', 'sales_channel_name',
+            'amount', 'kind', 'kind_display',
+            'note', 'occurred_at',
+            'created_by', 'created_by_name',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['company', 'created_by', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        sc = attrs.get('sales_channel')
+        if sc is None:
+            raise serializers.ValidationError({'sales_channel': 'Required.'})
         amount = attrs.get('amount')
         if amount is None or amount <= 0:
             raise serializers.ValidationError({'amount': 'Amount must be greater than zero.'})
