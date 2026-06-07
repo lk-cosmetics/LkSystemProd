@@ -291,8 +291,8 @@ from datetime import datetime, time, timedelta
 from django.db.models import Sum, Q
 from django.utils import timezone
 from rest_framework import status as http_status
-from .models import Expense
-from .serializers import ExpenseSerializer
+from .models import CashDeposit, Expense
+from .serializers import CashDepositSerializer, ExpenseSerializer
 
 
 def _day_bounds(day):
@@ -376,11 +376,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             channel = SalesChannel.objects.select_related('brand__company').get(pk=sc_id)
         except SalesChannel.DoesNotExist:
             return None, Response({'detail': 'Sales channel not found.'}, status=http_status.HTTP_404_NOT_FOUND)
-        if channel.channel_type != SalesChannel.ChannelType.POS:
-            return None, Response(
-                {'detail': 'Caisse stats are only available for POS sales channels.'},
-                status=http_status.HTTP_400_BAD_REQUEST,
-            )
+        # Caisse stats/history are available on every sales channel (POS and
+        # WooCommerce alike); only access control gates them.
         allowed_channel_ids = self._get_allowed_channel_ids()
         if allowed_channel_ids is not None and channel.id not in allowed_channel_ids:
             return None, Response(
@@ -404,6 +401,59 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         ).exclude(
             returned_at__isnull=False,
         )
+
+    def _caisse_breakdown(self, channel, start, end):
+        """Full daily cash-flow for a register, shared by stats + history.
+
+        The physical drawer (``cash_balance``) counts only CASH-paid sales plus
+        funding (alimentation), minus every cash-out (expenses incl. refunds).
+        Card / bank-transfer sales are reported separately — they go to the bank,
+        not the till. ``net_balance`` is kept (all-method revenue − expenses) for
+        backward compatibility.
+        """
+        revenue_qs = self._revenue_queryset(channel, start, end)
+        # Cash = explicit 'cash' or legacy/empty (the POS default is cash).
+        cash_q = Q(payment_method__iexact='cash') | Q(payment_method='')
+        cash_sales = revenue_qs.filter(cash_q).aggregate(t=Sum('total'))['t'] or Decimal('0')
+        card_sales = revenue_qs.exclude(cash_q).aggregate(t=Sum('total'))['t'] or Decimal('0')
+        revenue_total = cash_sales + card_sales
+        revenue_count = revenue_qs.count()
+
+        expense_qs = Expense.objects.filter(
+            sales_channel=channel, occurred_at__gte=start, occurred_at__lte=end,
+        )
+        expenses_total = expense_qs.aggregate(t=Sum('amount'))['t'] or Decimal('0')
+        refunds = (
+            expense_qs.filter(category=Expense.Category.REFUND)
+            .aggregate(t=Sum('amount'))['t'] or Decimal('0')
+        )
+        expenses_count = expense_qs.count()
+        by_category = list(
+            expense_qs.values('category').annotate(total=Sum('amount')).order_by('-total')
+        )
+
+        deposit_qs = CashDeposit.objects.filter(
+            sales_channel=channel, occurred_at__gte=start, occurred_at__lte=end,
+        )
+        funding_total = deposit_qs.aggregate(t=Sum('amount'))['t'] or Decimal('0')
+        opening = (
+            deposit_qs.filter(kind=CashDeposit.Kind.OPENING)
+            .aggregate(t=Sum('amount'))['t'] or Decimal('0')
+        )
+        cash_added = funding_total - opening
+        funding_count = deposit_qs.count()
+
+        return {
+            'revenue': revenue_total, 'revenue_count': revenue_count,
+            'cash_sales': cash_sales, 'card_sales': card_sales,
+            'expenses': expenses_total, 'expenses_count': expenses_count,
+            'refunds': refunds,
+            'opening': opening, 'cash_added': cash_added,
+            'funding_total': funding_total, 'funding_count': funding_count,
+            'net_balance': revenue_total - expenses_total,
+            'cash_balance': funding_total + cash_sales - expenses_total,
+            'by_category': by_category,
+        }
 
     @action(detail=False, methods=['get'], url_path='caisse-stats')
     def caisse_stats(self, request):
@@ -433,44 +483,32 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             day = timezone.localdate()
         start, end = _day_bounds(day)
 
-        # Revenue: tickets validated on this POS register today. Older direct
-        # POS tickets may only have sales_channel set, while routed pickups use
-        # pos_sales_channel, so count both paths.
-        revenue_qs = self._revenue_queryset(channel, start, end)
-        revenue = revenue_qs.aggregate(t=Sum('total'))['t'] or Decimal('0')
-        revenue_count = revenue_qs.count()
-
-        # Dépenses for the day on this channel.
-        expense_qs = Expense.objects.filter(
-            sales_channel=channel,
-            occurred_at__gte=start,
-            occurred_at__lte=end,
-        )
-        expenses_total = expense_qs.aggregate(t=Sum('amount'))['t'] or Decimal('0')
-        expenses_count = expense_qs.count()
-
-        # Per-category breakdown.
-        by_category = list(
-            expense_qs.values('category')
-            .annotate(total=Sum('amount'))
-            .order_by('-total')
-        )
-
-        net = (revenue or Decimal('0')) - (expenses_total or Decimal('0'))
-
+        b = self._caisse_breakdown(channel, start, end)
         return Response({
             'date': day.isoformat(),
             'sales_channel': channel.id,
             'sales_channel_name': channel.name,
             'currency': 'TND',
-            'revenue': str(revenue),
-            'revenue_count': revenue_count,
-            'expenses': str(expenses_total),
-            'expenses_count': expenses_count,
-            'net_balance': str(net),
+            # Sales (revenue = all methods; cash/card split out)
+            'revenue': str(b['revenue']),
+            'revenue_count': b['revenue_count'],
+            'cash_sales': str(b['cash_sales']),
+            'card_sales': str(b['card_sales']),
+            # Cash in — alimentation de caisse
+            'opening': str(b['opening']),
+            'cash_added': str(b['cash_added']),
+            'funding_total': str(b['funding_total']),
+            'funding_count': b['funding_count'],
+            # Cash out
+            'expenses': str(b['expenses']),
+            'expenses_count': b['expenses_count'],
+            'refunds': str(b['refunds']),
+            # Balances
+            'net_balance': str(b['net_balance']),
+            'cash_balance': str(b['cash_balance']),
             'by_category': [
                 {'category': row['category'], 'total': str(row['total'])}
-                for row in by_category
+                for row in b['by_category']
             ],
         })
 
@@ -507,24 +545,71 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         day = date_to
         while day >= date_from:
             start, end = _day_bounds(day)
-            revenue_qs = self._revenue_queryset(channel, start, end)
-            expense_qs = Expense.objects.filter(
-                sales_channel=channel,
-                occurred_at__gte=start,
-                occurred_at__lte=end,
-            )
-            revenue = revenue_qs.aggregate(t=Sum('total'))['t'] or Decimal('0')
-            expenses = expense_qs.aggregate(t=Sum('amount'))['t'] or Decimal('0')
+            b = self._caisse_breakdown(channel, start, end)
             rows.append({
                 'date': day.isoformat(),
                 'sales_channel': channel.id,
                 'sales_channel_name': channel.name,
                 'currency': 'TND',
-                'revenue': str(revenue),
-                'revenue_count': revenue_qs.count(),
-                'expenses': str(expenses),
-                'expenses_count': expense_qs.count(),
-                'net_balance': str(revenue - expenses),
+                'revenue': str(b['revenue']),
+                'revenue_count': b['revenue_count'],
+                'cash_sales': str(b['cash_sales']),
+                'expenses': str(b['expenses']),
+                'expenses_count': b['expenses_count'],
+                'funding_total': str(b['funding_total']),
+                'net_balance': str(b['net_balance']),
+                'cash_balance': str(b['cash_balance']),
             })
             day -= timedelta(days=1)
         return Response(rows)
+
+
+class CashDepositViewSet(viewsets.ModelViewSet):
+    """POS caisse funding (alimentation) — opening float + cash top-ups. Each row
+    increases the caisse balance for its day. Mirrors ``ExpenseViewSet`` (cash-out).
+    """
+    serializer_class = CashDepositSerializer
+    permission_classes = [IsAuthenticated]
+
+    def _get_allowed_channel_ids(self):
+        from apps.rbac.services import visible_sales_channel_ids
+        return visible_sales_channel_ids(self.request.user)
+
+    def get_queryset(self):
+        qs = CashDeposit.objects.select_related(
+            'sales_channel', 'sales_channel__brand', 'created_by',
+        )
+        allowed_channel_ids = self._get_allowed_channel_ids()
+        if allowed_channel_ids is not None:
+            qs = qs.filter(sales_channel_id__in=allowed_channel_ids)
+        params = self.request.query_params
+        sc = params.get('sales_channel')
+        if sc:
+            qs = qs.filter(sales_channel_id=sc)
+        kind = params.get('kind')
+        if kind:
+            qs = qs.filter(kind=kind)
+        date_from = params.get('date_from')
+        if date_from:
+            try:
+                qs = qs.filter(occurred_at__date__gte=datetime.fromisoformat(date_from).date())
+            except ValueError:
+                pass
+        date_to = params.get('date_to')
+        if date_to:
+            try:
+                qs = qs.filter(occurred_at__date__lte=datetime.fromisoformat(date_to).date())
+            except ValueError:
+                pass
+        return qs
+
+    def perform_create(self, serializer):
+        sc = serializer.validated_data['sales_channel']
+        allowed_channel_ids = self._get_allowed_channel_ids()
+        if allowed_channel_ids is not None and sc.id not in allowed_channel_ids:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('You do not have access to this POS caisse.')
+        serializer.save(
+            company_id=sc.brand.company_id,
+            created_by=self.request.user if self.request.user.is_authenticated else None,
+        )

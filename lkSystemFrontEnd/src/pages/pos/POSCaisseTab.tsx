@@ -1,19 +1,22 @@
 /**
- * POSCaisseTab — Dépenses (caisse expenses) tab content for the POS page.
+ * POSCaisseTab — full cash-register (caisse) view for the POS page.
  *
- * Renders three things:
- *  1. **Caisse Stats banner** — today's revenue, today's expenses, net balance.
- *  2. **Add Dépense form** — amount + category + optional note. Saves via the
- *     /sales-channels/expenses/ endpoint and immediately refreshes the stats.
- *  3. **Today's expenses list** — most-recent first, with delete (which also
- *     refreshes the stats so the net balance stays accurate).
+ * Renders:
+ *  1. **Caisse statement banner** — the real cash-drawer balance, broken down as
+ *     opening float + alimentation + cash sales − expenses − refunds = closing.
+ *     Card/transfer sales are shown separately (they don't enter the till).
+ *  2. **Alimentation de caisse form** — add cash IN (opening float or top-up).
+ *  3. **Dépense form** — record cash OUT.
+ *  4. **Today's cash-ins + expenses lists** — each with delete.
+ *  5. **History table** — day-by-day sales, funding, expenses and closing balance.
  *
- * The component is intentionally self-contained: it only needs the selected
- * POS channel id from the parent.
+ * Self-contained: only needs the selected channel id from the parent.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Loader2, Plus, Receipt, TrendingDown, TrendingUp, Trash2, Wallet } from 'lucide-react';
+import {
+  ArrowDownToLine, Loader2, Plus, Receipt, Trash2, Wallet,
+} from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -31,8 +34,12 @@ import {
 
 import {
   expenseService,
+  cashDepositService,
   EXPENSE_CATEGORY_OPTIONS,
+  CASH_DEPOSIT_KIND_OPTIONS,
   type Expense,
+  type CashDeposit,
+  type CashDepositKind,
   type CaisseStats,
   type CaisseHistoryRow,
   type ExpenseCategory,
@@ -51,44 +58,65 @@ interface Props {
   onAfterChange?: () => void; // parent may want to refresh other tiles
 }
 
-export function CaisseStatsBanner({ stats, loading, compact }: { stats: CaisseStats | null; loading: boolean; compact?: boolean }) {
+function StatLine({
+  label, value, sign, tone,
+}: {
+  label: string;
+  value: string | number;
+  sign: '+' | '−';
+  tone?: 'in' | 'out';
+}) {
+  const color = tone === 'in' ? 'text-emerald-700' : tone === 'out' ? 'text-red-700' : '';
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-muted-foreground">{label}</span>
+      <span className={`tabular-nums ${color}`}>{sign} {fmtTND(value)}</span>
+    </div>
+  );
+}
+
+export function CaisseStatsBanner({ stats, loading }: { stats: CaisseStats | null; loading: boolean }) {
   if (loading && !stats) {
     return (
       <div className="rounded-md border bg-card/80 p-3 flex items-center gap-2 text-sm text-muted-foreground">
-        <Loader2 className="size-4 animate-spin" /> Loading caisse stats…
+        <Loader2 className="size-4 animate-spin" /> Chargement de la caisse…
       </div>
     );
   }
   if (!stats) return null;
-  const net = Number(stats.net_balance);
-  const netColor = net >= 0 ? 'text-emerald-700' : 'text-red-700';
+  const balance = Number(stats.cash_balance);
+  const balColor = balance >= 0 ? 'text-emerald-700' : 'text-red-700';
+  const otherExpenses = Number(stats.expenses) - Number(stats.refunds);
+  const cardSales = Number(stats.card_sales);
+
   return (
-    <div className={`grid gap-2 ${compact ? 'grid-cols-3' : 'grid-cols-1 sm:grid-cols-3'}`}>
-      <Card className="p-3">
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Recettes aujourd'hui</p>
-          <TrendingUp className="size-4 text-emerald-600" />
+    <Card className="p-4">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Solde caisse (espèces)</p>
+          <p className={`text-3xl font-bold tabular-nums ${balColor}`}>
+            {fmtTND(stats.cash_balance)} <span className="text-sm font-normal text-muted-foreground">TND</span>
+          </p>
         </div>
-        <p className="mt-1 text-xl font-semibold tabular-nums">{fmtTND(stats.revenue)} <span className="text-xs font-normal text-muted-foreground">TND</span></p>
-        <p className="text-[11px] text-muted-foreground">{stats.revenue_count} ticket{stats.revenue_count === 1 ? '' : 's'}</p>
-      </Card>
-      <Card className="p-3">
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Dépenses aujourd'hui</p>
-          <TrendingDown className="size-4 text-red-600" />
-        </div>
-        <p className="mt-1 text-xl font-semibold tabular-nums">{fmtTND(stats.expenses)} <span className="text-xs font-normal text-muted-foreground">TND</span></p>
-        <p className="text-[11px] text-muted-foreground">{stats.expenses_count} sortie{stats.expenses_count === 1 ? '' : 's'}</p>
-      </Card>
-      <Card className="p-3">
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Net caisse</p>
-          <Wallet className={`size-4 ${netColor}`} />
-        </div>
-        <p className={`mt-1 text-xl font-semibold tabular-nums ${netColor}`}>{fmtTND(stats.net_balance)} <span className="text-xs font-normal text-muted-foreground">TND</span></p>
-        <p className="text-[11px] text-muted-foreground">Recettes − Dépenses</p>
-      </Card>
-    </div>
+        <Wallet className={`size-8 ${balColor}`} />
+      </div>
+
+      <Separator className="my-3" />
+
+      <div className="grid gap-x-8 gap-y-1.5 text-sm sm:grid-cols-2">
+        <StatLine label="Fond de caisse (ouverture)" value={stats.opening} sign="+" tone="in" />
+        <StatLine label="Alimentation (ajouts)" value={stats.cash_added} sign="+" tone="in" />
+        <StatLine label={`Ventes espèces (${stats.revenue_count})`} value={stats.cash_sales} sign="+" tone="in" />
+        <StatLine label="Dépenses" value={otherExpenses} sign="−" tone="out" />
+        <StatLine label="Remboursements" value={stats.refunds} sign="−" tone="out" />
+      </div>
+
+      {cardSales > 0 && (
+        <p className="mt-3 text-xs text-muted-foreground">
+          + {fmtTND(stats.card_sales)} TND encaissés par carte / virement — hors caisse espèces.
+        </p>
+      )}
+    </Card>
   );
 }
 
@@ -98,12 +126,21 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
   const [historyRows, setHistoryRows] = useState<CaisseHistoryRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [deposits, setDeposits] = useState<CashDeposit[]>([]);
   const [listLoading, setListLoading] = useState(false);
 
+  // Dépense (cash-out) form
   const [amount, setAmount] = useState('');
   const [category, setCategory] = useState<ExpenseCategory>('OTHER');
   const [note, setNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  // Alimentation (cash-in) form
+  const [depAmount, setDepAmount] = useState('');
+  const [depKind, setDepKind] = useState<CashDepositKind>('TOP_UP');
+  const [depNote, setDepNote] = useState('');
+  const [depSubmitting, setDepSubmitting] = useState(false);
+
   const [error, setError] = useState<string | null>(null);
   const [okMessage, setOkMessage] = useState<string | null>(null);
 
@@ -114,24 +151,25 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
       setStats(null);
       setHistoryRows([]);
       setExpenses([]);
+      setDeposits([]);
       return;
     }
     setStatsLoading(true);
     setListLoading(true);
     setHistoryLoading(true);
     try {
-      const [s, history, list] = await Promise.all([
+      const [s, history, expList, depList] = await Promise.all([
         expenseService.caisseStats(channelId).catch(() => null),
         expenseService.caisseHistory(channelId).catch(() => [] as CaisseHistoryRow[]),
-        expenseService.list({
-          sales_channel: channelId,
-          date_from: todayISO,
-          date_to: todayISO,
-        }).catch(() => [] as Expense[]),
+        expenseService.list({ sales_channel: channelId, date_from: todayISO, date_to: todayISO })
+          .catch(() => [] as Expense[]),
+        cashDepositService.list({ sales_channel: channelId, date_from: todayISO, date_to: todayISO })
+          .catch(() => [] as CashDeposit[]),
       ]);
       setStats(s);
       setHistoryRows(history);
-      setExpenses(list);
+      setExpenses(expList);
+      setDeposits(depList);
     } finally {
       setStatsLoading(false);
       setListLoading(false);
@@ -141,47 +179,60 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
 
   useEffect(() => { void refresh(); }, [refresh, refreshSignal]);
 
-  const submit = useCallback(async () => {
+  const parseAmount = (raw: string) => Number(raw.replace(',', '.'));
+
+  const submitExpense = useCallback(async () => {
     setError(null);
     setOkMessage(null);
-    if (!channelId) {
-      setError('Sélectionnez d\'abord une caisse POS.');
-      return;
-    }
-    const n = Number(amount.replace(',', '.'));
-    if (!n || n <= 0) {
-      setError('Le montant doit être strictement positif.');
-      return;
-    }
+    if (!channelId) { setError('Sélectionnez d\'abord une caisse.'); return; }
+    const n = parseAmount(amount);
+    if (!n || n <= 0) { setError('Le montant de la dépense doit être strictement positif.'); return; }
     setSubmitting(true);
     try {
-      await expenseService.create({
-        sales_channel: channelId,
-        amount: n,
-        category,
-        note: note.trim(),
-      });
-      setAmount('');
-      setNote('');
-      setCategory('OTHER');
+      await expenseService.create({ sales_channel: channelId, amount: n, category, note: note.trim() });
+      setAmount(''); setNote(''); setCategory('OTHER');
       setOkMessage(`Dépense de ${fmtTND(n)} TND enregistrée.`);
       await refresh();
       onAfterChange?.();
     } catch (err: any) {
       const data = err?.response?.data;
       setError(
-        (typeof data === 'string' && data) ||
-        data?.detail ||
+        (typeof data === 'string' && data) || data?.detail ||
         (data && Object.values(data).flat().join(' ')) ||
-        'Échec de l\'enregistrement de la dépense.'
+        'Échec de l\'enregistrement de la dépense.',
       );
     } finally {
       setSubmitting(false);
     }
   }, [amount, category, note, channelId, refresh, onAfterChange]);
 
-  const handleDelete = useCallback(async (id: number) => {
-    if (!confirm('Supprimer cette dépense ? Le solde net sera ajusté.')) return;
+  const submitDeposit = useCallback(async () => {
+    setError(null);
+    setOkMessage(null);
+    if (!channelId) { setError('Sélectionnez d\'abord une caisse.'); return; }
+    const n = parseAmount(depAmount);
+    if (!n || n <= 0) { setError('Le montant de l\'alimentation doit être strictement positif.'); return; }
+    setDepSubmitting(true);
+    try {
+      await cashDepositService.create({ sales_channel: channelId, amount: n, kind: depKind, note: depNote.trim() });
+      setDepAmount(''); setDepNote(''); setDepKind('TOP_UP');
+      setOkMessage(`Alimentation de ${fmtTND(n)} TND enregistrée.`);
+      await refresh();
+      onAfterChange?.();
+    } catch (err: any) {
+      const data = err?.response?.data;
+      setError(
+        (typeof data === 'string' && data) || data?.detail ||
+        (data && Object.values(data).flat().join(' ')) ||
+        'Échec de l\'enregistrement de l\'alimentation.',
+      );
+    } finally {
+      setDepSubmitting(false);
+    }
+  }, [depAmount, depKind, depNote, channelId, refresh, onAfterChange]);
+
+  const handleDeleteExpense = useCallback(async (id: number) => {
+    if (!confirm('Supprimer cette dépense ? Le solde sera ajusté.')) return;
     try {
       await expenseService.remove(id);
       await refresh();
@@ -191,141 +242,206 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
     }
   }, [refresh, onAfterChange]);
 
+  const handleDeleteDeposit = useCallback(async (id: number) => {
+    if (!confirm('Supprimer cette alimentation ? Le solde sera ajusté.')) return;
+    try {
+      await cashDepositService.remove(id);
+      await refresh();
+      onAfterChange?.();
+    } catch {
+      setError('Impossible de supprimer l\'alimentation.');
+    }
+  }, [refresh, onAfterChange]);
+
   if (!channelId) {
     return (
       <div className="p-6 text-sm text-muted-foreground">
-        Sélectionnez une caisse POS en haut de la page pour gérer ses dépenses.
+        Sélectionnez une caisse en haut de la page pour gérer le fond, les alimentations et les dépenses.
       </div>
     );
   }
 
   return (
     <div className="flex flex-col gap-4 p-1">
-      {/* Stats banner */}
+      {/* Cash register statement */}
       <CaisseStatsBanner stats={stats} loading={statsLoading} />
 
       {/* Header */}
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2">
-          <Receipt className="size-4 text-muted-foreground" />
-          <h2 className="text-sm font-semibold">Dépenses du jour {channelName ? `· ${channelName}` : ''}</h2>
+          <Wallet className="size-4 text-muted-foreground" />
+          <h2 className="text-sm font-semibold">Caisse du jour {channelName ? `· ${channelName}` : ''}</h2>
         </div>
         <Badge variant="outline" className="text-[11px]">Date: {todayISO}</Badge>
       </div>
 
-      {/* Add expense form */}
-      <Card className="p-4">
-        <p className="text-sm font-medium mb-3">Ajouter une dépense</p>
-        <div className="grid gap-3 md:grid-cols-[160px_1fr_auto]">
-          <div>
-            <label className="text-[11px] text-muted-foreground">Montant (TND)</label>
-            <Input
-              type="number"
-              inputMode="decimal"
-              step="0.001"
-              min="0"
-              value={amount}
-              onChange={e => setAmount(e.target.value)}
-              placeholder="0.000"
-              className="mt-1 h-9 tabular-nums"
-            />
+      {/* Forms: alimentation (in) + dépense (out) */}
+      <div className="grid gap-3 lg:grid-cols-2">
+        {/* Alimentation de caisse */}
+        <Card className="p-4 border-emerald-200">
+          <p className="mb-3 flex items-center gap-1.5 text-sm font-medium text-emerald-800">
+            <ArrowDownToLine className="size-4" /> Alimentation de caisse
+          </p>
+          <div className="grid gap-3 sm:grid-cols-[140px_1fr]">
+            <div>
+              <label className="text-[11px] text-muted-foreground">Montant (TND)</label>
+              <Input
+                type="number" inputMode="decimal" step="0.001" min="0"
+                value={depAmount} onChange={e => setDepAmount(e.target.value)}
+                placeholder="0.000" className="mt-1 h-9 tabular-nums"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] text-muted-foreground">Type</label>
+              <Select value={depKind} onValueChange={v => setDepKind(v as CashDepositKind)}>
+                <SelectTrigger className="mt-1 h-9"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {CASH_DEPOSIT_KIND_OPTIONS.map(opt => (
+                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </div>
-          <div>
-            <label className="text-[11px] text-muted-foreground">Catégorie</label>
-            <Select value={category} onValueChange={v => setCategory(v as ExpenseCategory)}>
-              <SelectTrigger className="mt-1 h-9">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {EXPENSE_CATEGORY_OPTIONS.map(opt => (
-                  <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex items-end">
-            <Button
-              type="button"
-              onClick={submit}
-              disabled={submitting}
-              className="h-9 gap-2"
-            >
-              {submitting ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-              Enregistrer
-            </Button>
-          </div>
-        </div>
-        <div className="mt-3">
-          <label className="text-[11px] text-muted-foreground">Note (optionnel)</label>
           <Textarea
-            value={note}
-            onChange={e => setNote(e.target.value)}
-            placeholder="Ex: Taxi pour livraison express…"
-            className="mt-1 min-h-[60px] resize-none"
+            value={depNote} onChange={e => setDepNote(e.target.value)}
+            placeholder="Note (optionnel) — ex: fond de caisse matin…"
+            className="mt-3 min-h-[44px] resize-none"
           />
-        </div>
-        {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
-        {okMessage && <p className="mt-2 text-xs text-emerald-700">{okMessage}</p>}
-      </Card>
+          <Button type="button" onClick={submitDeposit} disabled={depSubmitting} className="mt-3 h-9 w-full gap-2">
+            {depSubmitting ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+            Ajouter à la caisse
+          </Button>
+        </Card>
 
-      {/* Today's expenses list */}
-      <Card className="p-4">
-        <div className="flex items-center justify-between mb-3">
-          <p className="text-sm font-medium">Sorties d'argent aujourd'hui</p>
-          <span className="text-xs text-muted-foreground">
-            {expenses.length} ligne{expenses.length === 1 ? '' : 's'}
-          </span>
-        </div>
-        <Separator className="mb-2" />
-        {listLoading ? (
-          <div className="py-6 text-center text-xs text-muted-foreground">
-            <Loader2 className="size-4 animate-spin inline mr-1.5" /> Chargement…
+        {/* Dépense */}
+        <Card className="p-4 border-red-200">
+          <p className="mb-3 flex items-center gap-1.5 text-sm font-medium text-red-800">
+            <Receipt className="size-4" /> Ajouter une dépense
+          </p>
+          <div className="grid gap-3 sm:grid-cols-[140px_1fr]">
+            <div>
+              <label className="text-[11px] text-muted-foreground">Montant (TND)</label>
+              <Input
+                type="number" inputMode="decimal" step="0.001" min="0"
+                value={amount} onChange={e => setAmount(e.target.value)}
+                placeholder="0.000" className="mt-1 h-9 tabular-nums"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] text-muted-foreground">Catégorie</label>
+              <Select value={category} onValueChange={v => setCategory(v as ExpenseCategory)}>
+                <SelectTrigger className="mt-1 h-9"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {EXPENSE_CATEGORY_OPTIONS.map(opt => (
+                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </div>
-        ) : expenses.length === 0 ? (
-          <p className="py-6 text-center text-xs text-muted-foreground">Aucune dépense enregistrée aujourd'hui.</p>
-        ) : (
-          <ul className="divide-y">
-            {expenses.map(exp => (
-              <li key={exp.id} className="py-2 flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <Badge variant="outline" className="text-[10px]">{exp.category_display}</Badge>
-                    <span className="text-xs text-muted-foreground">
-                      {new Date(exp.occurred_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
-                    </span>
-                    {exp.created_by_name && (
-                      <span className="text-[11px] text-muted-foreground">· {exp.created_by_name}</span>
-                    )}
-                  </div>
-                  {exp.note && <p className="mt-1 text-xs whitespace-normal break-words">{exp.note}</p>}
-                </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <span className="text-sm font-semibold tabular-nums text-red-700">
-                    − {fmtTND(exp.amount)}
-                  </span>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="size-7"
-                    onClick={() => handleDelete(exp.id)}
-                    title="Supprimer"
-                  >
-                    <Trash2 className="size-3.5 text-muted-foreground" />
-                  </Button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card>
+          <Textarea
+            value={note} onChange={e => setNote(e.target.value)}
+            placeholder="Note (optionnel) — ex: Taxi pour livraison express…"
+            className="mt-3 min-h-[44px] resize-none"
+          />
+          <Button type="button" onClick={submitExpense} disabled={submitting} className="mt-3 h-9 w-full gap-2" variant="secondary">
+            {submitting ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+            Enregistrer la dépense
+          </Button>
+        </Card>
+      </div>
 
-      {/* Receipt history */}
+      {error && <p className="text-xs text-red-600">{error}</p>}
+      {okMessage && <p className="text-xs text-emerald-700">{okMessage}</p>}
+
+      {/* Today's movements */}
+      <div className="grid gap-3 lg:grid-cols-2">
+        {/* Cash-ins */}
+        <Card className="p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <p className="text-sm font-medium">Alimentations aujourd'hui</p>
+            <span className="text-xs text-muted-foreground">{deposits.length} ligne{deposits.length === 1 ? '' : 's'}</span>
+          </div>
+          <Separator className="mb-2" />
+          {listLoading ? (
+            <div className="py-6 text-center text-xs text-muted-foreground">
+              <Loader2 className="mr-1.5 inline size-4 animate-spin" /> Chargement…
+            </div>
+          ) : deposits.length === 0 ? (
+            <p className="py-6 text-center text-xs text-muted-foreground">Aucune alimentation aujourd'hui.</p>
+          ) : (
+            <ul className="divide-y">
+              {deposits.map(dep => (
+                <li key={dep.id} className="flex items-start justify-between gap-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline" className="text-[10px]">{dep.kind_display}</Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {new Date(dep.occurred_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                      {dep.created_by_name && <span className="text-[11px] text-muted-foreground">· {dep.created_by_name}</span>}
+                    </div>
+                    {dep.note && <p className="mt-1 break-words text-xs">{dep.note}</p>}
+                  </div>
+                  <div className="flex flex-shrink-0 items-center gap-2">
+                    <span className="text-sm font-semibold tabular-nums text-emerald-700">+ {fmtTND(dep.amount)}</span>
+                    <Button type="button" variant="ghost" size="icon" className="size-7" onClick={() => handleDeleteDeposit(dep.id)} title="Supprimer">
+                      <Trash2 className="size-3.5 text-muted-foreground" />
+                    </Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+
+        {/* Cash-outs */}
+        <Card className="p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <p className="text-sm font-medium">Dépenses aujourd'hui</p>
+            <span className="text-xs text-muted-foreground">{expenses.length} ligne{expenses.length === 1 ? '' : 's'}</span>
+          </div>
+          <Separator className="mb-2" />
+          {listLoading ? (
+            <div className="py-6 text-center text-xs text-muted-foreground">
+              <Loader2 className="mr-1.5 inline size-4 animate-spin" /> Chargement…
+            </div>
+          ) : expenses.length === 0 ? (
+            <p className="py-6 text-center text-xs text-muted-foreground">Aucune dépense aujourd'hui.</p>
+          ) : (
+            <ul className="divide-y">
+              {expenses.map(exp => (
+                <li key={exp.id} className="flex items-start justify-between gap-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline" className="text-[10px]">{exp.category_display}</Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {new Date(exp.occurred_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                      {exp.created_by_name && <span className="text-[11px] text-muted-foreground">· {exp.created_by_name}</span>}
+                    </div>
+                    {exp.note && <p className="mt-1 break-words text-xs">{exp.note}</p>}
+                  </div>
+                  <div className="flex flex-shrink-0 items-center gap-2">
+                    <span className="text-sm font-semibold tabular-nums text-red-700">− {fmtTND(exp.amount)}</span>
+                    <Button type="button" variant="ghost" size="icon" className="size-7" onClick={() => handleDeleteExpense(exp.id)} title="Supprimer">
+                      <Trash2 className="size-3.5 text-muted-foreground" />
+                    </Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+      </div>
+
+      {/* History */}
       <Card className="p-4">
         <div className="mb-3 flex items-center justify-between gap-2">
           <div>
-            <p className="text-sm font-medium">Historique des recettes</p>
-            <p className="text-xs text-muted-foreground">Derniers jours, recettes, dépenses et solde net.</p>
+            <p className="text-sm font-medium">Historique de caisse</p>
+            <p className="text-xs text-muted-foreground">Ventes, alimentations, dépenses et solde espèces par jour.</p>
           </div>
           <Badge variant="secondary" className="text-[11px]">14 jours</Badge>
         </div>
@@ -338,37 +454,33 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
           <p className="py-6 text-center text-xs text-muted-foreground">Aucun historique de caisse.</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[560px] text-sm">
+            <table className="w-full min-w-[640px] text-sm">
               <thead>
                 <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
                   <th className="py-2 font-medium">Date</th>
                   <th className="py-2 text-right font-medium">Tickets</th>
-                  <th className="py-2 text-right font-medium">Recettes</th>
+                  <th className="py-2 text-right font-medium">Ventes</th>
+                  <th className="py-2 text-right font-medium">Alimentation</th>
                   <th className="py-2 text-right font-medium">Dépenses</th>
-                  <th className="py-2 text-right font-medium">Net</th>
+                  <th className="py-2 text-right font-medium">Solde caisse</th>
                 </tr>
               </thead>
               <tbody>
                 {historyRows.map(row => {
-                  const net = Number(row.net_balance);
-                  const netColor = net >= 0 ? 'text-emerald-700' : 'text-red-700';
+                  const bal = Number(row.cash_balance);
+                  const balColor = bal >= 0 ? 'text-emerald-700' : 'text-red-700';
                   return (
                     <tr key={row.date} className="border-b last:border-0">
                       <td className="py-2 font-medium">
                         {new Date(`${row.date}T00:00:00`).toLocaleDateString('fr-FR', {
-                          day: '2-digit',
-                          month: '2-digit',
-                          year: 'numeric',
+                          day: '2-digit', month: '2-digit', year: 'numeric',
                         })}
                       </td>
                       <td className="py-2 text-right tabular-nums">{row.revenue_count}</td>
-                      <td className="py-2 text-right tabular-nums">{fmtTND(row.revenue)} TND</td>
-                      <td className="py-2 text-right tabular-nums text-red-700">
-                        - {fmtTND(row.expenses)} TND
-                      </td>
-                      <td className={`py-2 text-right font-semibold tabular-nums ${netColor}`}>
-                        {fmtTND(row.net_balance)} TND
-                      </td>
+                      <td className="py-2 text-right tabular-nums">{fmtTND(row.revenue)}</td>
+                      <td className="py-2 text-right tabular-nums text-emerald-700">+ {fmtTND(row.funding_total)}</td>
+                      <td className="py-2 text-right tabular-nums text-red-700">− {fmtTND(row.expenses)}</td>
+                      <td className={`py-2 text-right font-semibold tabular-nums ${balColor}`}>{fmtTND(row.cash_balance)}</td>
                     </tr>
                   );
                 })}

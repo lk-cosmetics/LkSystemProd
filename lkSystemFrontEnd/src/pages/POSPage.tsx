@@ -75,7 +75,7 @@ import { POSAddClientDialog } from './pos/POSAddClientDialog';
 import { POSClientPromptDialog } from './pos/POSClientPromptDialog';
 import POSCaisseTab from './pos/POSCaisseTab';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Wallet, Receipt } from 'lucide-react';
+import { Wallet } from 'lucide-react';
 import {
   fmtTND,
   type CartLine,
@@ -355,8 +355,7 @@ export default function POSPage() {
   }, []);
 
   const fetchWaitingPOSOrders = useCallback(async () => {
-    const selected = channels.find(c => c.id === Number(channelId));
-    if (!channelId || selected?.channel_type !== 'POS') {
+    if (!channelId) {
       setWaitingPOSOrders([]);
       setWaitingPOSCount(0);
       return;
@@ -383,8 +382,7 @@ export default function POSPage() {
   }, [channelId, channels]);
 
   const fetchPOSHistoryOrders = useCallback(async () => {
-    const selected = channels.find(c => c.id === Number(channelId));
-    if (!channelId || selected?.channel_type !== 'POS') {
+    if (!channelId) {
       setPosHistoryOrders([]);
       setPosHistoryCount(0);
       return;
@@ -392,10 +390,12 @@ export default function POSPage() {
 
     setPosHistoryLoading(true);
     try {
+      // Completed sales for the selected channel — works for every channel type
+      // (POS sales rung here plus any other completed orders on the channel),
+      // filtered by the canonical done status rather than POS source only.
       const response = await orderService.getAll({
         sales_channel: Number(channelId),
-        source: 'POS',
-        status: 'COMPLETED',
+        order_status: 'done',
         search: debouncedPOSHistorySearch || undefined,
         created_from: posHistoryDateFrom || undefined,
         created_to: posHistoryDateTo || undefined,
@@ -2016,14 +2016,15 @@ export default function POSPage() {
             </Button>
           </div>
 
-          {/* Tabs: regular POS workflow vs. Dépenses (caisse expenses). */}
+          {/* Tabs: sales/checkout workflow (Ventes) vs. cash-register
+              management — fond, alimentation, dépenses & solde (Caisse). */}
           <Tabs value={posTab} onValueChange={v => setPosTab(v as 'caisse' | 'depenses')} className="flex min-h-0 flex-1 flex-col">
             <TabsList className="mb-2 shrink-0 self-start">
               <TabsTrigger value="caisse" className="gap-1.5">
-                <Wallet className="size-3.5" /> Caisse
+                <ShoppingCart className="size-3.5" /> Ventes
               </TabsTrigger>
               <TabsTrigger value="depenses" className="gap-1.5">
-                <Receipt className="size-3.5" /> Dépenses
+                <Wallet className="size-3.5" /> Caisse
               </TabsTrigger>
             </TabsList>
 
