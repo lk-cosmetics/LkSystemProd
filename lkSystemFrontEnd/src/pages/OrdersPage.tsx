@@ -1154,7 +1154,9 @@ export default function OrdersPage() {
     [selectedOrders],
   );
   const bulkPosChannels = useMemo(
-    () => channels.filter(c => c.is_active && c.channel_type === 'POS'),
+    // Any active channel can be a POS pickup/checkout destination (POS and
+    // WooCommerce alike); the backend enforces same-brand + stock per order.
+    () => channels.filter(c => c.is_active),
     [channels],
   );
 

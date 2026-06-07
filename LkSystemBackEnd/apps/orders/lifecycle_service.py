@@ -779,12 +779,13 @@ class OrderLifecycleService:
             raise LifecycleError('Order has already entered delivery and cannot be sent to POS.')
         if order.sent_to_pos_at:
             raise LifecycleError('Order has already been sent to POS.')
-        if pos_sales_channel.channel_type != SalesChannel.ChannelType.POS:
-            raise LifecycleError('Selected destination must be a POS sales channel.')
+        # Any sales channel can act as a POS pickup/checkout location (POS and
+        # WooCommerce alike); it just has to be active, same-brand, and hold the
+        # stock. The destination is validated/checked out from the POS page.
         if not pos_sales_channel.is_active:
-            raise LifecycleError('Selected POS location is inactive.')
+            raise LifecycleError('Selected destination channel is inactive.')
         if pos_sales_channel.brand_id != order.sales_channel.brand_id:
-            raise LifecycleError('Selected POS location must belong to the same brand as this order.')
+            raise LifecycleError('Selected destination must belong to the same brand as this order.')
 
         # Stock gate: the selected POS location must physically hold enough of
         # every linked product before we route the order there.

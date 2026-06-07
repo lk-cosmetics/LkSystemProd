@@ -2361,9 +2361,10 @@ export function SendToPOSDialog({
   onSubmit,
   isLoading,
 }: Readonly<SendToPOSDialogProps>) {
-  const sameBrandPOS = useMemo(
+  // Any active same-brand channel can be a POS pickup/checkout destination
+  // (POS and WooCommerce alike) — the backend enforces brand + stock.
+  const sameBrandChannels = useMemo(
     () => channels.filter(ch =>
-      ch.channel_type === 'POS' &&
       ch.is_active &&
       ch.brand === order?.brand
     ),
@@ -2396,11 +2397,11 @@ export function SendToPOSDialog({
           </p>
         </div>
 
-        {sameBrandPOS.length === 0 ? (
+        {sameBrandChannels.length === 0 ? (
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
             <div className="flex gap-2">
               <ShieldAlert className="mt-0.5 size-4 shrink-0" />
-              <span>No active same-brand POS location is available for this order.</span>
+              <span>No active same-brand sales channel is available for this order.</span>
             </div>
           </div>
         ) : (
@@ -2411,7 +2412,7 @@ export function SendToPOSDialog({
                 <SelectValue placeholder="Select POS location..." />
               </SelectTrigger>
               <SelectContent>
-                {sameBrandPOS.map(ch => (
+                {sameBrandChannels.map(ch => (
                   <SelectItem key={ch.id} value={String(ch.id)}>
                     {ch.name}{ch.city ? ` - ${ch.city}` : ''}
                   </SelectItem>
