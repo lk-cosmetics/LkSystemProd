@@ -52,6 +52,7 @@ import { promotionService } from '@/services/promotion.service';
 import { useAuthStore } from '@/store/authStore';
 import { POSCameraScanner } from '../pos/POSCameraScanner';
 import { OrderClientSelector } from './OrderClientSelector';
+import { ClientInfoDialog } from './ClientInfoDialog';
 import { CleanStatusBadge, SyncStatusBadge } from './orderStatusBadges';
 import type {
   OrderDetail, OrderLine, OrderEditRequest, OrderLogEntry, OrderDiscountType,
@@ -1123,6 +1124,8 @@ function OrderViewMode({
 }>) {
   const directPOSCompleted =
     order.source === 'POS' && order.status === 'COMPLETED' && !order.in_store_pickup;
+  const [clientInfoOpen, setClientInfoOpen] = useState(false);
+  const hasClient = !!order.client_id;
   const totalsRows = useMemo(() => [
     { label: 'Subtotal', value: order.subtotal },
     { label: 'Tax', value: order.tax_total },
@@ -1203,8 +1206,15 @@ function OrderViewMode({
                 </div>
               )}
 
-              {/* Client Card */}
-              <div className={`rounded-lg border p-4 flex items-start gap-3 ${order.client_is_blocked ? 'border-red-200 bg-red-50' : 'bg-gradient-to-br from-indigo-50/30 to-transparent'}`}>
+              {/* Client Card — click to open the full client profile popup */}
+              <button
+                type="button"
+                onClick={() => hasClient && setClientInfoOpen(true)}
+                disabled={!hasClient}
+                aria-haspopup="dialog"
+                title={hasClient ? 'Voir les détails du client' : undefined}
+                className={`group flex w-full items-start gap-3 rounded-lg border p-4 text-left transition-colors ${order.client_is_blocked ? 'border-red-200 bg-red-50' : 'bg-gradient-to-br from-indigo-50/30 to-transparent'} ${hasClient ? 'cursor-pointer hover:border-indigo-300 hover:bg-indigo-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40' : 'cursor-default'}`}
+              >
                 <div className={`size-9 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${order.client_is_blocked ? 'bg-red-100' : 'bg-indigo-600/10'}`}>
                   {order.client_is_blocked ? <ShieldAlert className="size-4 text-red-700" /> : <User className="size-4 text-indigo-600" />}
                 </div>
@@ -1217,7 +1227,29 @@ function OrderViewMode({
                     </p>
                   )}
                 </div>
-              </div>
+                {hasClient && (
+                  <span className="flex items-center gap-1 self-center text-xs text-muted-foreground transition-colors group-hover:text-indigo-600">
+                    <span className="hidden sm:inline">Détails</span>
+                    <ChevronRight className="size-4" />
+                  </span>
+                )}
+              </button>
+
+              {hasClient && (
+                <ClientInfoDialog
+                  clientId={order.client_id}
+                  open={clientInfoOpen}
+                  onOpenChange={setClientInfoOpen}
+                  fallback={{
+                    name: order.client_name,
+                    email: order.client_email,
+                    phone: order.client_phone,
+                    points: order.client_points,
+                    isBlocked: order.client_is_blocked,
+                    returnCount: order.client_return_count,
+                  }}
+                />
+              )}
 
               {/* Source & Status Row */}
               <div className="grid gap-3 sm:grid-cols-2">
