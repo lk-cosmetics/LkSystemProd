@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   AlertTriangle,
+  Award,
   Building2,
   Calendar,
   Eye,
@@ -19,6 +20,7 @@ import {
   Phone,
   Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   ShieldAlert,
   ShieldCheck,
@@ -27,6 +29,7 @@ import {
   Trash2,
   Users,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -100,6 +103,33 @@ function Field({ label, value, icon, children }: {
   );
 }
 
+const STAT_TONES: Record<string, string> = {
+  indigo: 'text-indigo-600 bg-indigo-50',
+  blue: 'text-blue-600 bg-blue-50',
+  amber: 'text-amber-600 bg-amber-50',
+  red: 'text-red-600 bg-red-50',
+  emerald: 'text-emerald-600 bg-emerald-50',
+  slate: 'text-slate-600 bg-slate-100',
+};
+
+/** Compact KPI tile used in the client profile header (points, orders, …). */
+function StatTile({ icon: Icon, label, value, tone = 'slate' }: {
+  icon: LucideIcon;
+  label: string;
+  value: ReactNode;
+  tone?: keyof typeof STAT_TONES;
+}) {
+  return (
+    <div className="rounded-xl border bg-card p-3">
+      <span className={`mb-2 inline-flex size-8 items-center justify-center rounded-lg ${STAT_TONES[tone]}`}>
+        <Icon className="size-4" />
+      </span>
+      <p className="truncate text-lg font-bold leading-none tabular-nums">{value}</p>
+      <p className="mt-1 text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
+    </div>
+  );
+}
+
 interface ClientDetailDialogProps {
   client: Client | null;
   open: boolean;
@@ -123,21 +153,50 @@ function ClientDetailDialog({
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<OrderDetail | null>(null);
   const [orderLoading, setOrderLoading] = useState(false);
+  const [orderSearch, setOrderSearch] = useState('');
 
   useEffect(() => {
     if (!open || !client) return;
     setOrdersLoading(true);
     setSelectedOrder(null);
+    setOrderSearch('');
     clientService.getOrders(client.id)
       .then(setOrders)
       .catch(() => setOrders([]))
       .finally(() => setOrdersLoading(false));
   }, [client, open]);
 
+  // Filter the (possibly large) order history client-side by code.
+  const filteredOrders = useMemo(() => {
+    const q = orderSearch.trim().toLowerCase();
+    if (!q) return orders;
+    return orders.filter(o =>
+      `${o.ticket_id ?? ''} ${o.order_number ?? ''} ${o.external_order_id ?? ''}`
+        .toLowerCase().includes(q),
+    );
+  }, [orders, orderSearch]);
+
   if (!client) return null;
 
   const phone = client.phone;
   const cleanPhone = phone?.replace(/[^0-9+]/g, '') ?? '';
+
+  // Return-risk heuristic: blocked, or a high return-to-order ratio = higher risk.
+  const ordersCount = client.number_of_orders || 0;
+  const returnsCount = client.number_of_returns || 0;
+  const returnRatio = ordersCount > 0 ? returnsCount / ordersCount : (returnsCount > 0 ? 1 : 0);
+  const risk = client.is_blocked || returnRatio >= 0.3
+    ? { label: 'Élevé', tone: 'red' as const }
+    : returnRatio >= 0.1 || returnsCount >= 2
+      ? { label: 'Moyen', tone: 'amber' as const }
+      : returnsCount >= 1
+        ? { label: 'Faible', tone: 'amber' as const }
+        : { label: 'Aucun', tone: 'emerald' as const };
+
+  // Cap the rendered rows so a 1000-order client never blows up the popup.
+  const MAX_ROWS = 200;
+  const shownOrders = filteredOrders.slice(0, MAX_ROWS);
+  const truncatedCount = filteredOrders.length - shownOrders.length;
 
   const openOrder = async (order: OrderListItem) => {
     setOrderLoading(true);
@@ -180,11 +239,18 @@ function ClientDetailDialog({
       footer={footer}
     >
       <div className="space-y-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="flex items-center gap-2 flex-wrap">
-            <ClientTypeBadge type={client.client_type} />
-            <StatusBadge blocked={client.is_blocked} />
-          </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <ClientTypeBadge type={client.client_type} />
+          <StatusBadge blocked={client.is_blocked} />
+          <SourceBadge source={client.source} />
+        </div>
+
+        {/* KPI tiles — points, orders, returns, return risk */}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <StatTile icon={Award} label="Points" value={fmtMoney(client.points)} tone="indigo" />
+          <StatTile icon={ShoppingBag} label="Commandes" value={ordersCount} tone="blue" />
+          <StatTile icon={RotateCcw} label="Retours" value={returnsCount} tone={returnsCount > 0 ? 'amber' : 'slate'} />
+          <StatTile icon={ShieldAlert} label="Risque retour" value={risk.label} tone={risk.tone} />
         </div>
 
         {client.is_blocked && (
@@ -219,12 +285,8 @@ function ClientDetailDialog({
               <Field label="Channel" value={client.sales_channel_name ?? '-'} />
               <Field icon={<MapPin className="size-3.5" />} label="Governorate" value={client.governorate || client.state || '-'} />
               <Field label="Country" value={client.country || '-'} />
-              <Field label="Source"><SourceBadge source={client.source} /></Field>
               <Field label="WC ID" value={client.wc_customer_id != null ? String(client.wc_customer_id) : '-'} />
-              <Field label="Points" value={`${fmtMoney(client.points)} pts`} />
-              <Field label="Orders" value={client.number_of_orders} />
-              <Field label="Returns" value={client.number_of_returns} />
-              <Field label="Created" value={fmtDate(client.created_at)} />
+              <Field icon={<Calendar className="size-3.5" />} label="Created" value={fmtDate(client.created_at)} />
               <div className="col-span-1 sm:col-span-2"><Field label="Address" value={client.address || '-'} /></div>
               <div className="col-span-1 sm:col-span-2"><Field icon={<FileText className="size-3.5" />} label="Notes" value={client.notes || '-'} /></div>
             </CardContent>
@@ -232,29 +294,41 @@ function ClientDetailDialog({
 
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm flex items-center gap-2">
-                <ShoppingBag className="size-4" /> Orders
+              <CardTitle className="text-sm flex items-center justify-between gap-2">
+                <span className="flex items-center gap-2"><ShoppingBag className="size-4" /> Historique des commandes</span>
+                {!ordersLoading && <Badge variant="secondary" className="text-[11px]">{filteredOrders.length}</Badge>}
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="rounded-md border overflow-x-auto">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={orderSearch}
+                  onChange={e => setOrderSearch(e.target.value)}
+                  placeholder="Rechercher par code…"
+                  className="h-8 pl-8 text-xs"
+                  disabled={ordersLoading || orders.length === 0}
+                />
+              </div>
+
+              <div className="max-h-[340px] overflow-auto rounded-md border">
                 <Table>
-                  <TableHeader>
+                  <TableHeader className="sticky top-0 z-10 bg-card">
                     <TableRow>
                       <TableHead className="h-9 text-xs">Code</TableHead>
                       <TableHead className="h-9 text-xs hidden sm:table-cell">Source</TableHead>
-                      <TableHead className="h-9 text-xs">Status</TableHead>
+                      <TableHead className="h-9 text-xs">Statut</TableHead>
                       <TableHead className="h-9 text-xs text-right">Total</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {ordersLoading && (
-                      <TableRow><TableCell colSpan={4} className="py-8 text-center text-muted-foreground"><Loader2 className="size-4 animate-spin inline mr-2" />Loading orders...</TableCell></TableRow>
+                      <TableRow><TableCell colSpan={4} className="py-8 text-center text-muted-foreground"><Loader2 className="size-4 animate-spin inline mr-2" />Chargement…</TableCell></TableRow>
                     )}
-                    {!ordersLoading && orders.length === 0 && (
-                      <TableRow><TableCell colSpan={4} className="py-8 text-center text-muted-foreground">No orders found.</TableCell></TableRow>
+                    {!ordersLoading && filteredOrders.length === 0 && (
+                      <TableRow><TableCell colSpan={4} className="py-8 text-center text-muted-foreground">{orders.length === 0 ? 'Aucune commande.' : 'Aucun résultat.'}</TableCell></TableRow>
                     )}
-                    {!ordersLoading && orders.map(order => (
+                    {!ordersLoading && shownOrders.map(order => (
                       <TableRow key={order.id} className="cursor-pointer hover:bg-muted/40" onClick={() => void openOrder(order)}>
                         <TableCell className="font-mono text-xs">{order.ticket_id || order.order_number || order.external_order_id}</TableCell>
                         <TableCell className="hidden sm:table-cell"><SourceBadge source={order.source} /></TableCell>
@@ -265,6 +339,11 @@ function ClientDetailDialog({
                   </TableBody>
                 </Table>
               </div>
+              {truncatedCount > 0 && (
+                <p className="text-center text-[11px] text-muted-foreground">
+                  Affichage des {MAX_ROWS} plus récentes — {truncatedCount} de plus, affinez la recherche.
+                </p>
+              )}
 
               {orderLoading && <p className="text-xs text-muted-foreground"><Loader2 className="size-3 animate-spin inline mr-1" />Opening order...</p>}
               {selectedOrder && (
