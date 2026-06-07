@@ -735,8 +735,8 @@ class Order(models.Model):
                 )
 
         if self.pos_sales_channel_id:
-            if self.pos_sales_channel.channel_type != 'POS':
-                raise ValidationError({'pos_sales_channel': 'Selected POS location must be a POS sales channel.'})
+            # Any sales channel (POS or WooCommerce) can act as a POS
+            # pickup/checkout location; it only has to share the order's brand.
             if self.sales_channel_id and self.pos_sales_channel.brand_id != self.sales_channel.brand_id:
                 raise ValidationError({'pos_sales_channel': 'POS location must belong to the same brand as the order.'})
 

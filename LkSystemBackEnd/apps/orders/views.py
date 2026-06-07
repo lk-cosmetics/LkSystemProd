@@ -511,10 +511,9 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             if order.payment_status != Order.PaymentStatus.PAID:
                 order.payment_status = Order.PaymentStatus.PAID
                 update_fields.append('payment_status')
-            if (
-                sales_channel.channel_type == SalesChannel.ChannelType.POS
-                and order.pos_sales_channel_id != sales_channel.id
-            ):
+            # Tag the register this sale was rung on — any channel type (a POS
+            # channel, or a WooCommerce channel acting as an in-store till).
+            if order.pos_sales_channel_id != sales_channel.id:
                 order.pos_sales_channel = sales_channel
                 update_fields.append('pos_sales_channel')
             if not order.pos_validated_at:
@@ -525,6 +524,11 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         if update_fields:
             order._actor = request.user
             order.save(update_fields=[*update_fields, 'updated_at'])
+
+        # Derive the canonical order_status from the new state (a completed POS
+        # checkout → DONE) so the sale appears in history, earns loyalty points,
+        # and leaves the queue — on every channel type, matching validate_pos().
+        OrderLifecycleService._recompute_outcome(order, actor=request.user)
 
         return Response(OrderDetailSerializer(order).data, status=status.HTTP_201_CREATED)
 
