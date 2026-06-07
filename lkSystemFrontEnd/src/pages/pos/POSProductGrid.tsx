@@ -276,10 +276,10 @@ export function POSProductGrid({
                 <Loader2 className="size-10 mb-3 opacity-40 animate-spin" />
                 <p className="text-sm">Loading waiting orders...</p>
               </div>
-            ) : !channelId || selectedChannel?.channel_type !== 'POS' ? (
+            ) : !channelId ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                 <Store className="size-10 mb-3 opacity-40" />
-                <p className="text-sm">Select a POS location first</p>
+                <p className="text-sm">Select a sales channel first</p>
               </div>
             ) : waitingOrders.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
@@ -401,7 +401,7 @@ export function POSProductGrid({
                       placeholder="Ticket, client name or phone..."
                       value={historySearch}
                       onChange={event => onHistorySearchChange?.(event.target.value)}
-                      disabled={!channelId || selectedChannel?.channel_type !== 'POS'}
+                      disabled={!channelId}
                     />
                   </div>
                 </div>
@@ -414,7 +414,7 @@ export function POSProductGrid({
                       className="pl-9"
                       value={historyDateFrom}
                       onChange={event => onHistoryDateFromChange?.(event.target.value)}
-                      disabled={!channelId || selectedChannel?.channel_type !== 'POS'}
+                      disabled={!channelId}
                     />
                   </div>
                 </div>
@@ -428,7 +428,7 @@ export function POSProductGrid({
                       value={historyDateTo}
                       min={historyDateFrom || undefined}
                       onChange={event => onHistoryDateToChange?.(event.target.value)}
-                      disabled={!channelId || selectedChannel?.channel_type !== 'POS'}
+                      disabled={!channelId}
                     />
                   </div>
                 </div>
@@ -440,10 +440,10 @@ export function POSProductGrid({
                 <Loader2 className="size-10 mb-3 opacity-40 animate-spin" />
                 <p className="text-sm">Loading history...</p>
               </div>
-            ) : !channelId || selectedChannel?.channel_type !== 'POS' ? (
+            ) : !channelId ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                 <Store className="size-10 mb-3 opacity-40" />
-                <p className="text-sm">Select a POS location first</p>
+                <p className="text-sm">Select a sales channel first</p>
               </div>
             ) : historyOrders.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
