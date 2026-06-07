@@ -465,17 +465,18 @@ class OrderLifecycleService:
     @classmethod
     @transaction.atomic
     def grant_loyalty_points(cls, order: Order, *, actor=None) -> int:
-        """Credit points to the client. Idempotent via loyalty_points_granted."""
+        """Record that a completed order earned points, then refresh the client's
+        derived total.
+
+        Idempotent via ``loyalty_points_granted`` (a per-order audit flag). The
+        client's ``points`` are recomputed from all *done* orders by
+        ``Client.recalculate_metrics`` — they are NOT incremented here — so the
+        total can never double-count or drift out of sync with the orders.
+        """
         order = cls._lock(order)
         if order.loyalty_points_granted or not order.client_id:
-            return order.loyalty_points_amount
+            return order.loyalty_points_amount or 0
         points = cls._compute_points(order)
-        if points <= 0:
-            return 0
-        from apps.clients.models import Client
-        client = Client.objects.select_for_update().get(pk=order.client_id)
-        client.points = (client.points or 0) + points
-        client.save(update_fields=['points', 'updated_at'])
         order.loyalty_points_granted = True
         order.loyalty_points_amount = points
         order.loyalty_points_granted_at = timezone.now()
@@ -483,32 +484,44 @@ class OrderLifecycleService:
             'loyalty_points_granted', 'loyalty_points_amount',
             'loyalty_points_granted_at', 'updated_at',
         ])
+        cls._sync_client_points(order.client_id)
         OrderLoggingService.log(
             order=order, action=OrderLog.Action.POINTS_GRANTED, user=actor,
-            details={'client_id': client.id, 'points': points, 'total': str(order.total)},
+            details={'client_id': order.client_id, 'points': points, 'total': str(order.total)},
         )
         return points
 
     @classmethod
     @transaction.atomic
     def reverse_loyalty_points(cls, order: Order, *, actor=None) -> int:
-        """Subtract the previously-granted points. Idempotent."""
+        """Mark a previously-completed order as no longer earning points, then
+        refresh the client's derived total. Idempotent."""
         order = cls._lock(order)
         if not order.loyalty_points_granted or not order.client_id:
             return 0
         points = order.loyalty_points_amount or 0
-        if points > 0:
-            from apps.clients.models import Client
-            client = Client.objects.select_for_update().get(pk=order.client_id)
-            client.points = max(0, (client.points or 0) - points)
-            client.save(update_fields=['points', 'updated_at'])
         order.loyalty_points_granted = False
         order.save(update_fields=['loyalty_points_granted', 'updated_at'])
+        cls._sync_client_points(order.client_id)
         OrderLoggingService.log(
             order=order, action=OrderLog.Action.POINTS_REVERSED, user=actor,
             details={'client_id': order.client_id, 'points': points},
         )
         return points
+
+    @staticmethod
+    def _sync_client_points(client_id) -> None:
+        """Recompute a client's derived metrics (points + counters) from their
+        orders. Best-effort — loyalty bookkeeping must never block a transition."""
+        if not client_id:
+            return
+        try:
+            from apps.clients.models import Client
+            client = Client.objects.filter(pk=client_id).first()
+            if client is not None:
+                client.recalculate_metrics()
+        except Exception:  # pragma: no cover - defensive
+            pass
 
     @classmethod
     @transaction.atomic
