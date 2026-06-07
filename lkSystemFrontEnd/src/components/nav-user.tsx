@@ -40,6 +40,10 @@ import {
   type Workspace,
 } from '@/services/workspace.service';
 
+/** Two-letter initials from a display name, e.g. "Saker Hajji" → "SH". */
+const getInitials = (name: string): string =>
+  name.trim().split(/\s+/).slice(0, 2).map(p => p[0]?.toUpperCase() ?? '').join('') || 'U';
+
 export function NavUser({
   user,
 }: {
@@ -128,7 +132,7 @@ export function NavUser({
             >
               <Avatar className="h-8 w-8 rounded-full">
                 <AvatarImage src={getMediaUrl(user.avatar) || ''} alt={user.name} />
-                <AvatarFallback className="rounded-full">CN</AvatarFallback>
+                <AvatarFallback className="rounded-full">{getInitials(user.name)}</AvatarFallback>
               </Avatar>
               <div className="grid flex-1 text-left text-sm leading-tight">
                 <span className="truncate font-medium">{user.name}</span>
@@ -155,7 +159,7 @@ export function NavUser({
               <div className="flex items-center gap-2 px-1 py-1.5 text-left text-sm">
                 <Avatar className="h-8 w-8 rounded-full">
                   <AvatarImage src={getMediaUrl(user.avatar) || ''} alt={user.name} />
-                  <AvatarFallback className="rounded-full">CN</AvatarFallback>
+                  <AvatarFallback className="rounded-full">{getInitials(user.name)}</AvatarFallback>
                 </Avatar>
                 <div className="grid flex-1 text-left text-sm leading-tight">
                   <span className="truncate font-medium">{user.name}</span>
@@ -204,7 +208,15 @@ export function NavUser({
                             onClick={() => handleSwitch(ws.id, null)}
                             className="font-medium"
                           >
-                            <IconBuildingStore className="mr-2 size-4" />
+                            {ws.logo ? (
+                              <img
+                                src={getMediaUrl(ws.logo) || ''}
+                                alt=""
+                                className="mr-2 size-5 shrink-0 rounded object-contain"
+                              />
+                            ) : (
+                              <IconBuildingStore className="mr-2 size-4" />
+                            )}
                             <span className="flex-1 truncate">{ws.name}</span>
                             {companyActive && <IconCheck className="size-4" />}
                           </DropdownMenuItem>
