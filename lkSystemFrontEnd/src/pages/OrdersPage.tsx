@@ -336,12 +336,17 @@ export default function OrdersPage() {
   const [sendPOSDialog, setSendPOSDialog] = useState(false);
   const [sendPOSOrder, setSendPOSOrder] = useState<OrderDetail | null>(null);
   const [selectedPOSChannel, setSelectedPOSChannel] = useState('');
+  // POS destinations are fetched per-order (every active same-brand channel),
+  // independent of the user's pinned-channel visibility — so a sales-point
+  // employee can still route an order to any sibling channel of the brand.
+  const [posDestinations, setPosDestinations] = useState<SalesChannel[]>([]);
 
   // ── Bulk selection + group actions ───────────────────────────────────────
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkPosOpen, setBulkPosOpen] = useState(false);
   const [bulkPosChannel, setBulkPosChannel] = useState('');
+  const [bulkPosDestinations, setBulkPosDestinations] = useState<SalesChannel[]>([]);
   const [bulkConfirm, setBulkConfirm] = useState<'cancel' | 'delete' | null>(null);
   const [bulkReason, setBulkReason] = useState('');
   const [sendingPOS, setSendingPOS] = useState(false);
@@ -1167,10 +1172,12 @@ export default function OrdersPage() {
     [selectedOrders],
   );
   const bulkPosChannels = useMemo(
-    // Any active channel can be a POS pickup/checkout destination (POS and
-    // WooCommerce alike); the backend enforces same-brand + stock per order.
-    () => channels.filter(c => c.is_active),
-    [channels],
+    // Same-brand active destinations for the selected orders, fetched in
+    // openBulkPos so a sales-point employee sees sibling channels — not just
+    // their pinned one. Falls back to the caller's own active channels until
+    // that fetch populates (or if it fails).
+    () => (bulkPosDestinations.length ? bulkPosDestinations : channels.filter(c => c.is_active)),
+    [bulkPosDestinations, channels],
   );
 
   const runBulk = async (
@@ -1205,7 +1212,29 @@ export default function OrdersPage() {
 
   const handleBulkDelivery = () =>
     runBulk('submit_delivery', deliveryEligibleIds, undefined, 'Sent to delivery');
-  const openBulkPos = () => { setBulkPosChannel(''); setBulkPosOpen(true); };
+  const openBulkPos = async () => {
+    setBulkPosChannel('');
+    setBulkPosDestinations([]);
+    setBulkPosOpen(true);
+    // Union every active same-brand destination across the selected eligible
+    // orders' brands (one representative order per brand), deduped by id — so a
+    // pinned employee can route to sibling channels here too.
+    try {
+      const eligible = selectedOrders.filter(o => posEligibleIds.includes(o.id));
+      const repByBrand = new Map<number, number>();
+      eligible.forEach(o => {
+        if (o.brand != null && !repByBrand.has(o.brand)) repByBrand.set(o.brand, o.id);
+      });
+      const lists = await Promise.all(
+        [...repByBrand.values()].map(id => orderService.getPosDestinations(id)),
+      );
+      const merged = new Map<number, SalesChannel>();
+      lists.flat().forEach(c => merged.set(c.id, c));
+      setBulkPosDestinations([...merged.values()]);
+    } catch {
+      setBulkPosDestinations([]);
+    }
+  };
   const handleBulkPos = async () => {
     if (!bulkPosChannel) return;
     await runBulk('send_to_pos', posEligibleIds, { pos_sales_channel: Number(bulkPosChannel) }, 'Sent to POS');
@@ -1260,15 +1289,16 @@ export default function OrdersPage() {
   const openSendPOSDialog = async (order: OrderDetail | OrderListItem) => {
     setSendingPOS(false);
     setSelectedPOSChannel('');
+    setPosDestinations([]);
     setSendPOSDialog(true);
-    if ('lines' in order) {
-      setSendPOSOrder(order);
-      return;
-    }
     try {
       setMutatingOrder(true);
-      const detail = await orderService.getById(order.id);
+      const detail = 'lines' in order ? order : await orderService.getById(order.id);
       setSendPOSOrder(detail);
+      // Offer every ACTIVE, same-brand channel as a destination — not only the
+      // caller's pinned sales point. The backend re-checks brand + stock.
+      const dests = await orderService.getPosDestinations(detail.id);
+      setPosDestinations(dests);
     } catch (err) {
       setSendPOSDialog(false);
       setErrorMessage(extractErrorMessage(err, 'Failed to load order before POS routing.'));
@@ -2197,10 +2227,11 @@ export default function OrdersPage() {
           if (!open) {
             setSendPOSOrder(null);
             setSelectedPOSChannel('');
+            setPosDestinations([]);
           }
         }}
         order={sendPOSOrder}
-        channels={channels}
+        channels={posDestinations}
         selectedChannelId={selectedPOSChannel}
         onChannelChange={setSelectedPOSChannel}
         onSubmit={handleSendPOS}

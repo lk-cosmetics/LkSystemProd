@@ -15,6 +15,7 @@ import type {
   OrderContactStatus,
   OrderReturnExchangeStatus,
   CleanOrderStatus,
+  SalesChannel,
 } from '@/types';
 
 export interface OrderListParams {
@@ -417,6 +418,18 @@ export const orderService = {
     const { data } = await apiClient.post<OrderDetail>(
       `/api/v1/orders/${id}/send-to-pos/`,
       { pos_sales_channel: posSalesChannelId }
+    );
+    return data;
+  },
+
+  /**
+   * Active sales channels this order may be routed to as a POS destination:
+   * every ACTIVE, same-brand channel — not just the caller's pinned sales
+   * point. The backend re-enforces active + same-brand + stock on submit.
+   */
+  async getPosDestinations(id: number) {
+    const { data } = await apiClient.get<SalesChannel[]>(
+      `/api/v1/orders/${id}/pos-destinations/`
     );
     return data;
   },
