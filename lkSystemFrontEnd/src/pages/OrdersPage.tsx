@@ -897,16 +897,29 @@ export default function OrdersPage() {
       // Lookup product from loaded products
       const pid = Number(selectedValue);
       const selectedProduct = editProducts.find(x => x.id === pid);
-      
+
       if (!selectedProduct) {
         console.warn(`Product ${pid} not found in editProducts. Available: ${editProducts.map(p => p.id).join(',')}`);
         return prev;
       }
 
+      // If this product is already on another line, merge instead of creating a
+      // duplicate row: add the current line's quantity to the existing line and
+      // drop the current one. Mirrors the Create Order behaviour.
+      const dupIndex = lines.findIndex((l, i) => i !== index && l.product === selectedProduct.id);
+      if (dupIndex !== -1) {
+        const addQty = cur.quantity || 1;
+        const merged = lines.map((l, i) =>
+          i === dupIndex ? { ...l, quantity: (l.quantity || 1) + addQty } : l
+        );
+        merged.splice(index, 1);
+        return { ...prev, lines: merged };
+      }
+
       // Sync all product data including price
       lines[index] = {
-        ...cur, 
-        product: selectedProduct.id, 
+        ...cur,
+        product: selectedProduct.id,
         product_name: selectedProduct.name,
         barcode: selectedProduct.barcode || cur.barcode || '',
         quantity: cur.quantity || 1,
