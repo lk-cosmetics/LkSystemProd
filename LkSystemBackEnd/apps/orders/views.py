@@ -1377,6 +1377,34 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
         return self._transition_response(order, request)
 
+    @action(detail=True, methods=['get'], url_path='pos-destinations')
+    def pos_destinations(self, request, pk=None):
+        """List the channels this order may be routed to as a POS destination.
+
+        Mirrors ``send_to_pos``: a destination must be ACTIVE and belong to the
+        SAME BRAND as the order. This is deliberately broader than the caller's
+        day-to-day channel visibility — an operational account pinned to a
+        single sales point (``assigned_sales_channel``) may still route an order
+        to any sibling channel of the same brand; the lifecycle re-checks
+        active + same-brand + stock on submit. Anchoring on the order, which
+        ``get_object`` has already scoped to the caller's tenant, prevents this
+        from leaking another tenant's channels.
+        """
+        order = self.get_object()
+        self._require_permission(request.user, 'send_to_pos_orders', order)
+        from apps.sales_channels.serializers import SalesChannelListSerializer
+        destinations = (
+            SalesChannel.objects
+            .filter(brand_id=order.sales_channel.brand_id, is_active=True)
+            .select_related('brand', 'brand__company')
+            .order_by('name')
+        )
+        return Response(
+            SalesChannelListSerializer(
+                destinations, many=True, context={'request': request},
+            ).data
+        )
+
     @action(detail=True, methods=['post'], url_path='validate-pos')
     def validate_pos(self, request, pk=None):
         order = self.get_object()
