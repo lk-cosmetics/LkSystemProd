@@ -213,11 +213,10 @@ class RoleViewSet(viewsets.ModelViewSet):
         # promoting it to a platform role mid-life.
         instance = serializer.instance
         user = self.request.user
-        if instance.is_system and not user.is_superuser:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('System roles cannot be edited.')
         # A CEO can only edit a role owned by their own company — never a global
-        # default role (platform-admin managed) nor another tenant's role.
+        # default role / template (company NULL, platform-managed) nor another
+        # tenant's role. This also keeps a CEO out of the shared system
+        # templates: their queryset only exposes their company's own copy.
         if not PermissionService.is_platform_admin(user):
             from rest_framework.exceptions import PermissionDenied
             user_company_id = getattr(user, 'current_company_id', None)
@@ -229,6 +228,28 @@ class RoleViewSet(viewsets.ModelViewSet):
                 raise PermissionDenied(
                     'You can only edit roles owned by your company.'
                 )
+
+        if instance.is_system:
+            # A system role's IDENTITY is immutable — its name, scope, system
+            # flag and ownership are platform-defined and other parts of the app
+            # key off them. Its PERMISSION SET, however, is tunable: an admin can
+            # add or remove operational capabilities (e.g. "Send Orders to POS")
+            # on the built-in Employee / Cashier / Manager roles directly from
+            # Role Management, instead of having to clone them into a custom
+            # role. Pin every identity field back to its stored value so the
+            # payload can only change the permissions (and the cosmetic
+            # description); ``_enforce_permission_ceiling`` below still blocks
+            # granting anything the actor does not already hold.
+            vd = serializer.validated_data
+            vd.pop('name', None)
+            vd.pop('company', None)
+            vd['company_id'] = instance.company_id
+            vd['scope_type'] = instance.scope_type
+            vd['is_system'] = True
+            self._enforce_permission_ceiling(serializer)
+            serializer.save()
+            return
+
         self._force_company_for_non_platform(serializer)
         self._enforce_permission_ceiling(serializer)
         serializer.save()
