@@ -153,17 +153,28 @@ export function OrderClientSelector({
   };
 
   const handleCreate = async () => {
-    if (!createForm.email.trim()) {
+    const email = createForm.email.trim();
+    const phone = createForm.phone.trim();
+    // Both phone and email are mandatory when creating a client from an order.
+    if (!email) {
       setCreateError('Email is required.');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setCreateError('Please enter a valid email address.');
+      return;
+    }
+    if (!phone) {
+      setCreateError('Phone number is required.');
       return;
     }
     setCreateError('');
     const payload: CreateClientRequest = {
-      email: createForm.email.trim(),
+      email,
       client_type: createForm.client_type,
       first_name: createForm.first_name.trim() || undefined,
       last_name: createForm.last_name.trim() || undefined,
-      phone: createForm.phone.trim() || undefined,
+      phone,
       country: 'TN',
       // Delivery details — only sent when filled so we never overwrite with blanks.
       ...(createForm.state ? { state: createForm.state } : {}),
@@ -271,7 +282,7 @@ export function OrderClientSelector({
               value={createForm.client_type}
               onValueChange={val => setField('client_type', val as 'PERSON' | 'COMPANY')}
             >
-              <SelectTrigger className="mt-1 h-9">
+              <SelectTrigger className="mt-1 h-10">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -284,11 +295,12 @@ export function OrderClientSelector({
             <Label className="text-xs">Email *</Label>
             <Input
               type="email"
+              inputMode="email"
+              autoComplete="email"
               value={createForm.email}
               onChange={e => setField('email', e.target.value)}
               placeholder="client@example.com"
-              className="mt-1 h-9"
-              autoFocus
+              className="mt-1 h-10"
             />
           </div>
           <div>
@@ -299,7 +311,7 @@ export function OrderClientSelector({
               value={createForm.first_name}
               onChange={e => setField('first_name', e.target.value)}
               placeholder="First name"
-              className="mt-1 h-9"
+              className="mt-1 h-10"
             />
           </div>
           <div>
@@ -310,17 +322,19 @@ export function OrderClientSelector({
               value={createForm.last_name}
               onChange={e => setField('last_name', e.target.value)}
               placeholder={createForm.client_type === 'COMPANY' ? 'Company' : 'Last name'}
-              className="mt-1 h-9"
+              className="mt-1 h-10"
             />
           </div>
           <div className="col-span-2">
-            <Label className="text-xs">Phone</Label>
+            <Label className="text-xs">Phone *</Label>
             <Input
               type="tel"
+              inputMode="tel"
+              autoComplete="tel"
               value={createForm.phone}
               onChange={e => setField('phone', e.target.value)}
               placeholder="+216 XX XXX XXX"
-              className="mt-1 h-9"
+              className="mt-1 h-10"
             />
           </div>
 
@@ -331,7 +345,7 @@ export function OrderClientSelector({
           <div>
             <Label className="text-xs">Gouvernorat</Label>
             <Select value={createForm.state} onValueChange={val => setField('state', val)}>
-              <SelectTrigger className="mt-1 h-9">
+              <SelectTrigger className="mt-1 h-10">
                 <SelectValue placeholder="Select governorate" />
               </SelectTrigger>
               <SelectContent>
@@ -347,7 +361,7 @@ export function OrderClientSelector({
               value={createForm.city}
               onChange={e => setField('city', e.target.value)}
               placeholder="e.g. La Marsa"
-              className="mt-1 h-9"
+              className="mt-1 h-10"
             />
           </div>
           <div className="col-span-2">
@@ -356,7 +370,7 @@ export function OrderClientSelector({
               value={createForm.address}
               onChange={e => setField('address', e.target.value)}
               placeholder="Street, building, apartment…"
-              className="mt-1 h-9"
+              className="mt-1 h-10"
             />
           </div>
           <p className="col-span-2 -mt-1 text-[11px] text-muted-foreground">
@@ -379,7 +393,7 @@ export function OrderClientSelector({
           type="button"
           className="w-full gap-1.5"
           onClick={handleCreate}
-          disabled={createMutation.isPending || !createForm.email.trim()}
+          disabled={createMutation.isPending || !createForm.email.trim() || !createForm.phone.trim()}
         >
           {createMutation.isPending ? (
             <>

@@ -102,9 +102,9 @@ function ResponsiveSheet({
             {children}
           </div>
 
-          {/* Footer */}
+          {/* Footer — sticky bottom bar, kept clear of the device safe area */}
           {footer && (
-            <div className="border-t px-4 py-3 bg-background/95 backdrop-blur">
+            <div className="border-t px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-background/95 backdrop-blur">
               {footer}
             </div>
           )}
@@ -1792,7 +1792,9 @@ function OrderEditMode({
                         type="button"
                         onClick={() => onRemoveLine(i)}
                         disabled={editForm.lines.length <= 1}
-                        className="size-8 mt-6 text-gray-300 hover:text-red-600 hover:bg-red-50 active:scale-90 disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0 opacity-0 group-hover:opacity-100 transition-all duration-150 rounded-lg flex items-center justify-center"
+                        aria-label="Remove this product from the order"
+                        title="Remove product"
+                        className="mt-6 flex size-9 shrink-0 items-center justify-center rounded-lg border border-red-200 text-red-500 hover:bg-red-50 hover:text-red-600 active:scale-90 disabled:cursor-not-allowed disabled:opacity-30 transition-all duration-150"
                       >
                         <Trash2 className="size-4" />
                       </button>
@@ -1804,26 +1806,28 @@ function OrderEditMode({
                         <Label className="text-xs font-semibold text-gray-700 mb-1.5 block">Qty</Label>
                         <Input
                           type="number"
+                          inputMode="numeric"
                           min={1}
                           value={line.quantity}
                           onChange={e => onUpdateLine(i, 'quantity', e.target.value)}
-                          className="h-9 text-sm text-center border-gray-200 focus-visible:border-gray-400 focus-visible:ring-1 focus-visible:ring-gray-200 rounded-lg transition-colors"
+                          className="h-10 text-sm text-center border-gray-200 focus-visible:border-gray-400 focus-visible:ring-1 focus-visible:ring-gray-200 rounded-lg transition-colors"
                         />
                       </div>
                       <div>
                         <Label className="text-xs font-semibold text-gray-700 mb-1.5 block">Price</Label>
                         <Input
                           type="number"
+                          inputMode="decimal"
                           min={0}
                           step="0.01"
                           value={line.unit_price}
                           onChange={e => onUpdateLine(i, 'unit_price', e.target.value)}
-                          className="h-9 text-sm text-right border-gray-200 focus-visible:border-gray-400 focus-visible:ring-1 focus-visible:ring-gray-200 rounded-lg transition-colors"
+                          className="h-10 text-sm text-right border-gray-200 focus-visible:border-gray-400 focus-visible:ring-1 focus-visible:ring-gray-200 rounded-lg transition-colors"
                         />
                       </div>
                       <div>
                         <Label className="text-xs font-semibold text-gray-700 mb-1.5 block">Total</Label>
-                        <div className="h-9 flex items-center justify-end text-sm font-semibold text-gray-900 bg-gray-50 border border-gray-200 rounded-lg px-2.5 tabular-nums">
+                        <div className="h-10 flex items-center justify-end text-sm font-semibold text-gray-900 bg-gray-50 border border-gray-200 rounded-lg px-2.5 tabular-nums">
                           {currency} {lineTotal}
                         </div>
                       </div>
@@ -3142,6 +3146,14 @@ export function CreateOrderDialog({
   const grandTotal = Math.max(0, subtotal - discountTotal);
 
   const canSubmit = !!channelId && lines.length > 0 && !discountInvalid && !isLoading;
+  // Human-readable reason the Create Order button is disabled (shown in the footer).
+  const disabledReason = !channelId
+    ? 'Select a sales channel'
+    : lines.length === 0
+      ? 'Add at least one product'
+      : discountInvalid
+        ? 'Fix the discount value'
+        : '';
 
   const handleSubmit = useCallback(() => {
     if (!channelId || lines.length === 0 || discountInvalid) return;
@@ -3185,16 +3197,23 @@ export function CreateOrderDialog({
         title="Create Order"
         description="Manually create an order. Stock and totals are reconciled on the server."
         footer={
-          <div className="flex w-full items-center justify-between gap-2">
-            <span className="text-sm font-medium">Total: {grandTotal.toFixed(2)} TND</span>
-            <div className="flex gap-2">
-              <Button size="sm" variant="outline" onClick={() => onOpenChange(false)} disabled={isLoading}>
-                Cancel
-              </Button>
-              <Button size="sm" onClick={handleSubmit} disabled={!canSubmit} className="gap-1.5">
-                {isLoading ? <Loader2 className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
-                Create Order
-              </Button>
+          <div className="w-full space-y-2">
+            {!canSubmit && disabledReason && (
+              <p className="text-center text-[11px] text-amber-600 sm:text-left">
+                {disabledReason} to create the order.
+              </p>
+            )}
+            <div className="flex w-full items-center justify-between gap-2">
+              <span className="text-sm font-semibold tabular-nums">Total: {grandTotal.toFixed(2)} TND</span>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => onOpenChange(false)} disabled={isLoading}>
+                  Cancel
+                </Button>
+                <Button size="sm" onClick={handleSubmit} disabled={!canSubmit} className="gap-1.5">
+                  {isLoading ? <Loader2 className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
+                  Create Order
+                </Button>
+              </div>
             </div>
           </div>
         }
@@ -3292,7 +3311,7 @@ export function CreateOrderDialog({
           {lines.length > 0 && (
             <div className="divide-y rounded-lg border">
               {lines.map(l => (
-                <div key={l.product.id} className="flex items-center gap-3 p-3">
+                <div key={l.product.id} className="flex flex-wrap items-center gap-3 p-3">
                   <ProductImage src={l.product.image_url} alt={l.product.name} size="md" />
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium whitespace-normal break-words leading-snug">{l.product.name}</p>
@@ -3307,31 +3326,34 @@ export function CreateOrderDialog({
                       </span>
                     )}
                   </div>
-                  <div className="flex flex-shrink-0 items-center gap-2">
+                  <div className="flex w-full items-center justify-end gap-2 sm:w-auto">
                     <Input
                       type="number"
+                      inputMode="numeric"
                       min={1}
                       value={l.quantity}
                       onChange={e => updateQty(l.product.id, parseInt(e.target.value, 10))}
-                      className="h-8 w-16 text-xs"
-                      aria-label="Quantity"
+                      className="h-9 w-16 text-sm tabular-nums"
+                      aria-label={`Quantity for ${l.product.name}`}
                     />
                     <Input
                       type="number"
+                      inputMode="decimal"
                       min={0}
                       step="0.01"
                       value={l.price}
                       onChange={e => updatePrice(l.product.id, e.target.value)}
-                      className="h-8 w-24 text-xs"
-                      aria-label="Unit price"
+                      className="h-9 w-24 text-sm tabular-nums"
+                      aria-label={`Unit price for ${l.product.name}`}
                     />
                     <Button
                       type="button"
                       variant="ghost"
                       size="icon"
-                      className="size-8 text-red-600"
+                      className="size-9 shrink-0 text-red-600 hover:bg-red-50 hover:text-red-700"
                       onClick={() => removeLine(l.product.id)}
-                      aria-label="Remove line"
+                      aria-label={`Remove ${l.product.name} from the order`}
+                      title="Remove item"
                     >
                       <Trash2 className="size-4" />
                     </Button>
