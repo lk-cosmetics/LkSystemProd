@@ -37,7 +37,10 @@ class CompanyDeletionService:
     @classmethod
     @transaction.atomic
     def delete(cls, company: Company, *, actor=None) -> int:
-        from apps.inventory.models import InventoryMovement, SalesChannelInventory
+        from apps.inventory.models import (
+            BillOfMaterials, InventoryMovement, ProductionBatch,
+            ProductionBatchComponent, SalesChannelInventory,
+        )
         from apps.orders.models import Order
         from apps.products.models import Product
         from apps.rbac.models import UserRole
@@ -59,6 +62,27 @@ class CompanyDeletionService:
         #    cascades their lines and logs and clears those PROTECT references.
         order_manager = getattr(Order, 'all_objects', Order.objects)
         order_manager.filter(company=company).delete()
+
+        # 1b. Manufacturing data — production batches (and their components) plus
+        #     bills of materials carry PROTECT FKs to channels, products, BOMs and
+        #     the movement ledger. Clear them BEFORE the stock / product / channel
+        #     deletions below, otherwise a leftover batch component PROTECTs them
+        #     and the whole wipe rolls back with a 409.
+        batch_ids = list(
+            ProductionBatch.objects
+            .filter(sales_channel__brand__company=company)
+            .values_list('id', flat=True)
+        )
+        if batch_ids:
+            ProductionBatchComponent.objects.filter(
+                production_batch_id__in=batch_ids,
+            ).delete()
+            ProductionBatch.objects.filter(id__in=batch_ids).delete()
+        # BOM.finished_product is CASCADE on Product, but ProductionBatch.bom is
+        # PROTECT, so BOMs must go after the batches above (and before products).
+        BillOfMaterials.objects.filter(
+            finished_product__brand__company=company,
+        ).delete()
 
         # 2. Stock data on the tenant's channels (inventory rows + the movement
         #    ledger). Cleared before products/channels so neither blocks.
