@@ -1447,7 +1447,11 @@ export default function RolesPage() {
 
                 <div className="space-y-2">
                   <Label className="text-sm font-medium">Scope Level</Label>
-                  <Select value={formScopeType} onValueChange={setFormScopeType}>
+                  <Select
+                    value={formScopeType}
+                    onValueChange={setFormScopeType}
+                    disabled={editingRole?.is_system}
+                  >
                     <SelectTrigger className="max-w-md">
                       <SelectValue />
                     </SelectTrigger>
@@ -1465,8 +1469,17 @@ export default function RolesPage() {
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground max-w-md">
-                    Determines at which organizational level this role can be assigned.
-                    Higher scopes cascade to lower levels.
+                    {editingRole?.is_system ? (
+                      <span className="flex items-center gap-1.5">
+                        <Lock className="size-3" />
+                        A built-in role&apos;s scope is fixed — only its permissions can be changed.
+                      </span>
+                    ) : (
+                      <>
+                        Determines at which organizational level this role can be assigned.
+                        Higher scopes cascade to lower levels.
+                      </>
+                    )}
                   </p>
                 </div>
 
