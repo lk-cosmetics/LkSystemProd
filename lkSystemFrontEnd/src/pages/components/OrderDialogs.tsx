@@ -17,7 +17,7 @@ import {
   Phone, MessageCircleMore, CalendarClock, Ban, ThumbsUp, Clock,
   ChevronLeft, ChevronRight, Truck, ShieldAlert, ScanLine,
   Lock, Unlock, RotateCcw, Send, PackageCheck, AlertTriangle,
-  Award, Link2, Unlink, ArrowRight, Tag,
+  Award, Link2, Unlink, ArrowRight, Tag, FileText,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -40,6 +40,8 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
+import { SearchSelect } from '@/components/ui/search-select';
+import { TUNISIA_GOVERNORATE_OPTIONS } from '@/constants/tunisia';
 import {
   AlertDialog, AlertDialogAction, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
@@ -52,15 +54,47 @@ import { promotionService } from '@/services/promotion.service';
 import { useAuthStore } from '@/store/authStore';
 import { POSCameraScanner } from '../pos/POSCameraScanner';
 import { OrderClientSelector } from './OrderClientSelector';
+import { useCurrentCompany } from '@/hooks/queries/useCompanies';
+import { InvoicePreviewDialog, invoiceFromOrder } from '@/components/invoice';
 import { ClientInfoDialog } from './ClientInfoDialog';
-import { CleanStatusBadge, SyncStatusBadge } from './orderStatusBadges';
+import { OrderStatusBadge, SyncStatusBadge, orderStatusLabel } from './orderStatusBadges';
+
+// Mirrors the backend OrderStatusService.ALLOWED_TRANSITIONS (server
+// re-validates; this only drives which targets the UI offers).
+export const ALLOWED_NEXT_STATUSES: Record<string, OrderStatus[]> = {
+  new:          ['confirmed', 'not_answered', 'delayed', 'canceled'],
+  not_answered: ['confirmed', 'delayed', 'canceled'],
+  delayed:      ['confirmed', 'not_answered', 'canceled'],
+  confirmed:    ['packaging', 'delayed', 'canceled'],
+  packaging:    ['done', 'canceled'],
+  done:         ['returned'],
+  returned:     [],
+  canceled:     [],
+};
+
+// Terminal statuses can be REOPENED through the audited manual-override
+// endpoint (admin/manager permission) — mirrors the backend
+// ALLOWED_MANUAL_TRANSITIONS reopen entries.
+export const REOPEN_TARGETS: Record<string, OrderStatus[]> = {
+  canceled: ['new', 'confirmed'],
+  returned: ['done'],
+};
 import type {
   OrderDetail, OrderLine, OrderEditRequest, OrderLogEntry, OrderDiscountType,
   ProductListItem, SalesChannel, OrderStatus, OrderStockByChannel,
   POSOrderCreateRequest, Client, OrderSocialSource, DiscountCalculationResult,
+  OrderChannelStock,
 } from '@/types';
 import { ORDER_SOCIAL_SOURCES } from '@/types';
-import type { OrderStatusFieldsPayload, WooCommerceOrderPreviewResponse } from '@/services/order.service';
+import {
+  getFulfilmentChannelStock, stockItemFor, stockStatusOf, worstStatus,
+  type StockStatus,
+} from './orderStock';
+import type {
+  InvoiceMutationPayload,
+  ReturnLineCondition,
+  WooCommerceOrderPreviewResponse,
+} from '@/services/order.service';
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
 /* RESPONSIVE SHEET                                                          */
@@ -163,43 +197,8 @@ function ResponsiveSheet({
 /* TOKENS                                                                    */
 /* ═══════════════════════════════════════════════════════════════════════════ */
 
-const STATUS_MAP: Record<string, { bg: string; text: string; dot: string; label: string }> = {
-  PENDING:    { bg: 'bg-amber-50',   text: 'text-amber-700',   dot: 'bg-amber-500',   label: 'Pending' },
-  PROCESSING: { bg: 'bg-blue-50',    text: 'text-blue-700',    dot: 'bg-blue-500',    label: 'Processing' },
-  ON_HOLD:    { bg: 'bg-orange-50',  text: 'text-orange-700',  dot: 'bg-orange-500',  label: 'On Hold' },
-  COMPLETED:  { bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500', label: 'Completed' },
-  CANCELLED:  { bg: 'bg-red-50',     text: 'text-red-700',     dot: 'bg-red-500',     label: 'Cancelled' },
-  REFUNDED:   { bg: 'bg-purple-50',  text: 'text-purple-700',  dot: 'bg-purple-500',  label: 'Refunded' },
-  FAILED:     { bg: 'bg-gray-100',   text: 'text-gray-600',    dot: 'bg-gray-400',    label: 'Failed' },
-};
 
-const OUTCOME_MAP: Record<string, { bg: string; text: string; icon: typeof CheckCircle; label: string }> = {
-  NONE:      { bg: 'bg-gray-50',    text: 'text-gray-500',    icon: Clock,         label: 'Awaiting' },
-  CONFIRMED: { bg: 'bg-emerald-50', text: 'text-emerald-700', icon: ThumbsUp,      label: 'Confirmed' },
-  DELAYED:   { bg: 'bg-amber-50',   text: 'text-amber-700',   icon: CalendarClock, label: 'Delayed' },
-  CANCELLED: { bg: 'bg-red-50',     text: 'text-red-700',     icon: Ban,           label: 'Cancelled' },
-};
 
-function OutcomePill({ outcome }: { outcome: string }) {
-  const o = OUTCOME_MAP[outcome] ?? OUTCOME_MAP.NONE!;
-  const Icon = o.icon;
-  return (
-    <span className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full ${o.bg} ${o.text}`}>
-      <Icon className="size-3" />
-      {o.label}
-    </span>
-  );
-}
-
-function StatusPill({ status }: { status: string }) {
-  const s = STATUS_MAP[status] ?? STATUS_MAP.FAILED!;
-  return (
-    <span className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full ${s.bg} ${s.text}`}>
-      <span className={`size-1.5 rounded-full ${s.dot}`} />
-      {s.label}
-    </span>
-  );
-}
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
 /* PRODUCT IMAGE                                                             */
@@ -242,6 +241,216 @@ function StockStat({
     <div className="rounded-md bg-muted/40 px-1.5 py-1">
       <p className="text-[9px] uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className={`text-xs font-semibold tabular-nums ${color}`}>{value}</p>
+    </div>
+  );
+}
+
+/* ── Stock badge + Customer overview tab ──────────────────────────────────── */
+
+const STOCK_BADGE: Record<StockStatus, { label: string; cls: string; icon: LucideIcon }> = {
+  in:      { label: 'In stock',     cls: 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400', icon: CheckCircle },
+  low:     { label: 'Low stock',    cls: 'border-amber-300 bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400',          icon: AlertTriangle },
+  out:     { label: 'Out of stock', cls: 'border-rose-300 bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-400',                icon: Ban },
+  unknown: { label: 'Not tracked',  cls: 'border-slate-300 bg-slate-50 text-slate-600 dark:bg-slate-900/40 dark:text-slate-400',           icon: AlertCircle },
+};
+
+/** Clear stock chip: state colour + (when tracked) available/required counts. */
+function StockBadge({ status, available, required }: Readonly<{ status: StockStatus; available?: number; required?: number }>) {
+  const cfg = STOCK_BADGE[status];
+  const Icon = cfg.icon;
+  return (
+    <Badge variant="outline" className={`shrink-0 gap-1 text-[10px] font-medium ${cfg.cls}`}>
+      <Icon className="size-3" />
+      {cfg.label}
+      {status !== 'unknown' && available != null && required != null && (
+        <span className="font-normal opacity-75 tabular-nums">· {available}/{required}</span>
+      )}
+    </Badge>
+  );
+}
+
+/** One product (or pack) in the Customer tab, with its live stock status. */
+function OrderProductCard({ line, stock, currency }: Readonly<{ line: OrderLine; stock: OrderChannelStock | null; currency: string }>) {
+  const isPack = Boolean(line.is_pack || line.product_type === 'pack');
+  const components = isPack ? (line.pack_items_detail ?? []) : [];
+  const lineItem = stockItemFor(stock, line.product_id ?? line.product);
+  const packStatus = worstStatus(components.map(c => stockStatusOf(stockItemFor(stock, c.product_id))));
+
+  return (
+    <div className="rounded-lg border bg-card p-3">
+      <div className="flex items-start gap-3">
+        <ProductImage src={line.product_image} alt={line.product_name} size="md" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <p className="whitespace-normal break-words text-sm font-medium leading-snug">{line.product_name}</p>
+                {isPack && <Badge variant="secondary" className="text-[9px]">Pack</Badge>}
+              </div>
+              {line.barcode && <p className="font-mono text-[11px] text-muted-foreground">{line.barcode}</p>}
+            </div>
+            <StockBadge
+              status={isPack ? packStatus : stockStatusOf(lineItem)}
+              available={isPack ? undefined : lineItem?.available_quantity}
+              required={isPack ? undefined : lineItem?.required_quantity}
+            />
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+            <span>Qty <span className="font-semibold text-foreground tabular-nums">{line.quantity}</span></span>
+            <span aria-hidden>·</span>
+            <span className="tabular-nums">{currency} {line.unit_price} each</span>
+            <span className="ml-auto font-semibold text-foreground tabular-nums">{currency} {line.total}</span>
+          </div>
+        </div>
+      </div>
+
+      {isPack && components.length > 0 && (
+        <div className="mt-2.5 rounded-md border bg-muted/20 p-2">
+          <p className="mb-1.5 px-0.5 text-[11px] font-semibold text-muted-foreground">Contains</p>
+          <ul className="space-y-1.5">
+            {components.map(comp => {
+              const compItem = stockItemFor(stock, comp.product_id);
+              return (
+                <li key={comp.product_id} className="flex items-center justify-between gap-2">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <ProductImage src={comp.product_image} alt={comp.product_name} size="sm" />
+                    <span className="truncate text-xs">
+                      {comp.product_name}
+                      <span className="ml-1 font-semibold tabular-nums">×{comp.quantity * line.quantity}</span>
+                    </span>
+                  </span>
+                  <StockBadge
+                    status={stockStatusOf(compItem)}
+                    available={compItem?.available_quantity}
+                    required={compItem?.required_quantity}
+                  />
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Customer tab — the at-a-glance overview a team member sees first: who the
+ * customer is, their history, then every ordered product with its stock status
+ * (packs expanded inline) and a clear "safe to confirm?" banner.
+ */
+function CustomerOverviewTab({
+  order, customerLines, currency, hasClient, onOpenClient,
+}: Readonly<{
+  order: OrderDetail;
+  customerLines: OrderLine[];
+  currency: string;
+  hasClient: boolean;
+  onOpenClient: () => void;
+}>) {
+  const stock = getFulfilmentChannelStock(order);
+  // Genuine shortages (tracked but insufficient) drive the warning + amber
+  // banner; untracked products can't be verified so they only get a soft note.
+  const shortCount = stock ? stock.items.filter(it => it.has_inventory_row && !it.is_sufficient).length : 0;
+  const hasUntracked = stock ? stock.items.some(it => !it.has_inventory_row) : false;
+  const customerName = order.client_name || order.delivery_name || order.client_email || 'Walk-in customer';
+  const phone = order.delivery_phone || order.client_phone || '';
+  const address = order.delivery_address || '';
+
+  return (
+    <div className="space-y-3">
+      {/* ── Customer summary ─────────────────────────────────────────── */}
+      <div className={`rounded-lg border p-3.5 ${order.client_is_blocked ? 'border-red-200 bg-red-50/60' : 'bg-card'}`}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-3">
+            <span className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${order.client_is_blocked ? 'bg-red-100 text-red-700' : 'bg-indigo-600/10 text-indigo-600'}`}>
+              {order.client_is_blocked ? <ShieldAlert className="size-4" /> : <User className="size-4" />}
+            </span>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <p className="truncate text-sm font-semibold">{customerName}</p>
+                {order.client_is_blocked && (
+                  <Badge variant="destructive" className="h-4 px-1 text-[9px]">Blocked</Badge>
+                )}
+              </div>
+              <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+                {phone && (
+                  <p className="flex items-center gap-1.5"><Phone className="size-3 shrink-0" /><span className="truncate">{phone}</span></p>
+                )}
+                {address && (
+                  <p className="flex items-start gap-1.5"><MapPin className="mt-0.5 size-3 shrink-0" /><span className="min-w-0 break-words">{address}</span></p>
+                )}
+                {!phone && !address && <p className="italic">No contact details on this order.</p>}
+              </div>
+            </div>
+          </div>
+          {hasClient && (
+            <button
+              type="button"
+              onClick={onOpenClient}
+              className="flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground transition-colors hover:text-indigo-600"
+            >
+              <span className="hidden sm:inline">Profile</span><ChevronRight className="size-4" />
+            </button>
+          )}
+        </div>
+        {/* History stats */}
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          {[
+            { icon: Package, label: 'Orders', value: order.client_order_count ?? 0, tone: 'text-foreground' },
+            { icon: Award, label: 'Points', value: order.client_points ?? 0, tone: 'text-amber-600' },
+            { icon: RotateCcw, label: 'Returns', value: order.client_return_count ?? 0, tone: (order.client_return_count ?? 0) > 0 ? 'text-rose-600' : 'text-foreground' },
+          ].map(stat => (
+            <div key={stat.label} className="rounded-md border bg-muted/20 px-2 py-1.5 text-center">
+              <p className={`flex items-center justify-center gap-1 text-sm font-bold tabular-nums ${stat.tone}`}>
+                <stat.icon className="size-3.5 opacity-70" />{stat.value}
+              </p>
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{stat.label}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Stock readiness banner ───────────────────────────────────── */}
+      {!stock ? (
+        <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+          <AlertCircle className="size-4 shrink-0" />
+          Stock isn't tracked for this order's channel — availability can't be verified.
+        </div>
+      ) : shortCount > 0 ? (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <span>
+            <span className="font-semibold">{shortCount} product{shortCount === 1 ? '' : 's'} short</span> on {stock.sales_channel.name}.
+            You can still confirm, but you'll be asked to review first.
+          </span>
+        </div>
+      ) : hasUntracked ? (
+        <div className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+          <AlertCircle className="mt-0.5 size-4 shrink-0" />
+          Some products aren't linked to stock — availability couldn't be fully verified.
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700">
+          <CheckCircle className="size-4 shrink-0" />
+          All products are in stock — safe to confirm and dispatch.
+        </div>
+      )}
+
+      {/* ── Ordered products ─────────────────────────────────────────── */}
+      <div className="flex items-center gap-2 pt-1 text-xs font-semibold text-muted-foreground">
+        <Package className="size-3.5" /> Ordered products
+        <Badge variant="secondary" className="text-[10px]">{customerLines.length}</Badge>
+      </div>
+      {customerLines.length === 0 ? (
+        <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">No products on this order.</div>
+      ) : (
+        <div className="space-y-2">
+          {customerLines.map(line => (
+            <OrderProductCard key={line.id} line={line} stock={stock} currency={currency} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -582,6 +791,8 @@ function ProductSearchSelect({
 
 interface OrderDialogPermissions {
   edit: boolean;
+  /** manual_status_override holders can reopen canceled/returned orders. */
+  manualOverride?: boolean;
   confirm: boolean;
   delay: boolean;
   cancel: boolean;
@@ -591,6 +802,8 @@ interface OrderDialogPermissions {
   packageOrder: boolean;
   delete: boolean;
   restore: boolean;
+  viewInvoice?: boolean;
+  editInvoice?: boolean;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
@@ -737,7 +950,7 @@ function PackagingItemsPicker({
     }
     const items = Array.from(merged.entries()).map(([product_id, quantity]) => ({ product_id, quantity }));
     if (items.length === 0) return;
-    onPackageOrder(items, packagingLines.length > 0 || order.packaging_status !== 'NOT_PACKAGED');
+    onPackageOrder(items, packagingLines.length > 0 || Boolean(order.packaged_at));
     setPackagingSelection({});
     setPackagingSearch('');
     setPackagingScanFeedback(null);
@@ -745,7 +958,7 @@ function PackagingItemsPicker({
     scanInputRef.current?.focus();
   }, [
     onPackageOrder,
-    order.packaging_status,
+    order.packaged_at,
     packagingLines,
     packagingSelection,
     selectedPackagingCount,
@@ -758,7 +971,7 @@ function PackagingItemsPicker({
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Packaging step</p>
-            <p className="mt-1 text-sm font-medium">{order.packaging_status.replace('_', ' ')}</p>
+            <p className="mt-1 text-sm font-medium">{order.packaged_at ? 'Packaged' : 'Not packaged'}</p>
             <p className="mt-1 text-xs text-muted-foreground">
               Packaging affects packaging/store stock only. When saved, this order is marked done locally.
             </p>
@@ -769,8 +982,8 @@ function PackagingItemsPicker({
               </p>
             )}
           </div>
-          <Badge variant={order.packaging_status === 'NOT_PACKAGED' ? 'outline' : 'default'} className="w-fit">
-            {order.packaging_status === 'NOT_PACKAGED' ? 'Waiting packaging' : 'Packaged'}
+          <Badge variant={order.packaged_at ? 'default' : 'outline'} className="w-fit">
+            {order.packaged_at ? 'Packaged' : 'Waiting packaging'}
           </Badge>
         </div>
       </div>
@@ -1088,7 +1301,6 @@ export function PackagingDialog({
 function OrderViewMode({
   order,
   onStatusChange,
-  onStatusFieldsChange,
   onConfirm,
   onNotAnswered,
   onOpenDelay,
@@ -1100,13 +1312,15 @@ function OrderViewMode({
   onPackageOrder,
   onUnpackageOrder,
   isLoading,
+  activeAction,
+  onRunAction,
   permissions,
+  failedActionAttempts = 0,
   packagingProducts,
   loadingPackagingProducts,
 }: Readonly<{
   order: OrderDetail;
   onStatusChange: (id: number, status: OrderStatus) => void;
-  onStatusFieldsChange: (id: number, payload: OrderStatusFieldsPayload) => void;
   onConfirm: () => void;
   onNotAnswered: () => void;
   onOpenDelay: () => void;
@@ -1118,26 +1332,47 @@ function OrderViewMode({
   onPackageOrder: (items: Array<{ product_id: number; quantity: number }>, allowUpdate: boolean) => void;
   onUnpackageOrder: () => void;
   isLoading?: boolean;
+  activeAction: string | null;
+  onRunAction: (name: string, action: () => void | Promise<void>) => void;
   permissions?: OrderDialogPermissions;
+  /** Per-order count of failed Confirm/Delay attempts; Cancel appears at 3. */
+  failedActionAttempts?: number;
   packagingProducts: ProductListItem[];
   loadingPackagingProducts?: boolean;
 }>) {
   const directPOSCompleted =
-    order.source === 'POS' && order.status === 'COMPLETED' && !order.in_store_pickup;
+    order.source === 'POS' && order.status === 'done' && !order.in_store_pickup;
   const [clientInfoOpen, setClientInfoOpen] = useState(false);
   const hasClient = !!order.client_id;
-  const totalsRows = useMemo(() => [
-    { label: 'Subtotal', value: order.subtotal },
-    { label: 'Tax', value: order.tax_total },
-    { label: 'Shipping', value: order.shipping_total },
-    ...(parseFloat(order.discount_total) > 0 ? [{ label: 'Discount', value: `-${order.discount_total}` }] : []),
-  ], [order]);
+  const totalsRows = useMemo(() => {
+    // One fee row for every source: POS/manual orders store it on delivery_fee,
+    // WooCommerce orders on shipping_total (ingestion now mirrors it into
+    // delivery_fee, but older rows may only have shipping_total).
+    const fee = parseFloat(order.delivery_fee) > 0 ? order.delivery_fee : order.shipping_total;
+    return [
+      { label: 'Subtotal', value: order.subtotal },
+      { label: 'Tax', value: order.tax_total },
+      { label: 'Delivery fee', value: fee },
+      ...(parseFloat(order.discount_total) > 0 ? [{ label: 'Discount', value: `-${order.discount_total}` }] : []),
+    ];
+  }, [order]);
   const customerLines = order.customer_lines ?? order.lines.filter(line => line.product_type !== 'packaging_item');
   const packagingCount = (order.packaging_lines ?? order.lines.filter(line => line.product_type === 'packaging_item')).length;
   const notAnsweredAttempts = order.not_answered_attempts ?? 0;
-  const canEscalateNoAnswer = notAnsweredAttempts > 3 || order.outcome === 'DELAYED';
-  const isDelayed = order.outcome === 'DELAYED' || order.contact_status === 'DELAYED';
-  const canProcessAfterDone = order.final_outcome === 'SUCCESSFUL_SALE' || order.workflow_status === 'done';
+  // The Cancel button is a last resort, hidden in the normal flow to keep
+  // accidental cancellations away. It reveals once EITHER signal reaches the
+  // threshold:
+  //   • failedActionAttempts — Confirm/Delay kept failing (the order is stuck);
+  //   • notAnsweredAttempts   — the customer has been unreachable 3+ times.
+  // The first is a client-side tally owned by the parent (keyed per order); the
+  // second is the server-persisted no-answer count.
+  const CANCEL_REVEAL_THRESHOLD = 3;
+  const showCancel =
+    !!permissions?.cancel &&
+    (failedActionAttempts >= CANCEL_REVEAL_THRESHOLD ||
+      notAnsweredAttempts >= CANCEL_REVEAL_THRESHOLD);
+  const isDelayed = order.status === 'delayed';
+  const canProcessAfterDone = order.status === 'done';
 
   // Fulfilment-channel stock flag — drives the warning dot on the Stock tab.
   const stockByChannel = order.stock_by_channel;
@@ -1148,16 +1383,32 @@ function OrderViewMode({
 
   return (
     <div className="space-y-6">
+      {/* Read-only client profile — mounted at the root so it opens from any tab. */}
+      {hasClient && (
+        <ClientInfoDialog
+          clientId={order.client_id}
+          open={clientInfoOpen}
+          onOpenChange={setClientInfoOpen}
+          fallback={{
+            name: order.client_name,
+            email: order.client_email,
+            phone: order.client_phone,
+            points: order.client_points,
+            isBlocked: order.client_is_blocked,
+            returnCount: order.client_return_count,
+          }}
+        />
+      )}
       {/* Main layout: 2-col on large */}
       <div className="grid gap-6 lg:grid-cols-[1fr_260px]">
         {/* Left column */}
-        <Tabs defaultValue="details" className="gap-4">
+        <Tabs defaultValue="items" className="gap-4">
           <TabsList className="flex h-auto w-full flex-wrap justify-start gap-1 sm:w-auto">
-            <TabsTrigger value="details" className="text-xs gap-1.5">
-              <User className="size-3.5" /> Details
-            </TabsTrigger>
             <TabsTrigger value="items" className="text-xs gap-1.5">
-              <Package className="size-3.5" /> Customer ({customerLines.length})
+              <User className="size-3.5" /> Customer ({customerLines.length})
+            </TabsTrigger>
+            <TabsTrigger value="details" className="text-xs gap-1.5">
+              <FileText className="size-3.5" /> Details
             </TabsTrigger>
             <TabsTrigger value="packaging" className="text-xs gap-1.5">
               <Package className="size-3.5" /> Packaging ({packagingCount})
@@ -1235,20 +1486,31 @@ function OrderViewMode({
                 )}
               </button>
 
-              {hasClient && (
-                <ClientInfoDialog
-                  clientId={order.client_id}
-                  open={clientInfoOpen}
-                  onOpenChange={setClientInfoOpen}
-                  fallback={{
-                    name: order.client_name,
-                    email: order.client_email,
-                    phone: order.client_phone,
-                    points: order.client_points,
-                    isBlocked: order.client_is_blocked,
-                    returnCount: order.client_return_count,
-                  }}
-                />
+              {/* Delivery contact — the recipient for THIS order (shipping block,
+                  billing fallback). May differ from the client profile above. */}
+              {(order.delivery_name || order.delivery_phone || order.delivery_address) && (
+                <div className="rounded-lg border bg-gradient-to-br from-teal-50/30 to-transparent p-4 flex items-start gap-3">
+                  <div className="size-9 rounded-lg bg-teal-600/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                    <Truck className="size-4 text-teal-600" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-0.5">Delivery contact</p>
+                    <p className="text-sm font-medium text-foreground truncate">{order.delivery_name || '—'}</p>
+                    {order.delivery_phone && (
+                      <a
+                        href={`tel:${order.delivery_phone.replace(/[^0-9+]/g, '')}`}
+                        className="mt-0.5 inline-flex items-center gap-1.5 text-xs text-teal-700 hover:underline"
+                        onClick={e => e.stopPropagation()}
+                      >
+                        <Phone className="size-3" />
+                        {order.delivery_phone}
+                      </a>
+                    )}
+                    {order.delivery_address && (
+                      <p className="mt-0.5 text-xs text-muted-foreground break-words">{order.delivery_address}</p>
+                    )}
+                  </div>
+                </div>
               )}
 
               {/* Source & Status Row */}
@@ -1268,7 +1530,7 @@ function OrderViewMode({
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">Local Order Status</p>
-                    <StatusPill status={order.status} />
+                    <OrderStatusBadge status={order.status} label={order.status_display} />
                   </div>
                 </div>
               </div>
@@ -1281,24 +1543,20 @@ function OrderViewMode({
                     <Badge variant="outline" className="mt-1 text-[10px]">{order.wc_status || '—'}</Badge>
                   </div>
                   <div className="rounded-md bg-muted/30 px-3 py-2">
-                    <p className="text-[11px] text-muted-foreground">Contact Status</p>
-                    <Badge variant="outline" className="mt-1 text-[10px]">{order.contact_status.replace('_', ' ')}</Badge>
+                    <p className="text-[11px] text-muted-foreground">Payment</p>
+                    <Badge variant="outline" className="mt-1 text-[10px]">{order.payment_status}</Badge>
                   </div>
                   <div className="rounded-md bg-muted/30 px-3 py-2">
-                    <p className="text-[11px] text-muted-foreground">Delivery Status</p>
-                    <Badge variant="outline" className="mt-1 text-[10px]">{order.delivery_status.replace('_', ' ')}</Badge>
+                    <p className="text-[11px] text-muted-foreground">Sync</p>
+                    <Badge variant="outline" className="mt-1 text-[10px]">{order.sync_status.replace('_', ' ')}</Badge>
                   </div>
                   <div className="rounded-md bg-muted/30 px-3 py-2">
-                    <p className="text-[11px] text-muted-foreground">Return / Exchange</p>
-                    <Badge variant="outline" className="mt-1 text-[10px]">{order.return_exchange_status.replace('_', ' ')}</Badge>
+                    <p className="text-[11px] text-muted-foreground">Delivery Reference</p>
+                    <Badge variant="outline" className="mt-1 text-[10px]">{order.delivery_reference || '—'}</Badge>
                   </div>
                   <div className="rounded-md bg-muted/30 px-3 py-2">
-                    <p className="text-[11px] text-muted-foreground">Packaging Status</p>
-                    <Badge variant="outline" className="mt-1 text-[10px]">{order.packaging_status.replace('_', ' ')}</Badge>
-                  </div>
-                  <div className="rounded-md bg-muted/30 px-3 py-2">
-                    <p className="text-[11px] text-muted-foreground">Final Outcome</p>
-                    <Badge variant="outline" className="mt-1 text-[10px]">{order.final_outcome.replace(/_/g, ' ')}</Badge>
+                    <p className="text-[11px] text-muted-foreground">Packaged</p>
+                    <Badge variant="outline" className="mt-1 text-[10px]">{order.packaged_at ? 'Yes' : 'No'}</Badge>
                   </div>
                 </div>
               </div>
@@ -1349,38 +1607,15 @@ function OrderViewMode({
             <ChannelStockPanel data={order.stock_by_channel} />
           </TabsContent>
 
-          {/* Tab: Line Items */}
+          {/* Tab: Customer — the at-a-glance overview (customer + products + stock) */}
           <TabsContent value="items">
-            <div className="rounded-lg border overflow-hidden">
-              <Table>
-                <TableHeader>
-                  <TableRow className="hover:bg-transparent">
-                    <TableHead className="h-9 text-xs font-medium">Product</TableHead>
-                    <TableHead className="h-9 text-xs font-medium text-center w-14">Qty</TableHead>
-                    <TableHead className="h-9 text-xs font-medium text-right w-20 hidden sm:table-cell">Unit</TableHead>
-                    <TableHead className="h-9 text-xs font-medium text-right w-24">Total</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {customerLines.map(line => (
-                    <TableRow key={line.id} className="hover:bg-muted/30">
-                      <TableCell className="py-2.5">
-                        <div className="flex items-center gap-2.5">
-                          <ProductImage src={line.product_image} alt={line.product_name} size="md" />
-                          <div className="min-w-0">
-                            <p className="max-w-[36rem] whitespace-normal break-words text-sm font-medium leading-snug">{line.product_name}</p>
-                            {line.barcode && <p className="text-[11px] text-muted-foreground font-mono">{line.barcode}</p>}
-                          </div>
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-center tabular-nums text-sm">{line.quantity}</TableCell>
-                      <TableCell className="text-right tabular-nums text-sm text-muted-foreground hidden sm:table-cell">{order.currency} {line.unit_price}</TableCell>
-                      <TableCell className="text-right tabular-nums text-sm font-semibold">{order.currency} {line.total}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
+            <CustomerOverviewTab
+              order={order}
+              customerLines={customerLines}
+              currency={order.currency}
+              hasClient={hasClient}
+              onOpenClient={() => setClientInfoOpen(true)}
+            />
           </TabsContent>
 
           {/* Tab: Packaging */}
@@ -1435,11 +1670,11 @@ function OrderViewMode({
             </div>
           </div>
 
-          {/* Outcome badge */}
+          {/* Lifecycle status */}
           <div className="rounded-lg border p-4 space-y-2">
-            <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Outcome</h4>
-            <OutcomePill outcome={order.outcome} />
-            {order.outcome === 'DELAYED' && order.delay_date && (
+            <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Status</h4>
+            <OrderStatusBadge status={order.status} label={order.status_display} />
+            {order.status === 'delayed' && order.delay_date && (
               <div className="mt-2 space-y-1">
                 <p className="text-xs text-muted-foreground">
                   <span className="font-medium">Follow-up:</span>{' '}
@@ -1452,7 +1687,7 @@ function OrderViewMode({
                 )}
               </div>
             )}
-            {order.outcome === 'CANCELLED' && order.cancellation_reason && (
+            {order.status === 'canceled' && order.cancellation_reason && (
               <p className="text-xs text-muted-foreground mt-2">
                 <span className="font-medium">Reason:</span> {order.cancellation_reason}
               </p>
@@ -1460,22 +1695,21 @@ function OrderViewMode({
             {order.outcome_note && (
               <p className="text-xs text-muted-foreground italic mt-1">{order.outcome_note}</p>
             )}
-            {order.contact_status === 'NOT_ANSWERED' && (
+            {order.status === 'not_answered' && (
               <div className="mt-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
                 <p className="font-medium">Unanswered attempts: {notAnsweredAttempts}</p>
-                {notAnsweredAttempts <= 3 ? (
-                  <p className="mt-0.5 text-rose-700">Delay is available anytime. Cancel becomes safer after more than 3 attempts.</p>
-                ) : (
-                  <p className="mt-0.5 text-rose-700">More than 3 attempts. You can now delay or cancel this order.</p>
-                )}
+                <p className="mt-0.5 text-rose-700">
+                  {notAnsweredAttempts >= CANCEL_REVEAL_THRESHOLD
+                    ? 'The customer has been unreachable 3 times — you can now cancel the order, or delay it for a later follow-up.'
+                    : 'Keep trying to reach the customer, or delay the order for a later follow-up.'}
+                </p>
               </div>
             )}
           </div>
 
-          {(order.delivery_reference || order.delivery_code || order.delivery_status !== 'NONE') && (
+          {(order.delivery_reference || order.delivery_code) && (
             <div className="rounded-lg border p-4 space-y-2">
               <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Delivery</h4>
-              <Badge variant="outline" className="text-[10px]">{order.delivery_status}</Badge>
               {(order.delivery_code || order.delivery_reference) && (
                 <code className="block truncate rounded-md bg-muted px-2 py-1 text-[11px]">
                   {order.delivery_code || order.delivery_reference}
@@ -1523,28 +1757,28 @@ function OrderViewMode({
           )}
 
           {/* Order outcome actions */}
-          {order.status !== 'CANCELLED' && order.outcome !== 'CANCELLED' && !order.is_deleted && !directPOSCompleted && (
+          {['new', 'not_answered', 'delayed'].includes(order.status) && !order.is_deleted && !directPOSCompleted && (
             <div className="space-y-2">
-              {order.outcome !== 'CONFIRMED' && permissions?.confirm && (
+              {permissions?.confirm && (
                 <Button
                   size="sm"
                   className="w-full gap-1.5 bg-emerald-600 hover:bg-emerald-700"
-                  onClick={onConfirm}
+                  onClick={() => onRunAction('confirm', onConfirm)}
                   disabled={isLoading}
                 >
-                  {isLoading ? <Loader2 className="size-3.5 animate-spin" /> : <ThumbsUp className="size-3.5" />}
+                  {isLoading && activeAction === 'confirm' ? <Loader2 className="size-3.5 animate-spin" /> : <ThumbsUp className="size-3.5" />}
                   Confirm Order
                 </Button>
               )}
-              {order.outcome !== 'CONFIRMED' && order.contact_status !== 'DELAYED' && (
+              {['new', 'delayed'].includes(order.status) && (
                 <Button
                   size="sm"
                   variant="outline"
                   className="w-full gap-1.5 text-rose-700 border-rose-200 hover:bg-rose-50"
-                  onClick={onNotAnswered}
+                  onClick={() => onRunAction('notAnswered', onNotAnswered)}
                   disabled={isLoading}
                 >
-                  <Phone className="size-3.5" />
+                  {isLoading && activeAction === 'notAnswered' ? <Loader2 className="size-3.5 animate-spin" /> : <Phone className="size-3.5" />}
                   No Answer {notAnsweredAttempts ? `(${notAnsweredAttempts})` : ''}
                 </Button>
               )}
@@ -1553,10 +1787,10 @@ function OrderViewMode({
                   size="sm"
                   variant="outline"
                   className="w-full gap-1.5"
-                  onClick={onRestoreDelayed}
+                  onClick={() => onRunAction('restoreDelayed', onRestoreDelayed)}
                   disabled={isLoading}
                 >
-                  <Undo2 className="size-3.5" /> Restore to Pending
+                  {isLoading && activeAction === 'restoreDelayed' ? <Loader2 className="size-3.5 animate-spin" /> : <Undo2 className="size-3.5" />} Restore to Pending
                 </Button>
               )}
               {permissions?.delay && (
@@ -1569,7 +1803,7 @@ function OrderViewMode({
                   <CalendarClock className="size-3.5" /> Delay Order
                 </Button>
               )}
-              {permissions?.cancel && (canEscalateNoAnswer || order.contact_status !== 'NOT_ANSWERED') && (
+              {showCancel && (
                 <Button
                   size="sm" variant="outline"
                   className="w-full gap-1.5 text-red-600 border-red-200 hover:bg-red-50"
@@ -1579,10 +1813,18 @@ function OrderViewMode({
                   <Ban className="size-3.5" /> Cancel Order
                 </Button>
               )}
+              {/* Discoverability: once an action has failed at least once but
+                  the Cancel threshold isn't reached, show how close we are. */}
+              {permissions?.cancel && !showCancel && failedActionAttempts > 0 && (
+                <p className="text-center text-[11px] text-muted-foreground">
+                  Confirm/Delay failed {failedActionAttempts}/{CANCEL_REVEAL_THRESHOLD} — the
+                  Cancel button appears after {CANCEL_REVEAL_THRESHOLD} failed attempts.
+                </p>
+              )}
             </div>
           )}
 
-          {order.outcome === 'CONFIRMED' && order.status !== 'CANCELLED' && !order.is_deleted && !directPOSCompleted && (
+          {['confirmed', 'packaging', 'done'].includes(order.status) && !order.is_deleted && !directPOSCompleted && (
             <div className="space-y-2">
               <Separator />
               <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Fulfillment</h4>
@@ -1590,10 +1832,10 @@ function OrderViewMode({
                 <Button
                   size="sm"
                   className="w-full gap-1.5"
-                  onClick={onSendDelivery}
+                  onClick={() => onRunAction('delivery', onSendDelivery)}
                   disabled={isLoading}
                 >
-                  {isLoading ? <Loader2 className="size-3.5 animate-spin" /> : <Truck className="size-3.5" />}
+                  {isLoading && activeAction === 'delivery' ? <Loader2 className="size-3.5 animate-spin" /> : <Truck className="size-3.5" />}
                   Send to Delivery
                 </Button>
               )}
@@ -1615,7 +1857,7 @@ function OrderViewMode({
                   <p className="text-muted-foreground">{order.pos_sales_channel_name ?? 'POS location selected'}</p>
                 </div>
               )}
-              {permissions?.processReturn && !order.returned_at && (canProcessAfterDone || order.delivery_status === 'DELIVERED' || !!order.pos_validated_at) && (
+              {permissions?.processReturn && !order.returned_at && canProcessAfterDone && (
                 <Button
                   size="sm"
                   variant="outline"
@@ -1639,67 +1881,46 @@ function OrderViewMode({
             </div>
           )}
 
-          {permissions?.edit && !order.is_deleted && (
-            <div className="space-y-3">
-              <Separator />
-              <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Manual Status Edit</h4>
-              <div className="space-y-2">
-                <Label className="text-[11px] text-muted-foreground">Local Order Status</Label>
-                <Select
-                  value={order.status}
-                  onValueChange={value => onStatusChange(order.id, value as OrderStatus)}
-                  disabled={isLoading}
-                >
-                  <SelectTrigger className="h-8 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {['PENDING', 'PROCESSING', 'ON_HOLD', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'].map(status => (
-                      <SelectItem key={status} value={status}>{status.replace('_', ' ')}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+          {(permissions?.edit || permissions?.manualOverride) && !order.is_deleted && (() => {
+            const matrixTargets = ALLOWED_NEXT_STATUSES[order.status] ?? [];
+            const reopenTargets = permissions?.manualOverride
+              ? (REOPEN_TARGETS[order.status] ?? [])
+              : [];
+            const targets = [...matrixTargets, ...reopenTargets];
+            return (
+              <div className="space-y-3">
+                <Separator />
+                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Move Status</h4>
+                <div className="space-y-2">
+                  <Label className="text-[11px] text-muted-foreground">
+                    {reopenTargets.length > 0 && matrixTargets.length === 0
+                      ? 'Reopen this order (audited admin override)'
+                      : 'Allowed next steps (validated by the transition matrix)'}
+                  </Label>
+                  <Select
+                    value={order.status}
+                    onValueChange={value => onStatusChange(order.id, value as OrderStatus)}
+                    disabled={isLoading || targets.length === 0}
+                  >
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={order.status} disabled>
+                        {orderStatusLabel(order.status)} (current)
+                      </SelectItem>
+                      {targets.map(status => (
+                        <SelectItem key={status} value={status}>
+                          {orderStatusLabel(status)}
+                          {reopenTargets.includes(status) && !matrixTargets.includes(status) ? ' (reopen)' : ''}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
-              <div className="space-y-2">
-                <Label className="text-[11px] text-muted-foreground">Contact Status</Label>
-                <Select
-                  value={order.contact_status}
-                  onValueChange={value => {
-                    if (value === 'DELAYED') onOpenDelay();
-                    else if (value === 'NOT_ANSWERED') onNotAnswered();
-                    else onStatusFieldsChange(order.id, { contact_status: value as OrderStatusFieldsPayload['contact_status'] });
-                  }}
-                  disabled={isLoading}
-                >
-                  <SelectTrigger className="h-8 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {['NONE', 'ANSWERED', 'NOT_ANSWERED', 'DELAYED'].map(status => (
-                      <SelectItem key={status} value={status}>{status.replace('_', ' ')}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label className="text-[11px] text-muted-foreground">Return / Exchange</Label>
-                <Select
-                  value={order.return_exchange_status}
-                  onValueChange={value => onStatusFieldsChange(order.id, { return_exchange_status: value as OrderStatusFieldsPayload['return_exchange_status'] })}
-                  disabled={isLoading}
-                >
-                  <SelectTrigger className="h-8 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {['NONE', 'RETURNED', 'EXCHANGED'].map(status => (
-                      <SelectItem key={status} value={status}>{status.replace('_', ' ')}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-          )}
+            );
+          })()}
 
         </div>
       </div>
@@ -1724,6 +1945,7 @@ interface OrderEditModeProps {
   onCancel: () => void;
   onChangeDiscount: (field: 'type' | 'value', val: string | OrderDiscountType) => void;
   onChangeNote: (field: 'customer' | 'internal', val: string) => void;
+  onChangeBilling: (field: keyof OrderEditRequest, val: string) => void;
   isSaving?: boolean;
 }
 
@@ -1731,11 +1953,18 @@ function OrderEditMode({
   editForm, editProducts, loadingEditProducts, currency,
   onUpdateLine, onUpdateLineProduct,
   onAddLine, onRemoveLine, onSaveEdit, onCancel,
-  onChangeDiscount, onChangeNote, isSaving,
+  onChangeDiscount, onChangeNote, onChangeBilling, isSaving,
 }: Readonly<OrderEditModeProps>) {
   const liveSubtotal = useMemo(() =>
     editForm.lines.reduce((s, l) => s + (Number(l.quantity) || 0) * (Number(l.unit_price) || 0), 0),
   [editForm.lines]);
+
+  // Delivery fee toggle. Initialised from the order's current fee so an
+  // existing fee shows enabled; turning it off zeroes the fee, turning it back
+  // on restores the last typed amount (default 7).
+  const initialFee = editForm.delivery_fee ?? '0.00';
+  const [deliveryFeeEnabled, setDeliveryFeeEnabled] = useState(parseFloat(initialFee) > 0);
+  const [lastFee, setLastFee] = useState(parseFloat(initialFee) > 0 ? initialFee : '7.00');
 
   return (
     <div className="flex flex-col gap-6 pb-20">
@@ -1909,6 +2138,142 @@ function OrderEditMode({
         </div>
       </div>
 
+      {/* Delivery fee Section */}
+      <div className="rounded-xl border border-gray-200 bg-white overflow-hidden shadow-sm hover:shadow-md transition-shadow duration-200">
+        <div className="border-b border-gray-100 px-4 sm:px-6 py-4 bg-gradient-to-r from-gray-50 to-white flex items-start sm:items-center gap-3">
+          <div className="size-8 sm:size-9 rounded-lg bg-gray-100 flex items-center justify-center border border-gray-200 flex-shrink-0">
+            <Truck className="size-3.5 sm:size-4 text-gray-700" />
+          </div>
+          <div className="min-w-0">
+            <h4 className="text-sm font-semibold text-gray-900">Delivery fee</h4>
+            <p className="text-xs text-gray-500 mt-0.5">Flat shipping fee added to the order total</p>
+          </div>
+        </div>
+        <div className="px-4 sm:px-6 py-5 space-y-3">
+          <label className="flex cursor-pointer items-center gap-2.5 text-sm font-medium text-gray-700">
+            <Checkbox
+              checked={deliveryFeeEnabled}
+              onCheckedChange={(c) => {
+                const on = c === true;
+                setDeliveryFeeEnabled(on);
+                onChangeBilling('delivery_fee', on ? (lastFee || '7.000') : '0.00');
+              }}
+              disabled={isSaving}
+            />
+            Charge a delivery fee for this order
+          </label>
+          {deliveryFeeEnabled && (
+            <div className="max-w-[220px]">
+              <Label className="text-xs font-semibold text-gray-700 mb-2 block">Amount ({currency})</Label>
+              <Input
+                type="number"
+                min={0}
+                step="0.001"
+                inputMode="decimal"
+                value={editForm.delivery_fee ?? '0.00'}
+                onChange={e => { setLastFee(e.target.value); onChangeBilling('delivery_fee', e.target.value); }}
+                placeholder="7.000"
+                className="h-9 text-sm text-right border-gray-200 focus-visible:border-gray-400 focus-visible:ring-1 focus-visible:ring-gray-200 rounded-lg transition-colors"
+              />
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Billing / Delivery details */}
+      <div className="rounded-xl border border-gray-200 bg-white overflow-hidden shadow-sm hover:shadow-md transition-shadow duration-200">
+        <div className="border-b border-gray-100 px-4 sm:px-6 py-4 bg-gradient-to-r from-gray-50 to-white flex items-start sm:items-center gap-3">
+          <div className="size-8 sm:size-9 rounded-lg bg-gray-100 flex items-center justify-center border border-gray-200 flex-shrink-0">
+            <MapPin className="size-3.5 sm:size-4 text-gray-700" />
+          </div>
+          <div className="min-w-0">
+            <h4 className="text-sm font-semibold text-gray-900">Order customer details</h4>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Updates this order only; the shared client profile remains unchanged
+            </p>
+          </div>
+        </div>
+        <div className="px-4 sm:px-6 py-5 grid gap-4 sm:grid-cols-2">
+          <div>
+            <Label className="text-xs font-medium text-gray-700 mb-1.5 block">First name</Label>
+            <Input value={editForm.billing_first_name ?? ''} onChange={e => onChangeBilling('billing_first_name', e.target.value)} className="h-9 text-sm" placeholder="First name" />
+          </div>
+          <div>
+            <Label className="text-xs font-medium text-gray-700 mb-1.5 block">Last name</Label>
+            <Input value={editForm.billing_last_name ?? ''} onChange={e => onChangeBilling('billing_last_name', e.target.value)} className="h-9 text-sm" placeholder="Last name" />
+          </div>
+          <div>
+            <Label className="text-xs font-medium text-gray-700 mb-1.5 block">Phone</Label>
+            <Input type="tel" inputMode="tel" value={editForm.billing_phone ?? ''} onChange={e => onChangeBilling('billing_phone', e.target.value)} className="h-9 text-sm" placeholder="+216 ..." />
+          </div>
+          <div>
+            <Label className="text-xs font-medium text-gray-700 mb-1.5 block">City</Label>
+            <Input value={editForm.billing_city ?? ''} onChange={e => onChangeBilling('billing_city', e.target.value)} className="h-9 text-sm" placeholder="City" />
+          </div>
+          <div className="sm:col-span-2">
+            <Label className="text-xs font-medium text-gray-700 mb-1.5 block">Address</Label>
+            <Input value={editForm.billing_address_1 ?? ''} onChange={e => onChangeBilling('billing_address_1', e.target.value)} className="h-9 text-sm" placeholder="Street address" />
+          </div>
+          <div>
+            <Label className="text-xs font-medium text-gray-700 mb-1.5 block">Address (line 2)</Label>
+            <Input value={editForm.billing_address_2 ?? ''} onChange={e => onChangeBilling('billing_address_2', e.target.value)} className="h-9 text-sm" placeholder="Apt, suite… (optional)" />
+          </div>
+          <div>
+            <Label className="text-xs font-medium text-gray-700 mb-1.5 block">Postcode</Label>
+            <Input value={editForm.billing_postcode ?? ''} onChange={e => onChangeBilling('billing_postcode', e.target.value)} className="h-9 text-sm" placeholder="Postcode" />
+          </div>
+        </div>
+      </div>
+
+      {/* Delivery / shipping address */}
+      <div className="rounded-xl border border-gray-200 bg-white overflow-hidden shadow-sm hover:shadow-md transition-shadow duration-200">
+        <div className="border-b border-gray-100 px-4 sm:px-6 py-4 bg-gradient-to-r from-gray-50 to-white flex items-start sm:items-center gap-3">
+          <div className="size-8 sm:size-9 rounded-lg bg-gray-100 flex items-center justify-center border border-gray-200 flex-shrink-0">
+            <Truck className="size-3.5 sm:size-4 text-gray-700" />
+          </div>
+          <div className="min-w-0">
+            <h4 className="text-sm font-semibold text-gray-900">Delivery address</h4>
+            <p className="text-xs text-gray-500 mt-0.5">Where this order ships — used to generate the delivery label</p>
+          </div>
+        </div>
+        <div className="px-4 sm:px-6 py-5 grid gap-4 sm:grid-cols-2">
+          <div>
+            <Label className="text-xs font-medium text-gray-700 mb-1.5 block">First name</Label>
+            <Input value={editForm.shipping_first_name ?? ''} onChange={e => onChangeBilling('shipping_first_name', e.target.value)} className="h-9 text-sm" placeholder="First name" />
+          </div>
+          <div>
+            <Label className="text-xs font-medium text-gray-700 mb-1.5 block">Last name</Label>
+            <Input value={editForm.shipping_last_name ?? ''} onChange={e => onChangeBilling('shipping_last_name', e.target.value)} className="h-9 text-sm" placeholder="Last name" />
+          </div>
+          <div className="sm:col-span-2">
+            <Label className="text-xs font-medium text-gray-700 mb-1.5 block">Address</Label>
+            <Input value={editForm.shipping_address_1 ?? ''} onChange={e => onChangeBilling('shipping_address_1', e.target.value)} className="h-9 text-sm" placeholder="Street address" />
+          </div>
+          <div>
+            <Label className="text-xs font-medium text-gray-700 mb-1.5 block">Governorate</Label>
+            <SearchSelect
+              value={editForm.shipping_state ?? ''}
+              onChange={val => onChangeBilling('shipping_state', val)}
+              options={TUNISIA_GOVERNORATE_OPTIONS}
+              placeholder="Search governorate…"
+              className="h-9 text-sm"
+            />
+          </div>
+          <div>
+            <Label className="text-xs font-medium text-gray-700 mb-1.5 block">City / Délégation</Label>
+            <Input value={editForm.shipping_city ?? ''} onChange={e => onChangeBilling('shipping_city', e.target.value)} className="h-9 text-sm" placeholder="City" />
+          </div>
+          <div>
+            <Label className="text-xs font-medium text-gray-700 mb-1.5 block">Delivery phone</Label>
+            <Input type="tel" inputMode="tel" value={editForm.shipping_phone ?? ''} onChange={e => onChangeBilling('shipping_phone', e.target.value)} className="h-9 text-sm" placeholder="Recipient phone — courier calls this number" />
+          </div>
+          <div>
+            <Label className="text-xs font-medium text-gray-700 mb-1.5 block">Postcode</Label>
+            <Input value={editForm.shipping_postcode ?? ''} onChange={e => onChangeBilling('shipping_postcode', e.target.value)} className="h-9 text-sm" placeholder="Postcode" />
+          </div>
+        </div>
+      </div>
+
       {/* Notes Section */}
       <div className="rounded-xl border border-gray-200 bg-white overflow-hidden shadow-sm hover:shadow-md transition-shadow duration-200">
         <div className="border-b border-gray-100 px-4 sm:px-6 py-4 bg-gradient-to-r from-gray-50 to-white flex items-start sm:items-center gap-3">
@@ -2009,8 +2374,9 @@ interface OrderDetailDialogProps {
   loadingPackagingProducts: boolean;
   savingEdit: boolean;
   mutatingOrder: boolean;
+  /** Per-order count of failed Confirm/Delay attempts; gates the Cancel button. */
+  failedActionAttempts?: number;
   onStatusChange: (id: number, status: OrderStatus) => void;
-  onStatusFieldsChange: (id: number, payload: OrderStatusFieldsPayload) => void;
   onConfirmOrder: (id: number) => void;
   onNotAnswered: (id: number) => void;
   onDelayOrder: (id: number, data: { delay_date: string; delay_reason: string; note?: string }) => void;
@@ -2029,28 +2395,58 @@ interface OrderDetailDialogProps {
   onSaveEdit: () => void;
   onChangeDiscount: (field: 'type' | 'value', val: string | OrderDiscountType) => void;
   onChangeNote: (field: 'customer' | 'internal', val: string) => void;
+  onChangeBilling: (field: keyof OrderEditRequest, val: string) => void;
   onOpenLogs: () => void;
   onDelete: () => void;
   onRestore: () => void;
+  onCreateInvoice?: () => Promise<void>;
+  onUpdateInvoice?: (payload: InvoiceMutationPayload) => Promise<void>;
   permissions?: OrderDialogPermissions;
+  /** Whether the current user holds the working lock (can act) vs. read-only. */
+  isLockOwner?: boolean;
+  /** Name of the user currently handling the order (when we don't hold it). */
+  lockedByName?: string | null;
+  /** Open the take-over confirmation for a read-only viewer. */
+  onTakeOver?: () => void;
 }
 
 export function OrderDetailDialog({
   open, onOpenChange, order, isDetailLoading,
   isEditMode, editForm, editProducts, loadingEditProducts,
   packagingProducts, loadingPackagingProducts,
-  savingEdit, mutatingOrder,
-  onStatusChange, onStatusFieldsChange, onConfirmOrder, onNotAnswered, onDelayOrder, onRestoreDelayed, onCancelOrder,
+  savingEdit, mutatingOrder, failedActionAttempts = 0,
+  isLockOwner = true, lockedByName = null, onTakeOver,
+  onStatusChange, onConfirmOrder, onNotAnswered, onDelayOrder, onRestoreDelayed, onCancelOrder,
   onOpenSendPOS, onSendDelivery, onProcessReturn, onPackageOrder, onUnpackageOrder,
   onEditModeChange,
   onUpdateLine, onUpdateLineProduct,
   onAddLine, onRemoveLine, onSaveEdit,
-  onChangeDiscount, onChangeNote,
-  onOpenLogs, onDelete, onRestore,
+  onChangeDiscount, onChangeNote, onChangeBilling,
+  onOpenLogs, onDelete, onRestore, onCreateInvoice, onUpdateInvoice,
   permissions,
 }: Readonly<OrderDetailDialogProps>) {
   const [delayDialogOpen, setDelayDialogOpen] = useState(false);
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
+  const [invoiceOpen, setInvoiceOpen] = useState(false);
+  // Keep one shared action key for the whole popup. The global mutation flag
+  // disables every conflicting control, while only the clicked action spins.
+  const [activeAction, setActiveAction] = useState<string | null>(null);
+  useEffect(() => {
+    if (!mutatingOrder) setActiveAction(null);
+  }, [mutatingOrder]);
+  useEffect(() => {
+    setActiveAction(null);
+  }, [open, order?.id]);
+  const runOrderAction = useCallback((
+    name: string,
+    action: () => void | Promise<void>,
+  ) => {
+    if (mutatingOrder) return;
+    setActiveAction(name);
+    void action();
+  }, [mutatingOrder]);
+  // Seller billing data for the invoice (logo, Matricule Fiscale, footer…).
+  const { data: invoiceCompany } = useCurrentCompany();
 
   const title = order ? `Order ${order.order_number}` : 'Loading...';
   const desc = order?.external_order_id ? `WC #${order.external_order_id}` : undefined;
@@ -2065,13 +2461,35 @@ export function OrderDetailDialog({
       <Button size="sm" variant="outline" className="gap-1.5 h-8 text-xs" onClick={onOpenLogs}>
         <History className="size-3" /> Logs
       </Button>
+      {order.invoice_number && permissions?.viewInvoice && (
+        <Button size="sm" variant="outline" className="gap-1.5 h-8 text-xs" onClick={() => setInvoiceOpen(true)}>
+          <FileText className="size-3" /> Invoice
+        </Button>
+      )}
+      {!order.invoice_number && permissions?.editInvoice && onCreateInvoice && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="gap-1.5 h-8 text-xs"
+          disabled={mutatingOrder}
+          onClick={() => runOrderAction('createInvoice', async () => {
+            await onCreateInvoice();
+            setInvoiceOpen(true);
+          })}
+        >
+          {mutatingOrder && activeAction === 'createInvoice'
+            ? <Loader2 className="size-3 animate-spin" />
+            : <FileText className="size-3" />}
+          Create Invoice
+        </Button>
+      )}
       {order.is_deleted && permissions?.restore ? (
-        <Button size="sm" variant="outline" className="gap-1.5 h-8 text-xs text-emerald-700 border-emerald-200 hover:bg-emerald-50" onClick={onRestore} disabled={mutatingOrder}>
-          {mutatingOrder ? <Loader2 className="size-3 animate-spin" /> : <Undo2 className="size-3" />} Restore
+        <Button size="sm" variant="outline" className="gap-1.5 h-8 text-xs text-emerald-700 border-emerald-200 hover:bg-emerald-50" onClick={() => runOrderAction('restoreOrder', onRestore)} disabled={mutatingOrder}>
+          {mutatingOrder && activeAction === 'restoreOrder' ? <Loader2 className="size-3 animate-spin" /> : <Undo2 className="size-3" />} Restore
         </Button>
       ) : !order.is_deleted && permissions?.delete ? (
-        <Button size="sm" variant="outline" className="gap-1.5 h-8 text-xs text-red-600 border-red-200 hover:bg-red-50" onClick={onDelete} disabled={mutatingOrder}>
-          {mutatingOrder ? <Loader2 className="size-3 animate-spin" /> : <Trash2 className="size-3" />} Delete
+        <Button size="sm" variant="outline" className="gap-1.5 h-8 text-xs text-red-600 border-red-200 hover:bg-red-50" onClick={() => runOrderAction('delete', onDelete)} disabled={mutatingOrder}>
+          {mutatingOrder && activeAction === 'delete' ? <Loader2 className="size-3 animate-spin" /> : <Trash2 className="size-3" />} Delete
         </Button>
       ) : null}
     </div>
@@ -2095,6 +2513,29 @@ export function OrderDetailDialog({
         </div>
       ) : order ? (
         <div className="space-y-5">
+          {/* Working-lock banner — shown when another user is handling this
+              order. The viewer is read-only until they take over (logged). */}
+          {!isLockOwner && (
+            <div className="flex flex-col gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-900 sm:flex-row sm:items-center sm:justify-between">
+              <span className="flex items-center gap-2">
+                <Lock className="size-4 shrink-0" />
+                <span>
+                  This order is currently being handled by{' '}
+                  <span className="font-semibold">{lockedByName || 'another user'}</span>. You're in read-only mode.
+                </span>
+              </span>
+              {onTakeOver && (
+                <Button
+                  size="sm"
+                  className="shrink-0 gap-1.5 bg-amber-600 hover:bg-amber-700"
+                  onClick={onTakeOver}
+                >
+                  <Unlock className="size-3.5" /> Take over
+                </Button>
+              )}
+            </div>
+          )}
+
           {/* Deleted banner */}
           {order.is_deleted && (
             <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg border border-red-200 bg-red-50 text-red-700 text-sm">
@@ -2106,7 +2547,7 @@ export function OrderDetailDialog({
           {/* Phase D — canonical clean status + WooCommerce sync state strip. */}
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs font-medium text-muted-foreground">Status</span>
-            <CleanStatusBadge status={order.order_status} label={order.order_status_display} />
+            <OrderStatusBadge status={order.status} label={order.status_display} />
             <SyncStatusBadge status={order.sync_status} label={order.sync_status_display} />
             {order.sync_status === 'sync_failed' && order.sync_error_message && (
               <span className="text-[11px] text-red-600 truncate max-w-[260px]" title={order.sync_error_message}>
@@ -2119,7 +2560,6 @@ export function OrderDetailDialog({
             <OrderViewMode
               order={order}
               onStatusChange={onStatusChange}
-              onStatusFieldsChange={onStatusFieldsChange}
               onConfirm={() => onConfirmOrder(order.id)}
               onNotAnswered={() => onNotAnswered(order.id)}
               onOpenDelay={() => setDelayDialogOpen(true)}
@@ -2131,7 +2571,10 @@ export function OrderDetailDialog({
               onPackageOrder={(items, allowUpdate) => onPackageOrder(order.id, items, allowUpdate)}
               onUnpackageOrder={() => onUnpackageOrder(order.id)}
               isLoading={mutatingOrder}
+              activeAction={activeAction}
+              onRunAction={runOrderAction}
               permissions={permissions}
+              failedActionAttempts={failedActionAttempts}
               packagingProducts={packagingProducts}
               loadingPackagingProducts={loadingPackagingProducts}
             />
@@ -2149,6 +2592,7 @@ export function OrderDetailDialog({
               onCancel={() => onEditModeChange(false)}
               onChangeDiscount={onChangeDiscount}
               onChangeNote={onChangeNote}
+              onChangeBilling={onChangeBilling}
               isSaving={savingEdit}
             />
           ) : null}
@@ -2180,6 +2624,15 @@ export function OrderDetailDialog({
           isLoading={mutatingOrder}
         />
       )}
+
+      {/* ── Invoice preview / print ── */}
+      <InvoicePreviewDialog
+        open={invoiceOpen}
+        onOpenChange={setInvoiceOpen}
+        data={order?.invoice_number ? invoiceFromOrder(order, invoiceCompany ?? null) : null}
+        canEditInvoice={permissions?.editInvoice}
+        onSaveInvoice={onUpdateInvoice}
+      />
     </ResponsiveSheet>
   );
 }
@@ -2598,71 +3051,203 @@ interface ReturnDialogProps {
   onSubmit: (payload: {
     returnReason: string;
     returnType: 'RETURNED' | 'EXCHANGED' | 'DAMAGED' | 'MISSING' | 'OTHER';
-    lineConditions: Array<{ line_id: number; condition: BackendCondition }>;
+    lineConditions: ReturnLineCondition[];
   }) => void;
   isLoading?: boolean;
 }
 
-/** One item row inside the return popup — image, name/qty, and the disposition picker. */
-function ReturnItemRow({
-  line, value, onChange, disabled,
+function isPackReturnLine(line: OrderLine) {
+  return Boolean(line.is_pack || line.product_type === 'pack');
+}
+
+function unitKey(lineId: number, productId: number, unitIndex: number) {
+  return `${lineId}:${productId}:${unitIndex}`;
+}
+
+/** One physical unit the operator inspects and classifies in the return popup. */
+interface ReturnUnit {
+  key: string;
+  productId: number;
+  productName: string;
+  productImage?: string | null;
+  productBarcode?: string | null;
+  unitIndex: number;
+  totalQuantity: number;
+  fromPack: boolean;
+}
+
+/**
+ * Expand an order line into the individual units to classify. A pack expands
+ * into every component unit (quantity × composition); a normal line expands
+ * into its `quantity` units of the same product — so a Qty-5 line becomes 5
+ * separate Good/Damaged checks instead of one bulk decision.
+ */
+function getReturnUnits(line: OrderLine): ReturnUnit[] {
+  if (isPackReturnLine(line)) {
+    return (line.pack_items_detail ?? []).flatMap(item => {
+      const totalQuantity = item.quantity * line.quantity;
+      return Array.from({ length: totalQuantity }, (_, unitIndex) => ({
+        key: unitKey(line.id, item.product_id, unitIndex),
+        productId: item.product_id,
+        productName: item.product_name,
+        productImage: item.product_image,
+        productBarcode: item.product_barcode,
+        unitIndex,
+        totalQuantity,
+        fromPack: true,
+      }));
+    });
+  }
+  const productId = line.product_id ?? line.product ?? 0;
+  return Array.from({ length: line.quantity }, (_, unitIndex) => ({
+    key: unitKey(line.id, productId, unitIndex),
+    productId,
+    productName: line.product_name,
+    productImage: line.product_image,
+    productBarcode: line.barcode,
+    unitIndex,
+    totalQuantity: line.quantity,
+    fromPack: false,
+  }));
+}
+
+function ReturnDispositionPicker({
+  value,
+  onChange,
+  disabled,
+  compact = false,
 }: Readonly<{
-  line: OrderLine;
   value: ReturnDisposition | undefined;
   onChange: (value: ReturnDisposition) => void;
   disabled?: boolean;
+  compact?: boolean;
 }>) {
   const restocks = value ? DISPOSITION_RESTOCKS[value] : null;
   return (
-    <div className="flex flex-col gap-2 p-3 sm:flex-row sm:items-center sm:gap-3">
-      <div className="flex min-w-0 flex-1 items-center gap-3">
-        <ProductImage src={line.product_image} alt={line.product_name} size="md" />
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium whitespace-normal break-words leading-snug">{line.product_name}</p>
-          <p className="text-[11px] text-muted-foreground">
-            Qty {line.quantity}{line.barcode ? ` · ${line.barcode}` : ''}
-          </p>
-        </div>
-      </div>
-      <div className="flex items-center gap-2 sm:flex-shrink-0">
-        <Select
-          value={value ?? ''}
-          onValueChange={v => onChange(v as ReturnDisposition)}
-          disabled={disabled}
+    <div className="flex items-center gap-2 sm:flex-shrink-0">
+      <Select
+        value={value ?? ''}
+        onValueChange={v => onChange(v as ReturnDisposition)}
+        disabled={disabled}
+      >
+        <SelectTrigger
+          className={`h-9 w-full text-xs ${compact ? 'sm:w-[190px]' : 'sm:w-[210px]'} ${
+            value ? '' : 'border-amber-400 text-amber-700 dark:text-amber-400'
+          }`}
         >
-          <SelectTrigger
-            className={`h-9 w-full text-xs sm:w-[210px] ${value ? '' : 'border-amber-400 text-amber-700 dark:text-amber-400'}`}
-          >
-            <SelectValue placeholder="Select condition…" />
-          </SelectTrigger>
-          <SelectContent>
-            {DISPOSITION_OPTIONS.map(opt => (
-              <SelectItem key={opt} value={opt}>
-                <span className="flex items-center gap-2">
-                  <span
-                    className={`size-1.5 rounded-full ${DISPOSITION_RESTOCKS[opt] ? 'bg-emerald-500' : 'bg-rose-500'}`}
-                    aria-hidden
-                  />
-                  {DISPOSITION_LABEL[opt]}
-                </span>
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        {value && (
-          <Badge
-            variant="outline"
-            className={`hidden shrink-0 gap-1 text-[10px] sm:inline-flex ${
-              restocks
-                ? 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
-                : 'border-rose-300 bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-400'
-            }`}
-          >
-            {restocks ? <TrendingUp className="size-3" /> : <Ban className="size-3" />}
-            {restocks ? 'Stock' : 'Waste'}
-          </Badge>
+          <SelectValue placeholder="Select condition…" />
+        </SelectTrigger>
+        <SelectContent>
+          {DISPOSITION_OPTIONS.map(opt => (
+            <SelectItem key={opt} value={opt}>
+              <span className="flex items-center gap-2">
+                <span
+                  className={`size-1.5 rounded-full ${
+                    DISPOSITION_RESTOCKS[opt] ? 'bg-emerald-500' : 'bg-rose-500'
+                  }`}
+                  aria-hidden
+                />
+                {DISPOSITION_LABEL[opt]}
+              </span>
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {value && (
+        <Badge
+          variant="outline"
+          className={`hidden shrink-0 gap-1 text-[10px] sm:inline-flex ${
+            restocks
+              ? 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400'
+              : 'border-rose-300 bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-400'
+          }`}
+        >
+          {restocks ? <TrendingUp className="size-3" /> : <Ban className="size-3" />}
+          {restocks ? 'Stock' : 'Waste'}
+        </Badge>
+      )}
+    </div>
+  );
+}
+
+/** One order line inside the return popup, classified unit by unit. */
+function ReturnItemRow({
+  line,
+  units,
+  unitValues,
+  onUnitChange,
+  disabled,
+}: Readonly<{
+  line: OrderLine;
+  units: ReturnUnit[];
+  unitValues: Record<string, ReturnDisposition>;
+  onUnitChange: (key: string, value: ReturnDisposition) => void;
+  disabled?: boolean;
+}>) {
+  const isPack = isPackReturnLine(line);
+  // A single-unit normal line keeps the compact inline picker; anything with
+  // more than one unit (multi-qty lines and packs) is classified unit by unit.
+  const perUnit = isPack || units.length > 1;
+  return (
+    <div className="p-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <ProductImage src={line.product_image} alt={line.product_name} size="md" />
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <p className="text-sm font-medium whitespace-normal break-words leading-snug">{line.product_name}</p>
+              {isPack && <Badge variant="secondary" className="text-[10px]">Pack</Badge>}
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              Qty {line.quantity}{line.barcode ? ` · ${line.barcode}` : ''}
+            </p>
+          </div>
+        </div>
+        {!perUnit && units.length === 1 && (
+          <ReturnDispositionPicker
+            value={unitValues[units[0].key]}
+            onChange={v => onUnitChange(units[0].key, v)}
+            disabled={disabled}
+          />
         )}
       </div>
+
+      {isPack && units.length === 0 && (
+        <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800">
+          Pack composition is unavailable. Update the pack before processing this return.
+        </div>
+      )}
+
+      {perUnit && units.length > 0 && (
+        <div className="mt-3 space-y-2 rounded-lg border bg-muted/20 p-2">
+          <p className="px-1 text-xs font-medium">
+            {isPack ? 'Classify every product inside the pack separately' : 'Classify each unit separately'}
+          </p>
+          {units.map(unit => (
+            <div
+              key={unit.key}
+              className="flex flex-col gap-2 rounded-md border bg-background p-2 sm:flex-row sm:items-center"
+            >
+              <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                <ProductImage src={unit.productImage} alt={unit.productName} size="sm" />
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-medium">{unit.productName}</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    Unit {unit.unitIndex + 1}/{unit.totalQuantity}
+                    {unit.productBarcode ? ` · ${unit.productBarcode}` : ''}
+                  </p>
+                </div>
+              </div>
+              <ReturnDispositionPicker
+                value={unitValues[unit.key]}
+                onChange={nextValue => onUnitChange(unit.key, nextValue)}
+                disabled={disabled}
+                compact
+              />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -2670,7 +3255,7 @@ function ReturnItemRow({
 /**
  * Return processing popup. Shows the full order context, then forces the operator
  * to classify EVERY item (customer products AND packaging) before saving. Each
- * item's four-way condition decides whether it returns to available stock or is
+ * item's condition decides whether it returns to available stock or is
  * written off as waste; the backend then restocks, records inventory movements,
  * flips the order to RETURNED, reverses revenue/KPIs/points, and logs the action.
  */
@@ -2690,29 +3275,45 @@ export function ReturnDialog({ open, onOpenChange, order, onSubmit, isLoading }:
   const allLines = useMemo(() => [...customerLines, ...packagingLines], [customerLines, packagingLines]);
 
   const [reason, setReason] = useState('');
-  const [dispositions, setDispositions] = useState<Record<number, ReturnDisposition>>({});
+  // Every unit (pack component OR a single unit of a normal line) is keyed
+  // individually so the operator classifies each one on its own.
+  const [unitDispositions, setUnitDispositions] = useState<Record<string, ReturnDisposition>>({});
 
   // (Re)initialise whenever a different order is opened. Intentionally leave every
-  // item UNSET so the operator must consciously classify each one before saving.
+  // unit UNSET so the operator must consciously classify each one before saving.
   useEffect(() => {
     if (!open || !order) return;
-    setDispositions({});
+    setUnitDispositions({});
     setReason('');
   }, [open, order]);
 
-  const setLineDisposition = useCallback((lineId: number, value: ReturnDisposition) => {
-    setDispositions(prev => ({ ...prev, [lineId]: value }));
+  const setUnitDisposition = useCallback((key: string, value: ReturnDisposition) => {
+    setUnitDispositions(prev => ({ ...prev, [key]: value }));
   }, []);
 
-  const pendingCount = allLines.filter(l => !dispositions[l.id]).length;
-  const restockCount = allLines.filter(l => {
-    const d = dispositions[l.id];
-    return d ? DISPOSITION_RESTOCKS[d] : false;
-  }).length;
-  const wasteCount = allLines.filter(l => {
-    const d = dispositions[l.id];
-    return d ? !DISPOSITION_RESTOCKS[d] : false;
-  }).length;
+  const classificationSummary = useMemo(() => {
+    let pending = 0;
+    let restock = 0;
+    let waste = 0;
+    for (const line of allLines) {
+      const units = getReturnUnits(line);
+      if (units.length === 0) {
+        // Pack whose composition is unavailable — counts as one pending block.
+        pending += 1;
+        continue;
+      }
+      for (const unit of units) {
+        const disposition = unitDispositions[unit.key];
+        if (!disposition) pending += 1;
+        else if (DISPOSITION_RESTOCKS[disposition]) restock += 1;
+        else waste += 1;
+      }
+    }
+    return { pending, restock, waste };
+  }, [allLines, unitDispositions]);
+  const pendingCount = classificationSummary.pending;
+  const restockCount = classificationSummary.restock;
+  const wasteCount = classificationSummary.waste;
   const allClassified = allLines.length > 0 && pendingCount === 0;
 
   const channelName = order
@@ -2721,30 +3322,89 @@ export function ReturnDialog({ open, onOpenChange, order, onSubmit, isLoading }:
 
   const handleSubmit = useCallback(() => {
     if (!order) return;
-    // Resolve every line's disposition up front; bail if any is still unset so we
-    // never submit a partially-classified return.
-    const classified: Array<{ line: OrderLine; disposition: ReturnDisposition }> = [];
-    for (const line of allLines) {
-      const disposition = dispositions[line.id];
-      if (!disposition) return;
-      classified.push({ line, disposition });
-    }
-    if (classified.length === 0) return;
+    const lineConditions: ReturnLineCondition[] = [];
+    const breakdown: string[] = [];
 
-    const lineConditions = classified.map(({ line, disposition }) => ({
-      line_id: line.id,
-      condition: DISPOSITION_TO_BACKEND[disposition],
-    }));
-    // Preserve the precise four-way per-item choice in the audit trail — the
-    // backend enum only distinguishes GOOD/DAMAGED, so the human-readable detail
-    // lives in the reason recorded on the OrderLog.
-    const breakdown = classified
-      .map(({ line, disposition }) => `${line.product_name} ×${line.quantity}: ${DISPOSITION_LABEL[disposition]}`)
-      .join('; ');
+    for (const line of allLines) {
+      const units = getReturnUnits(line);
+      if (units.length === 0) return; // pack with no composition → can't classify
+
+      if (isPackReturnLine(line)) {
+        // Group identical pack-component units by (product, condition) so the
+        // backend gets one quantity-bearing entry per outcome.
+        const grouped = new Map<string, {
+          product_id: number;
+          quantity: number;
+          condition: BackendCondition;
+        }>();
+        const componentBreakdown = new Map<number, { name: string; good: number; damaged: number }>();
+        let hasDamagedUnit = false;
+        for (const unit of units) {
+          const disposition = unitDispositions[unit.key];
+          if (!disposition) return;
+          const condition = DISPOSITION_TO_BACKEND[disposition];
+          const groupKey = `${unit.productId}:${condition}`;
+          const current = grouped.get(groupKey);
+          if (current) current.quantity += 1;
+          else grouped.set(groupKey, { product_id: unit.productId, quantity: 1, condition });
+          const counts = componentBreakdown.get(unit.productId) ?? { name: unit.productName, good: 0, damaged: 0 };
+          if (disposition === 'GOOD') counts.good += 1;
+          else { counts.damaged += 1; hasDamagedUnit = true; }
+          componentBreakdown.set(unit.productId, counts);
+        }
+        lineConditions.push({
+          line_id: line.id,
+          condition: hasDamagedUnit ? 'DAMAGED' : 'GOOD',
+          component_conditions: Array.from(grouped.values()),
+        });
+        breakdown.push(
+          `${line.product_name}: ${Array.from(componentBreakdown.values())
+            .map(counts => `${counts.name} (${counts.good} good, ${counts.damaged} damaged)`)
+            .join(', ')}`,
+        );
+        continue;
+      }
+
+      // Normal line — tally the per-unit verdicts.
+      let good = 0;
+      let damaged = 0;
+      for (const unit of units) {
+        const disposition = unitDispositions[unit.key];
+        if (!disposition) return;
+        if (disposition === 'GOOD') good += 1;
+        else damaged += 1;
+      }
+      if (damaged === 0) {
+        // All units good → simple whole-line restock.
+        lineConditions.push({ line_id: line.id, condition: 'GOOD' });
+        breakdown.push(`${line.product_name} ×${line.quantity}: all good`);
+      } else if (good === 0) {
+        // All units damaged → simple whole-line write-off.
+        lineConditions.push({ line_id: line.id, condition: 'DAMAGED' });
+        breakdown.push(`${line.product_name} ×${line.quantity}: all damaged`);
+      } else {
+        // Mixed → split this line's product into good vs damaged quantities.
+        const productId = units[0].productId;
+        lineConditions.push({
+          line_id: line.id,
+          condition: 'DAMAGED',
+          component_conditions: [
+            { product_id: productId, quantity: good, condition: 'GOOD' },
+            { product_id: productId, quantity: damaged, condition: 'DAMAGED' },
+          ],
+        });
+        breakdown.push(`${line.product_name} ×${line.quantity}: ${good} good, ${damaged} damaged`);
+      }
+    }
+    if (lineConditions.length === 0) return;
+
+    const breakdownText = breakdown.join('; ');
     const typed = reason.trim();
-    const returnReason = typed ? `${typed} | Item conditions — ${breakdown}` : `Item conditions — ${breakdown}`;
+    const returnReason = typed
+      ? `${typed} | Item conditions — ${breakdownText}`
+      : `Item conditions — ${breakdownText}`;
     onSubmit({ returnReason, returnType: 'RETURNED', lineConditions });
-  }, [order, allLines, dispositions, reason, onSubmit]);
+  }, [order, allLines, unitDispositions, reason, onSubmit]);
 
   return (
     <ResponsiveSheet
@@ -2794,21 +3454,22 @@ export function ReturnDialog({ open, onOpenChange, order, onSubmit, isLoading }:
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <span className="text-sm font-semibold">{order.order_number}</span>
-                <CleanStatusBadge status={order.order_status} label={order.order_status_display} />
+                <OrderStatusBadge status={order.status} label={order.status_display} />
               </div>
               <span className="text-sm font-semibold tabular-nums">
                 {order.total} {order.currency}
               </span>
             </div>
             <div className="mt-2 grid grid-cols-1 gap-x-4 gap-y-1.5 text-xs text-muted-foreground sm:grid-cols-2">
+              {/* Delivery contact — what goes on the parcel, not the client record. */}
               <span className="flex items-center gap-1.5 min-w-0">
                 <User className="size-3.5 shrink-0" />
-                <span className="truncate text-foreground">{order.client_name || 'Walk-in customer'}</span>
+                <span className="truncate text-foreground">{order.delivery_name || 'Walk-in customer'}</span>
               </span>
-              {order.client_phone && (
+              {order.delivery_phone && (
                 <span className="flex items-center gap-1.5 min-w-0">
                   <Phone className="size-3.5 shrink-0" />
-                  <span className="truncate">{order.client_phone}</span>
+                  <span className="truncate">{order.delivery_phone}</span>
                 </span>
               )}
               <span className="flex items-center gap-1.5 min-w-0">
@@ -2875,8 +3536,9 @@ export function ReturnDialog({ open, onOpenChange, order, onSubmit, isLoading }:
                     <ReturnItemRow
                       key={line.id}
                       line={line}
-                      value={dispositions[line.id]}
-                      onChange={v => setLineDisposition(line.id, v)}
+                      units={getReturnUnits(line)}
+                      unitValues={unitDispositions}
+                      onUnitChange={setUnitDisposition}
                       disabled={isLoading}
                     />
                   ))}
@@ -2897,8 +3559,9 @@ export function ReturnDialog({ open, onOpenChange, order, onSubmit, isLoading }:
                     <ReturnItemRow
                       key={line.id}
                       line={line}
-                      value={dispositions[line.id]}
-                      onChange={v => setLineDisposition(line.id, v)}
+                      units={getReturnUnits(line)}
+                      unitValues={unitDispositions}
+                      onUnitChange={setUnitDisposition}
                       disabled={isLoading}
                     />
                   ))}
@@ -2922,6 +3585,22 @@ interface CreateOrderDialogProps {
   channels: SalesChannel[];
   onSubmit: (payload: POSOrderCreateRequest) => void;
   isLoading?: boolean;
+}
+
+/** Labelled divider that groups the create-order form into clear sections. */
+function CreateSectionHeader({ icon: Icon, title, hint }: Readonly<{ icon: LucideIcon; title: string; hint?: string }>) {
+  return (
+    <div className="flex items-center gap-2 pt-1">
+      <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+        <Icon className="size-3.5" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-semibold text-foreground">{title}</p>
+        {hint && <p className="text-[10px] leading-tight text-muted-foreground">{hint}</p>}
+      </div>
+      <div className="hidden h-px flex-1 bg-border sm:block" />
+    </div>
+  );
 }
 
 interface DraftLine {
@@ -2961,6 +3640,9 @@ export function CreateOrderDialog({
   const [orderStatus, setOrderStatus] = useState<'pending' | 'processing' | 'completed'>('processing');
   const [discountType, setDiscountType] = useState<OrderDiscountType>('NONE');
   const [discountValue, setDiscountValue] = useState('');
+  // Optional delivery fee — default 7 DT, only added when the user opts in.
+  const [deliveryEnabled, setDeliveryEnabled] = useState(false);
+  const [deliveryFee, setDeliveryFee] = useState('7.000');
   const [customerNote, setCustomerNote] = useState('');
   const [orderSource, setOrderSource] = useState<OrderSocialSource | ''>('');
   // Auto-applied promotions, keyed by product id (the best active promo for the
@@ -2998,7 +3680,8 @@ export function CreateOrderDialog({
     if (open) return;
     setBrandFilter(''); setChannelId(''); setProducts([]); setLines([]); setScanFeedback(null);
     setClient(null); setPaymentMethod('cash'); setOrderStatus('processing');
-    setDiscountType('NONE'); setDiscountValue(''); setCustomerNote(''); setOrderSource('');
+    setDiscountType('NONE'); setDiscountValue(''); setDeliveryEnabled(false); setDeliveryFee('7.000');
+    setCustomerNote(''); setOrderSource('');
     setPromoByProduct({}); setManualPriceIds(new Set()); setPromoLoading(false);
   }, [open]);
 
@@ -3025,6 +3708,17 @@ export function CreateOrderDialog({
     });
   }, [brandFilter, activeChannels]);
 
+  // Keep the picked customer across brand/channel changes — clients are
+  // company-scoped, not brand-scoped, so picking the client before the channel
+  // must not silently wipe it. Only a channel from ANOTHER company invalidates
+  // the selection (the backend rejects cross-tenant clients too).
+  useEffect(() => {
+    if (!selectedChannel) return;
+    setClient(prev => (
+      prev && prev.company != null && prev.company !== selectedChannel.company_id ? null : prev
+    ));
+  }, [selectedChannel]);
+
   // Load the brand's products whenever the channel (hence brand) changes; a new
   // brand means a different catalogue, so any half-built cart is cleared.
   useEffect(() => {
@@ -3033,9 +3727,6 @@ export function CreateOrderDialog({
     setLoadingProducts(true);
     setLines([]);
     setManualPriceIds(new Set());
-    // A brand change may also mean a different company; drop any picked client
-    // so we never submit a cross-tenant customer (the backend rejects it too).
-    setClient(null);
     productService.getAllProducts({ brand: brandId, page_size: 500 })
       .then(items => { if (!cancelled) setProducts((items || []).filter(p => p.product_type !== 'packaging_item')); })
       .catch(() => { if (!cancelled) setProducts([]); })
@@ -3143,7 +3834,8 @@ export function CreateOrderDialog({
     }
     return 0;
   }, [discountType, discountNum, subtotal]);
-  const grandTotal = Math.max(0, subtotal - discountTotal);
+  const deliveryFeeNum = deliveryEnabled ? Math.max(0, parseFloat(deliveryFee) || 0) : 0;
+  const grandTotal = Math.max(0, subtotal - discountTotal) + deliveryFeeNum;
 
   const canSubmit = !!channelId && lines.length > 0 && !discountInvalid && !isLoading;
   // Human-readable reason the Create Order button is disabled (shown in the footer).
@@ -3181,11 +3873,12 @@ export function CreateOrderDialog({
       discount_type: discountType,
       discount_value:
         discountType === 'NONE' ? '0.00' : (parseFloat(discountValue) || 0).toFixed(2),
+      delivery_fee: deliveryFeeNum.toFixed(2),
     };
     onSubmit(payload);
   }, [
     channelId, lines, client, paymentMethod, customerNote,
-    orderStatus, orderSource, discountType, discountValue, discountInvalid, onSubmit,
+    orderStatus, orderSource, discountType, discountValue, deliveryFeeNum, discountInvalid, onSubmit,
   ]);
 
   return (
@@ -3219,6 +3912,7 @@ export function CreateOrderDialog({
         }
       >
         <div className="space-y-4">
+          <CreateSectionHeader icon={Store} title="Where to sell" hint="Pick the channel this order belongs to" />
           {multiBrand && (
             <div className="space-y-1.5">
               <Label className="text-xs font-medium">Brand</Label>
@@ -3263,6 +3957,24 @@ export function CreateOrderDialog({
             </div>
           )}
 
+          <div className="space-y-2">
+            <CreateSectionHeader icon={User} title="Customer" hint="Attached to the order + used for the delivery label" />
+            <OrderClientSelector
+              value={client}
+              onChange={setClient}
+              salesChannelId={selectedChannel?.id ?? null}
+              brandId={brandId ?? null}
+              disabled={isLoading}
+            />
+            {!client && (
+              <p className="text-[11px] text-muted-foreground">
+                The customer's name, phone and address are attached to the order and used
+                for the delivery label. Leave empty only for anonymous walk-in orders.
+              </p>
+            )}
+          </div>
+
+          <CreateSectionHeader icon={Package} title="Products" hint="Search or scan items to add to the order" />
           {channelId ? (
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-2">
@@ -3363,17 +4075,7 @@ export function CreateOrderDialog({
             </div>
           )}
 
-          <div className="space-y-2">
-            <Label className="text-xs font-medium">Customer (optional)</Label>
-            <OrderClientSelector
-              value={client}
-              onChange={setClient}
-              salesChannelId={selectedChannel?.id ?? null}
-              brandId={brandId ?? null}
-              disabled={isLoading}
-            />
-          </div>
-
+          <CreateSectionHeader icon={CreditCard} title="Order details" hint="Payment, status and where the order came from" />
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label className="text-xs font-medium">Payment method</Label>
@@ -3432,6 +4134,8 @@ export function CreateOrderDialog({
               preview mirrors the server's recompute; the backend remains the
               source of truth for the saved figures. */}
           {lines.length > 0 && (
+            <>
+            <CreateSectionHeader icon={Percent} title="Review & totals" hint="Discount, delivery and the live order total" />
             <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
@@ -3468,6 +4172,36 @@ export function CreateOrderDialog({
                   </div>
                 )}
               </div>
+
+              {/* Delivery fee — optional, default 7 DT, the user opts in. */}
+              <div className="flex flex-wrap items-center gap-3 border-t pt-3">
+                <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
+                  <Checkbox
+                    checked={deliveryEnabled}
+                    onCheckedChange={(c) => setDeliveryEnabled(c === true)}
+                    disabled={isLoading}
+                  />
+                  <Truck className="size-3.5 text-muted-foreground" />
+                  Add delivery fee
+                </label>
+                {deliveryEnabled && (
+                  <div className="flex items-center gap-1.5">
+                    <Input
+                      type="number"
+                      min={0}
+                      step="0.001"
+                      inputMode="decimal"
+                      value={deliveryFee}
+                      onChange={(e) => setDeliveryFee(e.target.value)}
+                      className="h-9 w-28 tabular-nums"
+                      placeholder="7.000"
+                      disabled={isLoading}
+                    />
+                    <span className="text-xs text-muted-foreground">TND</span>
+                  </div>
+                )}
+              </div>
+
               {discountInvalid && (
                 <p className="text-xs text-red-600">
                   {discountType === 'PERCENTAGE'
@@ -3486,12 +4220,19 @@ export function CreateOrderDialog({
                     <span>−{discountTotal.toFixed(2)} TND</span>
                   </div>
                 )}
+                {deliveryFeeNum > 0 && (
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>Delivery fee</span>
+                    <span>+{deliveryFeeNum.toFixed(2)} TND</span>
+                  </div>
+                )}
                 <div className="flex justify-between font-semibold">
                   <span>Total</span>
                   <span>{grandTotal.toFixed(2)} TND</span>
                 </div>
               </div>
             </div>
+            </>
           )}
         </div>
       </ResponsiveSheet>

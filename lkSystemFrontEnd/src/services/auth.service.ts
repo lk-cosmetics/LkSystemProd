@@ -114,14 +114,23 @@ class AuthService {
 
         if (!axiosError.response) {
           throw new Error(
-            'Cannot connect to server. Please check if the backend is running on http://localhost:8000'
+            'Cannot connect to the server. Please check your connection and try again.'
           );
+        }
+
+        // A 401 on login always means the matricule/password pair was rejected
+        // (SimpleJWT returns the same generic "No active account…" detail for a
+        // wrong password, a wrong matricule, or an inactive account). Show one
+        // clear message instead of the backend's technical wording — and never
+        // reveal which half was wrong.
+        if (axiosError.response.status === 401) {
+          throw new Error('Incorrect matricule or password. Please try again.');
         }
 
         throw new Error(
           axiosError.response?.data?.detail ||
             axiosError.response?.data?.message ||
-            'Login failed. Please check your credentials.'
+            'Login failed. Please check your credentials and try again.'
         );
       }
 
@@ -492,15 +501,24 @@ class AuthService {
         // Try to refresh the access token using HttpOnly cookie
         try {
           await this.refreshToken();
-        } catch {
-          // Refresh failed - clear user data but don't redirect
-          // User will be redirected when they try to access a protected route
-          console.warn(
-            '⚠️ Token refresh failed during init, user needs to re-login'
-          );
-          localStorage.removeItem(AUTH_CONFIG.STORAGE_KEY.USER_DISPLAY);
-          accessTokenMemory = null;
-          refreshTokenMemory = null;
+        } catch (err) {
+          // Only a real auth rejection (refresh token invalid/expired) ends the
+          // session. A NETWORK failure (offline / server unreachable) must NOT
+          // wipe it — the PWA keeps the cashier logged in for offline cold
+          // starts, and a fresh access token is minted on reconnect (or the
+          // next online 401). The axios interceptor already lets offline
+          // requests reject without redirecting, so nothing breaks meanwhile.
+          const status = (err as { response?: { status?: number } })?.response?.status;
+          if (status === 401 || status === 403) {
+            console.warn('⚠️ Refresh token rejected during init — ending session');
+            localStorage.removeItem(AUTH_CONFIG.STORAGE_KEY.USER_DISPLAY);
+            accessTokenMemory = null;
+            refreshTokenMemory = null;
+          } else {
+            console.warn(
+              '⚠️ Token refresh failed (offline/unreachable) — keeping session for offline use',
+            );
+          }
         }
       }
     } catch (error) {

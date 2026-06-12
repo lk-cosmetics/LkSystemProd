@@ -21,6 +21,7 @@ import {
   Check,
   Loader2,
   Mail,
+  MapPin,
   Phone,
   Search,
   Truck,
@@ -38,9 +39,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { SearchSelect } from '@/components/ui/search-select';
 import { useClients, useCreateClient } from '@/hooks/queries/useClients';
 import { useDebounce } from '@/hooks/useDebounce';
-import { TUNISIA_GOVERNORATES } from '@/constants/tunisia';
+import { TUNISIA_GOVERNORATE_OPTIONS } from '@/constants/tunisia';
 import type { Client, CreateClientRequest, PaginatedResponse } from '@/types';
 
 interface OrderClientSelectorProps {
@@ -101,6 +103,7 @@ const EMPTY_CREATE_FORM = {
   first_name: '',
   last_name: '',
   phone: '',
+  matricule_fiscale: '', // tax ID for COMPANY clients (shown on invoices)
   // Delivery fields — the JAX delivery API needs the governorate (mapped from
   // ``state``), the delegation/city, and a street address to generate a label.
   state: '',
@@ -176,6 +179,9 @@ export function OrderClientSelector({
       last_name: createForm.last_name.trim() || undefined,
       phone,
       country: 'TN',
+      ...(createForm.client_type === 'COMPANY' && createForm.matricule_fiscale.trim()
+        ? { matricule_fiscale: createForm.matricule_fiscale.trim() }
+        : {}),
       // Delivery details — only sent when filled so we never overwrite with blanks.
       ...(createForm.state ? { state: createForm.state } : {}),
       ...(createForm.city.trim() ? { city: createForm.city.trim() } : {}),
@@ -196,6 +202,10 @@ export function OrderClientSelector({
 
   // ── Selected client card ─────────────────────────────────────────────────
   if (value) {
+    const addressLine = [value.address, value.city, value.state]
+      .map(part => (part || '').trim())
+      .filter(Boolean)
+      .join(', ');
     return (
       <div className="rounded-lg border bg-muted/30 p-3">
         <div className="flex items-start justify-between gap-3">
@@ -230,6 +240,12 @@ export function OrderClientSelector({
                   </span>
                 )}
               </div>
+              {addressLine && (
+                <div className="mt-0.5 flex items-start gap-1 text-xs text-muted-foreground">
+                  <MapPin className="mt-0.5 size-3 shrink-0" />
+                  <span className="min-w-0 break-words">{addressLine}</span>
+                </div>
+              )}
             </div>
           </div>
           <Button
@@ -244,6 +260,15 @@ export function OrderClientSelector({
             Change
           </Button>
         </div>
+        {!addressLine && (
+          <div className="mt-2 flex gap-1.5 text-xs text-amber-700">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+            <span>
+              No delivery address on this client — the delivery label will need one.
+              You can add it from the Clients page.
+            </span>
+          </div>
+        )}
         {value.is_blocked && (
           <div className="mt-2 flex gap-1.5 text-xs text-red-700">
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
@@ -325,6 +350,17 @@ export function OrderClientSelector({
               className="mt-1 h-10"
             />
           </div>
+          {createForm.client_type === 'COMPANY' && (
+            <div className="col-span-2">
+              <Label className="text-xs">Matricule Fiscale</Label>
+              <Input
+                value={createForm.matricule_fiscale}
+                onChange={e => setField('matricule_fiscale', e.target.value)}
+                placeholder="Tax ID — appears on the client's invoices"
+                className="mt-1 h-10"
+              />
+            </div>
+          )}
           <div className="col-span-2">
             <Label className="text-xs">Phone *</Label>
             <Input
@@ -344,16 +380,15 @@ export function OrderClientSelector({
           </div>
           <div>
             <Label className="text-xs">Gouvernorat</Label>
-            <Select value={createForm.state} onValueChange={val => setField('state', val)}>
-              <SelectTrigger className="mt-1 h-10">
-                <SelectValue placeholder="Select governorate" />
-              </SelectTrigger>
-              <SelectContent>
-                {TUNISIA_GOVERNORATES.map(gov => (
-                  <SelectItem key={gov} value={gov}>{gov}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <div className="mt-1">
+              <SearchSelect
+                value={createForm.state}
+                onChange={val => setField('state', val)}
+                options={TUNISIA_GOVERNORATE_OPTIONS}
+                placeholder="Search governorate…"
+                className="h-10"
+              />
+            </div>
           </div>
           <div>
             <Label className="text-xs">Délégation / City</Label>

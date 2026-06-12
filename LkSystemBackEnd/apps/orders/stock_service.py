@@ -408,7 +408,7 @@ class OrderStockAvailabilityService:
 
     # Open orders that still have to consume stock (a completed/canceled order
     # drops out automatically — its demand becomes a SALE in the ledger).
-    OPEN_DEMAND_STATUSES = ('confirmed', 'preparing')
+    OPEN_DEMAND_STATUSES = ('confirmed', 'packaging')
 
     @classmethod
     def open_order_demand(cls, *, orders=None, channel_id=None):
@@ -416,7 +416,7 @@ class OrderStockAvailabilityService:
 
         Sums the pack-aware required quantities (``_required_customer_quantities``
         — packs are expanded to their components) over every order whose clean
-        ``order_status`` is still open (confirmed / preparing), then compares the
+        ``status`` is still open (confirmed / packaging), then compares the
         total against available stock. ``orders`` may be a pre-scoped queryset
         (e.g. the viewset's tenant-scoped one); ``channel_id`` narrows both the
         orders and the availability to one channel.
@@ -430,7 +430,7 @@ class OrderStockAvailabilityService:
 
         if orders is None:
             orders = Order.objects.all()
-        orders = orders.filter(order_status__in=cls.OPEN_DEMAND_STATUSES)
+        orders = orders.filter(status__in=cls.OPEN_DEMAND_STATUSES)
         if channel_id:
             orders = orders.filter(sales_channel_id=channel_id)
 
@@ -494,14 +494,20 @@ class OrderStockReservationService:
         return order.source in cls._RESERVING_SOURCES and bool(order.sales_channel_id)
 
     @classmethod
-    def reserve(cls, order: Order, *, actor=None) -> None:
+    def reserve(cls, order: Order, *, actor=None, force: bool = False) -> None:
         """Reserve stock for the order's stock-bearing lines on its sales channel.
 
         Idempotent — a no-op when the order already holds a reservation or is not
-        a reserving order. Raises ``LifecycleError`` (blocking the confirm) when
-        any line's available stock is insufficient, so a confirmed order always
-        owns its stock. The order row is locked and its reservation state is read
-        from the DB, so a stale in-memory ``order`` can never double-reserve.
+        a reserving order. By default raises ``LifecycleError`` (blocking the
+        confirm) when any line's available stock is insufficient, so a confirmed
+        order always owns its stock.
+
+        ``force=True`` turns the shortfall into a **best-effort backorder**: the
+        order is still reserved (available may go negative), no exception is
+        raised, and the oversell is recorded on the movement note. Used when the
+        operator has explicitly acknowledged the missing-stock warning. The order
+        row is locked and its reservation state is read from the DB, so a stale
+        in-memory ``order`` can never double-reserve.
         """
         if not cls.should_reserve(order):
             return
@@ -532,7 +538,10 @@ class OrderStockReservationService:
                         shortfalls.append(
                             (info.get('product_name') or f'product #{product_id}', needed, available)
                         )
-                if shortfalls:
+                # Without force, a shortfall blocks the confirm. With force, we
+                # continue and reserve anyway (backorder) — the operator already
+                # acknowledged the warning popup.
+                if shortfalls and not force:
                     from apps.orders.lifecycle_service import LifecycleError
                     detail = '; '.join(
                         f'{name} (need {req}, available {av})'
@@ -542,10 +551,16 @@ class OrderStockReservationService:
                         f'Cannot confirm — stock is no longer available to reserve: {detail}.'
                     )
                 for product_id, needed in required.items():
-                    inv = inventories[product_id]
+                    inv = inventories.get(product_id)
+                    if inv is None:
+                        # No inventory row on this channel (untracked product) —
+                        # nothing to reserve. Only reachable under force.
+                        continue
                     reserved_before = inv.reserved_quantity
+                    available_before = inv.available_quantity
                     inv.reserved_quantity += needed
                     inv.save(update_fields=['reserved_quantity', 'updated_at'])
+                    oversold = max(0, needed - max(0, available_before))
                     # Ledger entry so the reservation is visible in the movements
                     # list. On-hand is unchanged (before == after) — only
                     # reserved_quantity moved (shown in the note).
@@ -561,6 +576,7 @@ class OrderStockReservationService:
                         notes=(
                             f'Reserved for order {locked.order_number} '
                             f'(reserved {reserved_before}→{inv.reserved_quantity})'
+                            + (f' — BACKORDER, oversold {oversold}' if oversold else '')
                         ),
                         created_by=actor,
                         completed_at=timezone.now(),

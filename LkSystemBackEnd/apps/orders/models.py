@@ -13,11 +13,13 @@ Changelog (v2):
 """
 
 import random
+import re
 from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
 from django.core.exceptions import ValidationError
+from django.core.validators import RegexValidator
 from django.utils import timezone
 
 
@@ -56,14 +58,23 @@ class Order(models.Model):
     """
 
     # ── Order Status ─────────────────────────────────────────────────────────
+    # ── THE canonical order lifecycle ─────────────────────────────────────────
+    # The ONLY lifecycle field. Written exclusively through
+    # OrderStatusService.transition() (validated + audited). Pipeline:
+    #   new → confirmed → packaging → done → returned
+    # Side flows: new/confirmed ↔ delayed / not_answered (see the matrix);
+    # canceled is reachable from every non-terminal state. returned and
+    # canceled are terminal. payment_status / sync_status / delivery
+    # references stay separate technical fields and never drive this.
     class Status(models.TextChoices):
-        PENDING    = 'PENDING',    'Pending'
-        PROCESSING = 'PROCESSING', 'Processing'
-        ON_HOLD    = 'ON_HOLD',    'On Hold'
-        COMPLETED  = 'COMPLETED',  'Completed'
-        CANCELLED  = 'CANCELLED',  'Cancelled'
-        REFUNDED   = 'REFUNDED',   'Refunded'
-        FAILED     = 'FAILED',     'Failed'
+        NEW          = 'new',          'New'
+        CONFIRMED    = 'confirmed',    'Confirmed'
+        NOT_ANSWERED = 'not_answered', 'Not Answered'
+        DELAYED      = 'delayed',      'Delayed'
+        PACKAGING    = 'packaging',    'Packaging'
+        DONE         = 'done',         'Done'
+        RETURNED     = 'returned',     'Returned'
+        CANCELED     = 'canceled',     'Canceled'
 
     # ── Source ───────────────────────────────────────────────────────────────
     class Source(models.TextChoices):
@@ -94,57 +105,6 @@ class Order(models.Model):
         FIXED      = 'FIXED',      'Fixed Amount'
         PERCENTAGE = 'PERCENTAGE', 'Percentage'
 
-    # ── Order Outcome ─────────────────────────────────────────────────────────
-    class Outcome(models.TextChoices):
-        NONE      = 'NONE',      'No Outcome'
-        CONFIRMED = 'CONFIRMED', 'Confirmed'
-        DELAYED   = 'DELAYED',   'Delayed'
-        CANCELLED = 'CANCELLED', 'Cancelled'
-
-    # ── Customer contact state ───────────────────────────────────────────────
-    class ContactStatus(models.TextChoices):
-        NONE         = 'NONE',         'Not Contacted'
-        ANSWERED     = 'ANSWERED',     'Answered'
-        NOT_ANSWERED = 'NOT_ANSWERED', 'Not Answered'
-        DELAYED      = 'DELAYED',      'Delayed'
-
-    # ── Delivery Status ──────────────────────────────────────────────────────
-    class DeliveryStatus(models.TextChoices):
-        NONE       = 'NONE',       'Not Applicable'
-        PENDING    = 'PENDING',    'Pending Submission'
-        QUEUED     = 'QUEUED',     'Queued for Delivery'
-        SUBMITTED  = 'SUBMITTED',  'Submitted to Provider'
-        ACCEPTED   = 'ACCEPTED',   'Accepted by Provider'
-        IN_TRANSIT = 'IN_TRANSIT', 'In Transit'
-        DELIVERED  = 'DELIVERED',  'Delivered'
-        FAILED     = 'FAILED',     'Delivery Failed'
-        CANCELLED  = 'CANCELLED',  'Delivery Cancelled'
-        RETURNED   = 'RETURNED',   'Returned to Sender'
-
-    # ── Return / exchange state ──────────────────────────────────────────────
-    class ReturnExchangeStatus(models.TextChoices):
-        NONE      = 'NONE',      'None'
-        RETURNED  = 'RETURNED',  'Returned'
-        EXCHANGED = 'EXCHANGED', 'Exchanged'
-
-    # ── Packaging step (separate from POS validation) ────────────────────────
-    class PackagingStatus(models.TextChoices):
-        NOT_PACKAGED = 'NOT_PACKAGED', 'Not Packaged'
-        PACKAGED     = 'PACKAGED',     'Packaged'
-        UPDATED      = 'UPDATED',      'Packaging Updated'
-
-    # ── Final terminal outcome (drives KPI counters) ─────────────────────────
-    # `outcome` is the call/confirmation result; `final_outcome` is the
-    # post-delivery sales result. These are intentionally distinct.
-    class FinalOutcome(models.TextChoices):
-        NONE                      = 'NONE',                      'Pending'
-        SUCCESSFUL_SALE           = 'SUCCESSFUL_SALE',           'Successful Sale'
-        RETURNED                  = 'RETURNED',                  'Returned'
-        EXCHANGED                 = 'EXCHANGED',                 'Exchanged'
-        CANCELLED_BEFORE_DELIVERY = 'CANCELLED_BEFORE_DELIVERY', 'Cancelled Before Delivery'
-        CANCELLED_AFTER_DELIVERY  = 'CANCELLED_AFTER_DELIVERY',  'Cancelled After Delivery'
-        FAILED_DELIVERY           = 'FAILED_DELIVERY',           'Failed Delivery'
-
     # ── Structured return classification ─────────────────────────────────────
     class ReturnType(models.TextChoices):
         NONE              = 'NONE',              'None'
@@ -154,44 +114,6 @@ class Order(models.Model):
         DAMAGED           = 'DAMAGED',           'Damaged on Arrival'
         MISSING           = 'MISSING',           'Missing Product'
         OTHER             = 'OTHER',             'Other'
-
-    # ── Unified workflow status (10-state derived field for the orders UI) ───
-    # This is the single source of truth for the orders page tabs and the row
-    # status badge. It is derived from the other status fields by the
-    # lifecycle service — never written directly by API clients.
-    class WorkflowStatus(models.TextChoices):
-        PENDING          = 'pending',          'Pending'
-        ANSWERED         = 'answered',         'Answered'
-        NOT_ANSWERED     = 'not_answered',     'Not Answered'
-        DELAYED          = 'delayed',          'Delayed'
-        SENT_TO_DELIVERY = 'sent_to_delivery', 'Sent to Delivery'
-        PACKAGING        = 'packaging',        'Packaging'
-        DONE             = 'done',             'Done'
-        RETOUR           = 'retour',           'Retour'
-        CANCELLED        = 'cancelled',        'Cancelled'
-        CHANGED          = 'changed',          'Changed'
-
-    # ── NEW top-layer status enums (Phase B, additive) ───────────────────────
-    # Back the clean public status fields the UI reads. Persisted-but-derived:
-    # the lifecycle service is the only writer (see apps/orders/STATUS_MAP.md).
-    class OrderStatus(models.TextChoices):
-        NEW                   = 'new',                   'New'
-        AWAITING_CONFIRMATION = 'awaiting_confirmation', 'Awaiting Confirmation'
-        CONFIRMED             = 'confirmed',             'Confirmed'
-        DELAYED               = 'delayed',               'Delayed'
-        NOT_ANSWERED          = 'not_answered',          'Not Answered'
-        CANCELED              = 'canceled',              'Canceled'
-        PREPARING             = 'preparing',             'Preparing'
-        DONE                  = 'done',                  'Done'
-        RETURNED              = 'returned',              'Returned'
-        EXCHANGED             = 'exchanged',             'Exchanged'
-
-    class ConfirmationStatus(models.TextChoices):
-        PENDING   = 'pending',   'Pending'
-        ACCEPTED  = 'accepted',  'Accepted'
-        DELAYED   = 'delayed',   'Delayed'
-        CANCELED  = 'canceled',  'Canceled'
-        NO_ANSWER = 'no_answer', 'No Answer'
 
     class DeliveryMethod(models.TextChoices):
         HOME_DELIVERY = 'home_delivery', 'Home Delivery'
@@ -243,6 +165,49 @@ class Order(models.Model):
 
     # ── Identity ─────────────────────────────────────────────────────────────
     order_number = models.CharField(max_length=50)
+    invoice_number = models.CharField(
+        max_length=32,
+        blank=True,
+        default='',
+        db_index=True,
+        validators=[
+            RegexValidator(
+                regex=r'^\d{4}/\d+$',
+                message='Invoice number must use the format year/number, for example 2026/001.',
+            ),
+        ],
+        help_text='Sequential invoice identifier in year/number format.',
+    )
+    invoice_date = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text='Accounting date chosen when the invoice is issued.',
+    )
+    invoice_client_name = models.CharField(max_length=255, blank=True, default='')
+    invoice_client_type = models.CharField(
+        max_length=10,
+        choices=[('PERSON', 'Person'), ('COMPANY', 'Company')],
+        blank=True,
+        default='PERSON',
+    )
+    invoice_client_matricule_fiscale = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+    )
+    invoice_client_phone = models.CharField(max_length=30, blank=True, default='')
+    invoice_client_email = models.EmailField(blank=True, default='')
+    invoice_client_address = models.CharField(max_length=255, blank=True, default='')
+    invoice_client_city = models.CharField(max_length=100, blank=True, default='')
+    invoice_issued_at = models.DateTimeField(null=True, blank=True)
+    invoice_issued_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='issued_order_invoices',
+    )
     ticket_id = models.CharField(
         max_length=80,
         blank=True,
@@ -272,9 +237,16 @@ class Order(models.Model):
         db_index=True,
     )
 
-    # ── Status ───────────────────────────────────────────────────────────────
+    # ── THE canonical lifecycle status ───────────────────────────────────────
     status = models.CharField(
-        max_length=20, choices=Status.choices, default=Status.PENDING,
+        max_length=24, choices=Status.choices, default=Status.NEW, db_index=True,
+    )
+    status_changed_at = models.DateTimeField(null=True, blank=True)
+    status_changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='orders_status_changed',
     )
     source = models.CharField(
         max_length=20, choices=Source.choices, default=Source.MANUAL,
@@ -295,6 +267,10 @@ class Order(models.Model):
     subtotal       = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.00'))
     tax_total      = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.00'))
     shipping_total = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.00'))
+    # Optional flat delivery fee chosen at manual / POS order creation (default
+    # 7 TND on the form). Unlike ``shipping_total`` (synced from WooCommerce),
+    # this is a cashier-chosen charge and IS rolled into ``total`` below.
+    delivery_fee   = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.00'))
     discount_type  = models.CharField(
         max_length=20, choices=DiscountType.choices, default=DiscountType.NONE,
     )
@@ -318,6 +294,7 @@ class Order(models.Model):
     # ── Shipping Address ──────────────────────────────────────────────────────
     shipping_first_name = models.CharField(max_length=150, blank=True, default='')
     shipping_last_name  = models.CharField(max_length=150, blank=True, default='')
+    shipping_phone      = models.CharField(max_length=30, blank=True, default='')
     shipping_address_1  = models.CharField(max_length=255, blank=True, default='')
     shipping_city       = models.CharField(max_length=100, blank=True, default='')
     shipping_state      = models.CharField(max_length=100, blank=True, default='')
@@ -350,13 +327,7 @@ class Order(models.Model):
         help_text='Last time this order was successfully synced from WooCommerce',
     )
 
-    # ── Order Outcome (Confirmed / Delayed / Cancelled) ──────────────────────
-    outcome = models.CharField(
-        max_length=20,
-        choices=Outcome.choices,
-        default=Outcome.NONE,
-        db_index=True,
-    )
+    # ── Confirmation / delay / cancel metadata (audit only, not lifecycle) ───
     confirmed_at = models.DateTimeField(null=True, blank=True)
     delay_date   = models.DateField(
         null=True, blank=True,
@@ -375,14 +346,6 @@ class Order(models.Model):
         null=True, blank=True,
         related_name='order_outcomes',
     )
-    contact_status = models.CharField(
-        max_length=20,
-        choices=ContactStatus.choices,
-        default=ContactStatus.NONE,
-        db_index=True,
-        help_text='Customer contact result, separate from WooCommerce/order/delivery statuses.',
-    )
-
     # ── POS / pickup lifecycle ───────────────────────────────────────────────
     in_store_pickup = models.BooleanField(default=False, db_index=True)
     pos_sales_channel = models.ForeignKey(
@@ -407,13 +370,7 @@ class Order(models.Model):
         related_name='orders_pos_validated',
     )
 
-    # ── Delivery tracking ─────────────────────────────────────────────────────
-    delivery_status = models.CharField(
-        max_length=20,
-        choices=DeliveryStatus.choices,
-        default=DeliveryStatus.NONE,
-        db_index=True,
-    )
+    # ── Delivery tracking (technical metadata only — never lifecycle) ────────
     delivery_reference = models.CharField(
         max_length=100, blank=True, default='',
         help_text='External delivery provider reference number',
@@ -468,13 +425,6 @@ class Order(models.Model):
     # online / manual-delivery orders, released at completion or cancellation).
     # Idempotency flag for OrderStockReservationService.reserve/release.
     stock_reserved = models.BooleanField(default=False, db_index=True)
-    return_exchange_status = models.CharField(
-        max_length=20,
-        choices=ReturnExchangeStatus.choices,
-        default=ReturnExchangeStatus.NONE,
-        db_index=True,
-        help_text='Explicit return/exchange state used for reporting and counters.',
-    )
     return_type = models.CharField(
         max_length=24,
         choices=ReturnType.choices,
@@ -482,39 +432,13 @@ class Order(models.Model):
         help_text='Structured return classification, drives stock-restoration rules.',
     )
 
-    # ── Packaging step ───────────────────────────────────────────────────────
-    packaging_status = models.CharField(
-        max_length=24,
-        choices=PackagingStatus.choices,
-        default=PackagingStatus.NOT_PACKAGED,
-        db_index=True,
-        help_text='Tracks the packaging operator step (separate from POS validation).',
-    )
+    # ── Packaging step (audit metadata; the lifecycle stage lives in status) ─
     packaged_at = models.DateTimeField(null=True, blank=True)
     packaged_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name='orders_packaged',
-    )
-
-    # ── Final outcome (KPI source of truth) ──────────────────────────────────
-    final_outcome = models.CharField(
-        max_length=32,
-        choices=FinalOutcome.choices,
-        default=FinalOutcome.NONE,
-        db_index=True,
-        help_text='Terminal sales-result for KPIs. Derived from delivery/return state by lifecycle service.',
-    )
-
-    # ── Unified workflow status (UI source of truth) ─────────────────────────
-    # Persisted-but-derived. Lifecycle service is the only writer.
-    workflow_status = models.CharField(
-        max_length=24,
-        choices=WorkflowStatus.choices,
-        default=WorkflowStatus.PENDING,
-        db_index=True,
-        help_text='10-state main workflow status used by the orders UI tabs and row badge.',
     )
 
     # ── Not-answered tracking for the auto-cancel scheduler ──────────────────
@@ -543,19 +467,7 @@ class Order(models.Model):
         help_text='Points granted (saved so we can reverse the exact amount on return/cancel).',
     )
 
-    # ── NEW top-layer status fields (Phase B, additive) ──────────────────────
-    # Clean public status the UI/API read. Persisted-but-derived: written only
-    # by the lifecycle service (Phase C). Defaults are safe placeholders so
-    # existing saves and the test suite are unaffected. See STATUS_MAP.md.
-    order_status = models.CharField(
-        max_length=24, choices=OrderStatus.choices, default=OrderStatus.NEW,
-        help_text='Clean business-lifecycle status (the single status the UI shows).',
-    )
-    confirmation_status = models.CharField(
-        max_length=16, choices=ConfirmationStatus.choices,
-        default=ConfirmationStatus.PENDING,
-        help_text='Confirmation-team result, separate from order_status.',
-    )
+    # ── Derived informational fields (never lifecycle) ───────────────────────
     delivery_method = models.CharField(
         max_length=16, choices=DeliveryMethod.choices,
         default=DeliveryMethod.HOME_DELIVERY,
@@ -660,14 +572,22 @@ class Order(models.Model):
                 condition=~models.Q(ticket_id=''),
                 name='unique_order_ticket_id_per_company',
             ),
+            models.UniqueConstraint(
+                fields=['company', 'invoice_number'],
+                condition=~models.Q(invoice_number=''),
+                name='unique_invoice_number_per_company',
+            ),
             models.CheckConstraint(
                 check=models.Q(discount_value__gte=Decimal('0.00')),
                 name='order_discount_value_gte_zero',
             ),
         ]
         indexes = [
-            models.Index(fields=['company', 'is_deleted']),
-            models.Index(fields=['company', 'status']),
+            # The canonical lifecycle queue: every tab/list query hits this.
+            models.Index(fields=['company', 'status', '-created_at'], name='order_status_created_idx'),
+            models.Index(fields=['company', 'is_deleted', '-created_at'], name='order_active_created_idx'),
+            models.Index(fields=['company', 'payment_status'], name='order_payment_status_idx'),
+            models.Index(fields=['company', 'sync_status'], name='order_sync_status_idx'),
             models.Index(fields=['company', 'external_order_id']),
             models.Index(fields=['company', 'ticket_id'], name='order_ticket_idx'),
             models.Index(fields=['company', 'client_ticket_uuid'], name='order_client_ticket_idx'),
@@ -675,28 +595,38 @@ class Order(models.Model):
             models.Index(fields=['order_number']),
             models.Index(fields=['is_deleted']),
             models.Index(fields=['synced_at']),
-            models.Index(fields=['delivery_status']),
-            models.Index(fields=['company', 'outcome', 'delivery_status'], name='order_lifecycle_priority_idx'),
-            models.Index(fields=['company', 'contact_status', 'delay_date'], name='order_contact_delay_idx'),
-            models.Index(fields=['company', 'return_exchange_status'], name='order_return_exchange_idx'),
-            models.Index(fields=['company', 'final_outcome'], name='order_final_outcome_idx'),
-            models.Index(fields=['company', 'packaging_status'], name='order_packaging_status_idx'),
-            models.Index(fields=['company', 'workflow_status'], name='order_workflow_status_idx'),
-            models.Index(fields=['company', 'order_status'], name='order_order_status_idx'),
-            models.Index(fields=['company', 'sync_status'], name='order_sync_status_idx'),
             models.Index(fields=['company', 'priority_level'], name='order_priority_idx'),
-            models.Index(fields=['company', 'contact_status', 'not_answered_at'], name='order_not_answered_at_idx'),
             models.Index(fields=['company', 'in_store_pickup'], name='order_pickup_idx'),
             models.Index(fields=['company', 'pos_sales_channel'], name='order_pos_channel_idx'),
             models.Index(fields=['company', 'stock_restored_at'], name='order_stock_restore_idx'),
             models.Index(fields=['company', 'edit_lock_expires_at'], name='order_edit_lock_idx'),
-            models.Index(fields=['outcome'], name='sales_order_outcome_idx'),
             # Composite index for incremental sync queries
             models.Index(fields=['sales_channel', 'wc_date_modified']),
         ]
 
     def __str__(self):
         return f"Order {self.order_number} ({self.get_status_display()})"
+
+    @classmethod
+    def next_invoice_number(cls, company_id: int, year: int | None = None) -> str:
+        """Return the next company-wide invoice number.
+
+        Callers that persist the result must hold a row lock on the Company.
+        Reading the existing values in Python keeps this portable across the
+        PostgreSQL production database and the SQLite test database.
+        """
+        target_year = year or timezone.localdate().year
+        prefix = f'{target_year}/'
+        highest = 0
+        for value in (
+            cls.all_objects
+            .filter(company_id=company_id, invoice_number__startswith=prefix)
+            .values_list('invoice_number', flat=True)
+        ):
+            match = re.fullmatch(r'(\d{4})/(\d+)', value or '')
+            if match and int(match.group(1)) == target_year:
+                highest = max(highest, int(match.group(2)))
+        return f'{target_year}/{highest + 1:03d}'
 
     def save(self, *args, **kwargs):
         if not self.order_number:
@@ -707,8 +637,9 @@ class Order(models.Model):
             ts = timezone.localdate().strftime('%d%m%Y')
             suffix = random.randint(1000, 9999)
             self.ticket_id = f"{ts}{suffix}"
+
         self.full_clean()
-        super().save(*args, **kwargs)
+        return super().save(*args, **kwargs)
 
     def clean(self):
         if self.discount_type == self.DiscountType.PERCENTAGE:
@@ -717,10 +648,7 @@ class Order(models.Model):
                     {'discount_value': 'Percentage discount must be between 0 and 100.'}
                 )
 
-        if (
-            self.outcome == self.Outcome.DELAYED
-            or self.contact_status == self.ContactStatus.DELAYED
-        ) and not self.delay_date:
+        if self.status == self.Status.DELAYED and not self.delay_date:
             raise ValidationError({'delay_date': 'Delay date is required for delayed orders.'})
 
         if (self.client_id and self.company_id
@@ -818,7 +746,8 @@ class Order(models.Model):
             discount_total = (lines_total * self.discount_value) / Decimal('100.00')
 
         discount_total = min(discount_total, lines_total)
-        total          = max(Decimal('0.00'), lines_total - discount_total)
+        delivery_fee   = max(Decimal('0.00'), self.delivery_fee or Decimal('0.00'))
+        total          = max(Decimal('0.00'), lines_total - discount_total) + delivery_fee
 
         self.subtotal       = subtotal
         self.tax_total      = tax_total
@@ -844,15 +773,44 @@ class Order(models.Model):
     def can_submit_delivery(self) -> bool:
         """True when this order is eligible to be sent to the delivery provider."""
         return (
-            self.outcome == self.Outcome.CONFIRMED
-            and self.delivery_status in (
-                self.DeliveryStatus.NONE,
-                self.DeliveryStatus.PENDING,
-                self.DeliveryStatus.FAILED,
-            )
-            and self.return_exchange_status == self.ReturnExchangeStatus.NONE
+            self.status == self.Status.CONFIRMED
+            and not self.delivery_reference
+            and not self.in_store_pickup
             and not self.is_deleted
         )
+
+    # ── Delivery contact (single source of truth) ─────────────────────────────
+    # The person who actually RECEIVES the parcel. Customers routinely order
+    # for someone else (different name / phone / address), so operators and the
+    # delivery provider must see the shipping block first and fall back to the
+    # order's billing snapshot — never the linked Client record.
+
+    @property
+    def delivery_name(self) -> str:
+        """Recipient name — shipping contact first, billing snapshot fallback."""
+        return (
+            f'{self.shipping_first_name} {self.shipping_last_name}'.strip()
+            or f'{self.billing_first_name} {self.billing_last_name}'.strip()
+        )
+
+    @property
+    def delivery_phone(self) -> str:
+        """Recipient phone — shipping phone first, billing snapshot fallback."""
+        return self.shipping_phone or self.billing_phone
+
+    @property
+    def delivery_address(self) -> str:
+        """Recipient address as one display line. Uses the shipping block when
+        any of its parts are filled (avoids mixing shipping street with billing
+        city), otherwise the billing block."""
+        has_shipping = bool(
+            self.shipping_address_1 or self.shipping_city or self.shipping_state
+        )
+        if has_shipping:
+            parts = [self.shipping_address_1, self.shipping_city, self.shipping_state]
+        else:
+            parts = [self.billing_address_1, self.billing_city, self.billing_state]
+        return ', '.join(p for p in parts if p)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1179,15 +1137,16 @@ class OrderSyncEvent(models.Model):
 # ═════════════════════════════════════════════════════════════════════════════
 
 def default_wc_status_map() -> dict:
-    """Default local ``order_status`` → WooCommerce status map (decision 13)."""
+    """Default canonical ``status`` → WooCommerce status map (decision 13).
+
+    ``new`` / ``delayed`` / ``not_answered`` have no mapping and never push.
+    """
     return {
-        'awaiting_confirmation': 'on-hold',
         'confirmed': 'processing',
-        'preparing': 'processing',
+        'packaging': 'processing',
         'done': 'completed',
-        'canceled': 'cancelled',
         'returned': 'refunded',
-        'exchanged': 'processing',
+        'canceled': 'cancelled',
     }
 
 

@@ -1,27 +1,52 @@
 /**
- * Shared, presentation-only badges for the Phase D "clean" order status surface.
+ * Presentation for THE canonical order lifecycle (``order.status``).
  *
- * The backend lifecycle service is the single writer of the derived
- * ``order_status`` and ``sync_status`` fields; these components only render
- * them. Extracted into a leaf module so both the orders list (OrdersPage) and
- * the order detail dialog (OrderDialogs) render an identical, single-sourced
- * status chip — no palette duplication, no circular import.
+ * Eight states: new → confirmed → packaging → done → returned, with
+ * not_answered / delayed side states and canceled reachable from every
+ * non-terminal state. One hue per state drives the chip AND the row tint so
+ * the queue reads at a glance. payment_status / sync_status stay secondary
+ * badges. Leaf module — OrdersPage and OrderDialogs render identical chips.
  */
 import { Badge } from '@/components/ui/badge';
 
-// Clean order_status palette (the single canonical lifecycle status).
-export const CLEAN_STATUS_STYLES: Record<string, string> = {
-  new:                   'bg-slate-100 text-slate-700',
-  awaiting_confirmation: 'bg-amber-100 text-amber-800',
-  confirmed:             'bg-blue-100 text-blue-800',
-  delayed:               'bg-orange-100 text-orange-800',
-  not_answered:          'bg-rose-100 text-rose-800',
-  canceled:              'bg-red-100 text-red-800',
-  preparing:             'bg-violet-100 text-violet-800',
-  done:                  'bg-emerald-100 text-emerald-800',
-  returned:              'bg-purple-100 text-purple-800',
-  exchanged:             'bg-indigo-100 text-indigo-800',
+// Chip palette (saturated): new=slate, confirmed=blue, not_answered=orange,
+// delayed=amber, packaging=purple, done=emerald, returned=rose, canceled=red.
+export const ORDER_STATUS_STYLES: Record<string, string> = {
+  new:          'bg-slate-100 text-slate-700',
+  confirmed:    'bg-blue-100 text-blue-800',
+  not_answered: 'bg-orange-100 text-orange-800',
+  delayed:      'bg-amber-100 text-amber-800',
+  packaging:    'bg-purple-100 text-purple-800',
+  done:         'bg-emerald-100 text-emerald-800',
+  returned:     'bg-rose-100 text-rose-800',
+  canceled:     'bg-red-100 text-red-800',
 };
+
+// Soft per-status row tint for the orders table (same hue as the chip).
+export const ORDER_STATUS_ROW_STYLES: Record<string, string> = {
+  new:          'bg-slate-50/60 hover:bg-slate-100/60',
+  confirmed:    'bg-blue-50/60 hover:bg-blue-100/60',
+  not_answered: 'bg-orange-50/60 hover:bg-orange-100/60',
+  delayed:      'bg-amber-50/60 hover:bg-amber-100/60',
+  packaging:    'bg-purple-50/60 hover:bg-purple-100/60',
+  done:         'bg-emerald-50/50 hover:bg-emerald-100/50',
+  returned:     'bg-rose-50/60 hover:bg-rose-100/60',
+  canceled:     'bg-red-50/60 hover:bg-red-100/60',
+};
+
+export const orderStatusLabel = (status: string) =>
+  status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+// THE lifecycle chip.
+export function OrderStatusBadge({ status, label }: Readonly<{ status?: string; label?: string }>) {
+  if (!status) return null;
+  const styles = ORDER_STATUS_STYLES[status] ?? 'bg-slate-100 text-slate-700';
+  return (
+    <Badge variant="outline" className={`text-xs border-transparent font-semibold ${styles}`}>
+      {label || orderStatusLabel(status)}
+    </Badge>
+  );
+}
 
 // WooCommerce push-sync state colours (only shown when noteworthy).
 export const SYNC_STATUS_STYLES: Record<string, string> = {
@@ -30,20 +55,6 @@ export const SYNC_STATUS_STYLES: Record<string, string> = {
   synced:       'bg-emerald-100 text-emerald-800',
   sync_failed:  'bg-red-100 text-red-800',
 };
-
-export const cleanStatusLabel = (status: string) =>
-  status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-
-// The clean, derived order_status as the canonical lifecycle chip.
-export function CleanStatusBadge({ status, label }: Readonly<{ status?: string; label?: string }>) {
-  if (!status) return null;
-  const styles = CLEAN_STATUS_STYLES[status] ?? 'bg-slate-100 text-slate-700';
-  return (
-    <Badge variant="outline" className={`text-xs border-transparent font-semibold ${styles}`}>
-      {label || cleanStatusLabel(status)}
-    </Badge>
-  );
-}
 
 // WooCommerce push-sync state. 'imported' = nothing to push yet, so it is
 // hidden to avoid clutter; only in-flight/terminal states show.

@@ -65,7 +65,7 @@ class OrderIngestionError(Exception):
 WC_ALL_SYNCABLE_STATUSES = ['processing']
 
 # Statuses that should reserve/deduct finished product stock.
-WC_MOVEMENT_STATUSES = {Order.Status.COMPLETED}
+WC_MOVEMENT_STATUSES = {Order.Status.DONE}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -304,6 +304,26 @@ class OrderIngestionService:
             'subtotal', 'tax_total', 'discount_total', 'total', 'updated_at',
         ])
 
+        # 6b. Website terminal webhooks move the canonical lifecycle (forced,
+        # audited system events); the engine below then reverses/applies stock.
+        if (
+            not is_new
+            and order.status not in (
+                Order.Status.RETURNED, Order.Status.CANCELED,
+            )
+        ):
+            from apps.orders.status_service import OrderStatusService
+            wc_terminal = {
+                'cancelled': Order.Status.CANCELED,
+                'failed': Order.Status.CANCELED,
+                'refunded': Order.Status.RETURNED,
+            }.get(wc_status_lower if (wc_status_lower := (payload.get('status') or '').lower()) else '')
+            if wc_terminal:
+                OrderStatusService.transition(
+                    order, wc_terminal, actor=created_by,
+                    note=f'WooCommerce webhook: {payload.get("status")}', force=True,
+                )
+
         # 7. reconcile inventory movements for order status/line changes
         self._sync_inventory_movements(order, lines, sales_channel, created_by)
 
@@ -311,10 +331,10 @@ class OrderIngestionService:
         # - For new orders (any source): always increment
         # - For WooCommerce updates: increment if status changed to COMPLETED
         should_increment = (
-            (is_new and client) or 
-            (not is_new and client and source == Order.Source.WOOCOMMERCE 
-             and original_status != Order.Status.COMPLETED 
-             and order.status == Order.Status.COMPLETED)
+            (is_new and client) or
+            (not is_new and client and source == Order.Source.WOOCOMMERCE
+             and original_status != Order.Status.DONE
+             and order.status == Order.Status.DONE)
         )
         
         if should_increment:
@@ -714,11 +734,13 @@ class OrderIngestionService:
         wc_status = (payload.get('status') or '').lower()
         is_new_order = not order.pk
         order.wc_status = wc_status
-        if source == Order.Source.WOOCOMMERCE:
-            if is_new_order and not order.status:
-                order.status = Order.Status.PENDING
-        elif wc_status:
-            order.status = self._map_wc_status(wc_status)
+        if is_new_order and wc_status:
+            if source != Order.Source.WOOCOMMERCE and wc_status == 'completed':
+                # A till/manual sale completed at creation IS done — the stock
+                # engine keys the sale deduction on it.
+                order.status = Order.Status.DONE
+            else:
+                order.status = self._map_wc_status(wc_status)
 
         order.payment_method = (
             payload.get('payment_method_title', '')
@@ -745,6 +767,8 @@ class OrderIngestionService:
         shipping                    = payload.get('shipping', {})
         order.shipping_first_name   = shipping.get('first_name', '')
         order.shipping_last_name    = shipping.get('last_name', '')
+        # WooCommerce >= 5.6 exposes the recipient phone on the shipping block.
+        order.shipping_phone        = shipping.get('phone', '')
         order.shipping_address_1    = shipping.get('address_1', '')
         order.shipping_city         = shipping.get('city', '')
         order.shipping_state        = shipping.get('state', '')
@@ -753,6 +777,15 @@ class OrderIngestionService:
 
         order.customer_note   = payload.get('customer_note', '')
         order.shipping_total  = self._dec(payload.get('shipping_total'))
+        # Cashier-chosen flat delivery fee (POS / manual orders). WooCommerce
+        # payloads (webhook + REST sync) carry the courier fee as
+        # shipping_total instead, so fold it in — totals are recomputed from
+        # lines + delivery_fee, and without this the WC fee never reaches the
+        # order total.
+        delivery_fee = self._dec(payload.get('delivery_fee'))
+        if not delivery_fee and order.shipping_total:
+            delivery_fee = order.shipping_total
+        order.delivery_fee    = delivery_fee
 
         payload_discount_type  = str(payload.get('discount_type', '')).upper()
         payload_discount_value = self._dec(payload.get('discount_value'))
@@ -999,7 +1032,8 @@ class OrderIngestionService:
             discount_total = (lines_total * order.discount_value) / Decimal('100.00')
 
         discount_total = min(discount_total, lines_total)
-        total = max(Decimal('0.00'), lines_total - discount_total)
+        delivery_fee = max(Decimal('0.00'), order.delivery_fee or Decimal('0.00'))
+        total = max(Decimal('0.00'), lines_total - discount_total) + delivery_fee
 
         order.subtotal = subtotal.quantize(self._TWO_PLACES)
         order.tax_total = tax_total.quantize(self._TWO_PLACES)
@@ -1346,19 +1380,22 @@ class OrderIngestionService:
 
     # ─── WC status mapping ────────────────────────────────────────────────────
 
+    # WooCommerce -> canonical lifecycle (applied on CREATE only). Everything
+    # operational starts at ``new`` — completion is decided by OUR pipeline,
+    # not the website. Terminal website states land terminal locally.
     WC_STATUS_MAP = {
-        'pending':    Order.Status.PENDING,
-        'processing': Order.Status.PROCESSING,
-        'on-hold':    Order.Status.ON_HOLD,
-        'completed':  Order.Status.COMPLETED,
-        'cancelled':  Order.Status.CANCELLED,
-        'refunded':   Order.Status.REFUNDED,
-        'failed':     Order.Status.FAILED,
+        'pending':    Order.Status.NEW,
+        'processing': Order.Status.NEW,
+        'on-hold':    Order.Status.NEW,
+        'completed':  Order.Status.NEW,
+        'cancelled':  Order.Status.CANCELED,
+        'refunded':   Order.Status.RETURNED,
+        'failed':     Order.Status.CANCELED,
     }
 
     @classmethod
     def _map_wc_status(cls, wc_status: str) -> str:
-        return cls.WC_STATUS_MAP.get(wc_status, Order.Status.PENDING)
+        return cls.WC_STATUS_MAP.get(wc_status, Order.Status.NEW)
 
     @staticmethod
     def _map_payment_status(wc_status: str, payload: dict) -> str:

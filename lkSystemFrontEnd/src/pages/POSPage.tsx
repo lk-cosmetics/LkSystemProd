@@ -69,7 +69,8 @@ import { POSProductGrid } from './pos/POSProductGrid';
 import { POSCart } from './pos/POSCart';
 import { POSPostOrderDialog } from './pos/POSPostOrderDialog';
 import { POSReceiptPrint } from './pos/POSReceiptPrint';
-import { POSInvoicePrint } from './pos/POSInvoicePrint';
+import { InvoiceDocument, invoiceFromPOS, printInvoice } from '@/components/invoice';
+import { useCurrentCompany } from '@/hooks/queries/useCompanies';
 import { POSCameraScanner } from './pos/POSCameraScanner';
 import { POSAddClientDialog } from './pos/POSAddClientDialog';
 import { POSClientPromptDialog } from './pos/POSClientPromptDialog';
@@ -299,6 +300,9 @@ export default function POSPage() {
   /* ── Post-order flow ───────────────────────────────────────────────── */
   const [completedOrder, setCompletedOrder] = useState<OrderDetail | null>(null);
   const [printData, setPrintData] = useState<PrintableOrderData | null>(null);
+  // Current company's billing profile drives the invoice header (name,
+  // Matricule Fiscale, logo, footer…); falls back to the default logo.
+  const { data: invoiceCompany } = useCurrentCompany();
   const [printMode, setPrintMode] = useState<'receipt' | 'invoice' | null>(null);
 
   /* ── Mobile drawer ─────────────────────────────────────────────────── */
@@ -364,7 +368,9 @@ export default function POSPage() {
     setWaitingPOSLoading(true);
     try {
       const response = await orderService.getAll({
-        flow: 'waiting_pos',
+        // Waiting POS = routed to this till and not yet validated — exactly
+        // the canonical 'packaging' stage scoped to the POS channel.
+        status: 'packaging',
         pos_sales_channel: Number(channelId),
         page_size: 50,
         ordering: '-sent_to_pos_at,-created_at',
@@ -395,7 +401,7 @@ export default function POSPage() {
       // filtered by the canonical done status rather than POS source only.
       const response = await orderService.getAll({
         sales_channel: Number(channelId),
-        order_status: 'done',
+        status: 'done',
         search: debouncedPOSHistorySearch || undefined,
         created_from: posHistoryDateFrom || undefined,
         created_to: posHistoryDateTo || undefined,
@@ -1101,7 +1107,7 @@ export default function POSPage() {
   }, [clients, isMobile]);
 
   const handleSelectHistoryOrder = useCallback(async (order: OrderListItem) => {
-    if (order.returned_at || order.return_exchange_status === 'RETURNED' || order.status === 'REFUNDED') {
+    if (order.returned_at || order.status === 'returned') {
       setErrorMsg('This POS ticket is already returned and cannot be edited.');
       return;
     }
@@ -1152,7 +1158,7 @@ export default function POSPage() {
 
   const handleReturnHistoryOrder = useCallback(async (order: OrderListItem | OrderDetail) => {
     if (!order?.id || returningOrderId) return;
-    if (order.returned_at || order.return_exchange_status === 'RETURNED' || order.status === 'REFUNDED') {
+    if (order.returned_at || order.status === 'returned') {
       setErrorMsg('This POS ticket has already been returned.');
       return;
     }
@@ -1674,7 +1680,6 @@ export default function POSPage() {
           cancellation_reason: '',
           outcome_note: 'Offline POS checkout',
           outcome_changed_at: new Date().toISOString(),
-          delivery_status: 'NONE',
           delivery_reference: '',
           delivery_code: '',
           delivery_external_reference: '',
@@ -1825,12 +1830,34 @@ export default function POSPage() {
   /* ── Print handlers ────────────────────────────────────────────────── */
   const handlePrint = useCallback((mode: 'receipt' | 'invoice') => {
     setPrintMode(mode);
+    // Invoice printing needs the shared body-level clone created by
+    // printInvoice(). The effect below runs after React mounts InvoiceDocument.
+    if (mode === 'invoice') return;
+
+    // Body class switches on the matching print isolation (receipt → pos-print
+    // .css). Removed on afterprint (with a timeout fallback).
+    const cls = `lk-print-${mode}`;
+    document.body.classList.add(cls);
+    let done = false;
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      document.body.classList.remove(cls);
+      window.removeEventListener('afterprint', cleanup);
+    };
+    window.addEventListener('afterprint', cleanup);
+    setTimeout(cleanup, 60_000);
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         window.print();
       });
     });
   }, []);
+
+  useEffect(() => {
+    if (printMode !== 'invoice' || !printData) return;
+    printInvoice();
+  }, [printData, printMode]);
 
   const handlePrintReceipt = useCallback(async () => {
     if (!printData) {
@@ -2190,7 +2217,7 @@ export default function POSPage() {
         <POSReceiptPrint data={printData} />
       )}
       {printMode === 'invoice' && printData && (
-        <POSInvoicePrint data={printData} />
+        <InvoiceDocument data={invoiceFromPOS(printData, invoiceCompany ?? null)} />
       )}
     </>
   );

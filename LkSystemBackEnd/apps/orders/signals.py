@@ -18,11 +18,7 @@ def order_pre_save(sender, instance: Order, **kwargs):
     instance._previous_state = sender.all_objects.filter(pk=instance.pk).values(
         'status',
         'wc_status',
-        'delivery_status',
-        'contact_status',
-        'outcome',
         'delay_date',
-        'return_exchange_status',
         'subtotal',
         'tax_total',
         'discount_type',
@@ -58,11 +54,7 @@ def order_post_save(sender, instance: Order, created: bool, **kwargs):
     tracked_fields = [
         'status',
         'wc_status',
-        'delivery_status',
-        'contact_status',
-        'outcome',
         'delay_date',
-        'return_exchange_status',
         'subtotal',
         'tax_total',
         'discount_type',
@@ -85,12 +77,8 @@ def order_post_save(sender, instance: Order, created: bool, **kwargs):
         )
 
     action_by_field = {
-        'status': OrderLog.Action.LOCAL_STATUS_CHANGED,
         'wc_status': OrderLog.Action.WOOCOMMERCE_STATUS_CHANGED,
-        'delivery_status': OrderLog.Action.STATUS_CHANGED,
-        'contact_status': OrderLog.Action.CONTACT_STATUS_CHANGED,
         'delay_date': OrderLog.Action.DELAY_DATE_CHANGED,
-        'return_exchange_status': OrderLog.Action.RETURN_EXCHANGE_CHANGED,
     }
     for field, action in action_by_field.items():
         if field in changed:
@@ -120,12 +108,7 @@ def order_post_save(sender, instance: Order, created: bool, **kwargs):
             },
         )
 
-    if instance.client_id and (
-        'total' in changed
-        or 'status' in changed
-        or 'delivery_status' in changed
-        or 'return_exchange_status' in changed
-    ):
+    if instance.client_id and ('total' in changed or 'status' in changed):
         instance.client.recalculate_metrics()
 
 

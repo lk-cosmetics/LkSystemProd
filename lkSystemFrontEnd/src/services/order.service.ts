@@ -10,11 +10,6 @@ import type {
   POSOrderCreateRequest,
   OrderSummary,
   OrderStatus,
-  DeliveryStatus,
-  OrderOutcome,
-  OrderContactStatus,
-  OrderReturnExchangeStatus,
-  CleanOrderStatus,
   SalesChannel,
 } from '@/types';
 
@@ -22,12 +17,11 @@ export interface OrderListParams {
   company?: number;
   sales_channel?: number;
   brand?: number;
-  status?: OrderStatus;
+  /** Canonical lifecycle filter (?status=new|confirmed|...; comma union ok). */
+  status?: string;
   source?: string;
   payment_status?: string;
-  flow?: string;
-  /** Phase D — clean lifecycle status filter; single value or comma-separated group. */
-  order_status?: string;
+  priority_level?: 'high' | 'medium' | 'low';
   pos_sales_channel?: number;
   search?: string;
   created_from?: string;
@@ -39,17 +33,62 @@ export interface OrderListParams {
   include_deleted?: boolean;
 }
 
-export interface OrderStatusFieldsPayload {
-  status?: OrderStatus;
-  wc_status?: 'pending' | 'processing' | 'completed' | 'cancelled' | 'refunded' | 'failed' | 'on-hold';
-  delivery_status?: DeliveryStatus;
-  contact_status?: OrderContactStatus;
-  outcome?: OrderOutcome;
-  return_exchange_status?: OrderReturnExchangeStatus;
-  delay_date?: string | null;
-  delay_reason?: string;
-  internal_note?: string;
+export interface InvoiceListParams {
+  search?: string;
+  date_from?: string;
+  date_to?: string;
+  ordering?: 'invoice_number' | '-invoice_number' | 'date' | '-date' | 'total' | '-total' | 'client' | '-client';
+  page?: number;
+  page_size?: number;
 }
+
+export interface InvoiceListItem {
+  id: number;
+  invoice_number: string;
+  invoice_date: string;
+  order_number: string;
+  company: number;
+  company_name: string;
+  brand: number | null;
+  brand_name: string | null;
+  client_id: number | null;
+  client_name: string;
+  phone: string;
+  source: string;
+  payment_status: string;
+  currency: string;
+  total: string;
+  invoice_issued_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InvoiceMutationPayload {
+  invoice_number?: string;
+  invoice_date?: string;
+  invoice_client_name?: string;
+  invoice_client_type?: 'PERSON' | 'COMPANY';
+  invoice_client_matricule_fiscale?: string;
+  invoice_client_phone?: string;
+  invoice_client_email?: string;
+  invoice_client_address?: string;
+  invoice_client_city?: string;
+}
+
+export interface PaginatedInvoiceResponse {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: InvoiceListItem[];
+}
+
+export interface InvoiceSettings {
+  company: number | null;
+  year: number;
+  next_invoice_number: string | null;
+  detail?: string;
+}
+
 
 export interface OrderEditLockResponse {
   lock: {
@@ -140,11 +179,19 @@ function toPositiveInt(value: unknown, fallback: number) {
 }
 
 /** Per-line disposition for a structured return (drives the stock-movement matrix). */
+export interface ReturnComponentCondition {
+  product_id: number;
+  quantity: number;
+  condition: 'GOOD' | 'DAMAGED' | 'MISSING';
+}
+
 export interface ReturnLineCondition {
   line_id: number;
   /** GOOD → back to stock · DAMAGED → write-off · MISSING → no movement · EXCHANGED → restock + sell replacement. */
   condition: 'GOOD' | 'DAMAGED' | 'MISSING' | 'EXCHANGED';
   replacement_product_id?: number;
+  /** Pack-only split, allowing identical component units to have different outcomes. */
+  component_conditions?: ReturnComponentCondition[];
 }
 
 export interface ProcessReturnOptions {
@@ -182,6 +229,38 @@ export const orderService = {
     return data;
   },
 
+  /** Invoice registry backed directly by orders. */
+  async getInvoices(params?: InvoiceListParams) {
+    const { data } = await apiClient.get<PaginatedInvoiceResponse>(
+      '/api/v1/orders/invoices/',
+      { params },
+    );
+    return data;
+  },
+
+  async getInvoiceSettings() {
+    const { data } = await apiClient.get<InvoiceSettings>(
+      '/api/v1/orders/invoice-settings/',
+    );
+    return data;
+  },
+
+  async createInvoice(id: number, payload: InvoiceMutationPayload = {}) {
+    const { data } = await apiClient.post<OrderDetail>(
+      `/api/v1/orders/${id}/invoice/`,
+      payload,
+    );
+    return data;
+  },
+
+  async updateInvoice(id: number, payload: InvoiceMutationPayload) {
+    const { data } = await apiClient.patch<OrderDetail>(
+      `/api/v1/orders/${id}/invoice/`,
+      payload,
+    );
+    return data;
+  },
+
   /** POS / Manual order creation (Method B). */
   async createPOS(payload: POSOrderCreateRequest) {
     const { data } = await apiClient.post<OrderDetail>(
@@ -205,19 +284,20 @@ export const orderService = {
     return data;
   },
 
-  /** Patch order status. */
-  async updateStatus(id: number, status: OrderStatus, internalNote?: string) {
-    const { data } = await apiClient.patch<OrderDetail>(
-      `/api/v1/orders/${id}/status/`,
-      { status, internal_note: internalNote ?? '' }
-    );
-    return data;
-  },
-
-  async updateStatusFields(id: number, payload: OrderStatusFieldsPayload) {
-    const { data } = await apiClient.patch<OrderDetail>(
-      `/api/v1/orders/${id}/status/`,
-      payload
+  /**
+   * THE lifecycle move — POST /orders/{id}/transition/.
+   * The backend validates the move against the one transition matrix and
+   * runs the matching business side effects (confirm reserves stock, cancel
+   * releases it, return restores it, …). `delayed` needs `delay_date`.
+   */
+  async transitionStatus(
+    id: number,
+    status: OrderStatus,
+    options?: { note?: string; reason?: string; delay_date?: string },
+  ) {
+    const { data } = await apiClient.post<OrderDetail>(
+      `/api/v1/orders/${id}/transition/`,
+      { status, ...options }
     );
     return data;
   },
@@ -390,7 +470,7 @@ export const orderService = {
    * The backend re-validates the move against the live derived status and applies
    * the documented side-effects; this only sends the requested target + reason.
    */
-  async manualTransition(id: number, target: CleanOrderStatus, reason: string) {
+  async manualTransition(id: number, target: OrderStatus, reason: string) {
     const { data } = await apiClient.post<OrderDetail>(
       `/api/v1/orders/${id}/manual-transition/`,
       { target, reason }
@@ -453,9 +533,10 @@ export const orderService = {
     return data;
   },
 
-  async submitDelivery(id: number) {
+  async submitDelivery(id: number, opts?: { force?: boolean }) {
     const { data } = await apiClient.post(
-      `/api/v1/orders/${id}/submit-delivery/`
+      `/api/v1/orders/${id}/submit-delivery/`,
+      { force: opts?.force ?? false }
     );
     return data;
   },

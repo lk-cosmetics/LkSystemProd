@@ -14,13 +14,15 @@ These are new paid website orders that need internal confirmation/fulfilment.
 """
 
 import logging
+import re
 import uuid
 from datetime import timedelta
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 from django.db import transaction
-from django.db.models import Case, Count, IntegerField, Q, Value, When
+from django.db.models import Case, Count, F, IntegerField, Q, Value, When
+from django.db.models.functions import Replace
 from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -42,7 +44,7 @@ from .serializers import (
     OrderDetailSerializer,
     POSOrderCreateSerializer,
     ManualOrderCreateSerializer,
-    OrderStatusUpdateSerializer,
+    OrderTransitionSerializer,
     OrderEditLockSerializer,
     OrderEditSerializer,
     OrderLogSerializer,
@@ -58,6 +60,8 @@ from .serializers import (
     OrderReturnSerializer,
     OrderReturnLookupSerializer,
     OrderSyncEventSerializer,
+    InvoiceListSerializer,
+    InvoiceMutationSerializer,
 )
 from .filters import OrderFilterSet
 from .order_management_service import OrderManagementService
@@ -129,28 +133,31 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         so these annotations must be available for every Order queryset.
         """
         today = timezone.localdate()
+        S = Order.Status
         return qs.annotate(
             line_count=Count('lines', filter=Q(lines__is_deleted=False)),
+            business_priority_rank=Case(
+                When(priority_level=Order.PriorityLevel.HIGH, then=Value(0)),
+                When(priority_level=Order.PriorityLevel.MEDIUM, then=Value(1)),
+                default=Value(2),
+                output_field=IntegerField(),
+            ),
+            # Action urgency, ranked from the canonical six-state lifecycle:
+            # due delayed orders first, then the confirmation queue (new /
+            # not_answered), then fulfilment (POS routing waits, confirmed
+            # ready to ship, packaging in flight). Deleted rows always sink.
             lifecycle_priority=Case(
                 When(is_deleted=True, then=Value(99)),
                 When(
-                    Q(outcome=Order.Outcome.DELAYED) &
-                    Q(delay_date__lte=today),
+                    Q(status=S.DELAYED) & Q(delay_date__lte=today),
                     then=Value(0),
                 ),
                 When(
-                    Q(outcome=Order.Outcome.NONE) &
-                    ~Q(source=Order.Source.POS) &
-                    Q(status__in=[
-                        Order.Status.PENDING,
-                        Order.Status.PROCESSING,
-                        Order.Status.ON_HOLD,
-                        Order.Status.COMPLETED,
-                    ]),
+                    Q(status=S.NEW) & ~Q(source=Order.Source.POS),
                     then=Value(1),
                 ),
-                When(outcome=Order.Outcome.DELAYED, then=Value(2)),
-                When(in_store_pickup=True, sent_to_pos_at__isnull=True, then=Value(3)),
+                When(status=S.NOT_ANSWERED, then=Value(2)),
+                When(status=S.DELAYED, then=Value(3)),
                 When(
                     in_store_pickup=True,
                     sent_to_pos_at__isnull=False,
@@ -158,27 +165,40 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                     then=Value(4),
                 ),
                 When(
-                    Q(outcome=Order.Outcome.CONFIRMED) &
-                    ~Q(source=Order.Source.POS) &
-                    Q(delivery_status__in=[
-                        Order.DeliveryStatus.NONE,
-                        Order.DeliveryStatus.PENDING,
-                        Order.DeliveryStatus.FAILED,
-                    ]),
+                    Q(status=S.CONFIRMED) & ~Q(source=Order.Source.POS),
                     then=Value(5),
                 ),
+                When(status=S.PACKAGING, then=Value(6)),
                 default=Value(10),
                 output_field=IntegerField(),
             ),
         )
 
     @staticmethod
+    def _phone_digits(field: str):
+        """Expression that strips common separators from a phone column so it
+        can be compared digit-to-digit ("+216 24-512 995" -> "21624512995")."""
+        expr = F(field)
+        for ch in (' ', '-', '+', '(', ')', '.'):
+            expr = Replace(expr, Value(ch), Value(''))
+        return expr
+
+    @staticmethod
     def _apply_search(qs, term: str | None):
         """
         Single operational search box for staff.
 
-        Searches internal order id/order number, WooCommerce references, client
-        identity, and phone fields. Numeric terms also match the internal PK.
+        Searches order references (id / number / ticket / WooCommerce keys) and
+        the DELIVERY contact stored on the order itself: the shipping
+        (recipient) block first-class, plus the order's billing snapshot — the
+        recipient fallback for orders that never had a separate shipping block
+        (POS / manual orders). The linked Client record is deliberately NOT
+        searched: customers change the recipient name/phone/address per order,
+        so client-record matches surface the wrong orders.
+
+        Phone-looking terms are also compared digit-to-digit (separators and
+        the +216 country code stripped) so "+216 24 512 995", "24-512-995" and
+        "24512995" all find the same order. Numeric terms also match the PK.
         """
         search = (term or '').strip()
         if not search:
@@ -190,23 +210,46 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             Q(client_ticket_uuid__icontains=search) |
             Q(external_order_id__icontains=search) |
             Q(wc_order_key__icontains=search) |
+            # Delivery recipient (shipping block)
+            Q(shipping_first_name__icontains=search) |
+            Q(shipping_last_name__icontains=search) |
+            Q(shipping_phone__icontains=search) |
+            Q(shipping_address_1__icontains=search) |
+            Q(shipping_city__icontains=search) |
+            # Billing snapshot — the recipient fallback (POS / manual orders)
             Q(billing_first_name__icontains=search) |
             Q(billing_last_name__icontains=search) |
             Q(billing_email__icontains=search) |
             Q(billing_phone__icontains=search) |
-            Q(client__email__icontains=search) |
-            Q(client__first_name__icontains=search) |
-            Q(client__last_name__icontains=search) |
-            Q(client__phone__icontains=search)
+            Q(billing_address_1__icontains=search) |
+            Q(billing_city__icontains=search)
         )
 
+        # "first last" matches the recipient name across both blocks.
         parts = search.split()
         if len(parts) >= 2:
             first, last = parts[0], parts[-1]
             query |= (
-                Q(client__first_name__icontains=first, client__last_name__icontains=last) |
+                Q(shipping_first_name__icontains=first, shipping_last_name__icontains=last) |
                 Q(billing_first_name__icontains=first, billing_last_name__icontains=last)
             )
+
+        # Digit-to-digit phone matching, tolerant of separators and the
+        # Tunisian country code on either side.
+        digits = re.sub(r'\D', '', search)
+        if len(digits) >= 6:
+            candidates = {digits}
+            if digits.startswith('216') and len(digits) > 8:
+                candidates.add(digits[3:])
+            qs = qs.annotate(
+                _shipping_phone_digits=OrderViewSet._phone_digits('shipping_phone'),
+                _billing_phone_digits=OrderViewSet._phone_digits('billing_phone'),
+            )
+            for cand in candidates:
+                query |= (
+                    Q(_shipping_phone_digits__contains=cand) |
+                    Q(_billing_phone_digits__contains=cand)
+                )
 
         if search.isdigit():
             query |= Q(pk=int(search))
@@ -267,15 +310,20 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
     filter_backends     = [DjangoFilterBackend, OrderingFilter]
     filterset_class     = OrderFilterSet
     ordering_fields     = [
-        'id', 'order_number', 'created_at', 'updated_at',
-        'total', 'status', 'wc_status', 'source', 'payment_status', 'delivery_status',
-        'contact_status', 'return_exchange_status',
-        'outcome', 'lifecycle_priority', 'client__points',
-        'client__first_name', 'client__last_name', 'sales_channel__name',
-        # Phase D — the clean derived lifecycle fields are real columns now.
-        'order_status', 'sync_status', 'priority_level',
+        'id', 'order_number', 'invoice_number', 'created_at', 'updated_at',
+        'total', 'status', 'wc_status', 'source', 'payment_status',
+        'lifecycle_priority', 'business_priority_rank', 'client__points',
+        'client__first_name', 'client__last_name',
+        'billing_first_name', 'billing_last_name',
+        'shipping_first_name', 'shipping_last_name', 'sales_channel__name',
+        'sync_status', 'priority_level',
     ]
-    ordering            = ['lifecycle_priority', '-client__points', '-created_at']
+    ordering            = [
+        'lifecycle_priority',
+        'business_priority_rank',
+        '-client__points',
+        '-created_at',
+    ]
 
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -327,9 +375,11 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             self.request.query_params.get('include_deleted', '').lower() == 'true'
         )
         base_qs = Order.all_objects if include_deleted else Order.objects
+        # Every FK the list serializer reads must be joined here — a missing
+        # one (e.g. brand_name) silently costs one query PER ROW on every page.
         qs = base_qs.select_related(
-            'company', 'sales_channel', 'pos_sales_channel', 'client',
-            'created_by', 'deleted_by', 'packaged_by',
+            'company', 'brand', 'sales_channel', 'pos_sales_channel', 'client',
+            'created_by', 'deleted_by', 'packaged_by', 'edit_locked_by',
         )
         qs = self._with_queue_annotations(qs)
 
@@ -340,6 +390,199 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         if include_deleted:
             self._require_permission(self.request.user, 'view_soft_deleted_orders')
         return self._apply_search(qs, self.request.query_params.get('search'))
+
+    @action(detail=False, methods=['get'], url_path='invoices')
+    def invoices(self, request):
+        """Invoice registry backed by orders that have an invoice number."""
+        self._require_permission(request.user, 'view_invoices')
+        qs = Order.all_objects.exclude(invoice_number='').select_related(
+            'company', 'brand', 'client',
+        )
+        qs = self._scope_queryset(qs, request.user, 'view_invoices')
+
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            query = (
+                Q(invoice_number__icontains=search)
+                | Q(order_number__icontains=search)
+                | Q(invoice_client_name__icontains=search)
+                | Q(invoice_client_phone__icontains=search)
+                | Q(invoice_client_email__icontains=search)
+                | Q(invoice_client_matricule_fiscale__icontains=search)
+            )
+            qs = qs.filter(query)
+
+        date_from = request.query_params.get('date_from')
+        date_to = request.query_params.get('date_to')
+        if date_from:
+            qs = qs.filter(invoice_date__gte=date_from)
+        if date_to:
+            qs = qs.filter(invoice_date__lte=date_to)
+
+        allowed_ordering = {
+            'invoice_number': 'invoice_number',
+            '-invoice_number': '-invoice_number',
+            'date': 'invoice_date',
+            '-date': '-invoice_date',
+            'total': 'total',
+            '-total': '-total',
+            'client': 'invoice_client_name',
+            '-client': '-invoice_client_name',
+        }
+        ordering = allowed_ordering.get(
+            request.query_params.get('ordering', '-date'),
+            '-invoice_date',
+        )
+        qs = qs.order_by(ordering, '-id')
+
+        page = self.paginate_queryset(qs)
+        serializer = InvoiceListSerializer(page if page is not None else qs, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='invoice-settings')
+    def invoice_settings(self, request):
+        """Expose the next automatic number for the active company workspace."""
+        self._require_permission(request.user, 'view_invoices')
+        company_id = getattr(request.user, 'current_company_id', None)
+        if not company_id:
+            visible = self._scope_queryset(
+                Order.all_objects.all(),
+                request.user,
+                'view_invoices',
+            )
+            company_ids = list(
+                visible.order_by().values_list('company_id', flat=True).distinct()[:2]
+            )
+            if len(company_ids) == 1:
+                company_id = company_ids[0]
+
+        if not company_id:
+            return Response({
+                'company': None,
+                'year': timezone.localdate().year,
+                'next_invoice_number': None,
+                'detail': 'Select a company workspace to preview its next invoice number.',
+            })
+
+        return Response({
+            'company': company_id,
+            'year': timezone.localdate().year,
+            'next_invoice_number': Order.next_invoice_number(company_id),
+        })
+
+    @action(detail=True, methods=['post', 'patch'], url_path='invoice')
+    def manage_invoice(self, request, pk=None):
+        """Explicitly issue or edit the invoice snapshot stored on an order."""
+        order = self.get_object()
+        self._require_permission(request.user, 'edit_invoice_numbers', order)
+        creating = request.method == 'POST'
+        if creating and order.invoice_number:
+            return Response(
+                {'detail': 'This order already has an invoice.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not creating and not order.invoice_number:
+            return Response(
+                {'detail': 'Create the invoice before editing it.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = InvoiceMutationSerializer(
+            data=request.data,
+            partial=not creating,
+            context={'order': order},
+        )
+        serializer.is_valid(raise_exception=True)
+        values = serializer.validated_data
+
+        from apps.company.models import Company
+
+        with transaction.atomic():
+            Company.objects.select_for_update().get(pk=order.company_id)
+            invoice_date = values.get('invoice_date') or order.invoice_date or timezone.localdate()
+            invoice_number = (
+                values.get('invoice_number')
+                or order.invoice_number
+                or Order.next_invoice_number(order.company_id, invoice_date.year)
+            )
+            duplicate = Order.all_objects.filter(
+                company_id=order.company_id,
+                invoice_number=invoice_number,
+            ).exclude(pk=order.pk).exists()
+            if duplicate:
+                return Response(
+                    {'invoice_number': ['This invoice number is already used by another order.']},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if creating:
+                client_type = (
+                    getattr(order.client, 'client_type', '')
+                    if order.client else ''
+                ) or ('COMPANY' if order.billing_company else 'PERSON')
+                contact_name = f'{order.billing_first_name} {order.billing_last_name}'.strip()
+                client_name = (
+                    (order.billing_company or contact_name)
+                    if client_type == 'COMPANY'
+                    else contact_name
+                ) or (order.client.full_name if order.client else '')
+                defaults = {
+                    'invoice_client_name': client_name,
+                    'invoice_client_type': client_type,
+                    'invoice_client_matricule_fiscale': (
+                        getattr(order.client, 'matricule_fiscale', '') if client_type == 'COMPANY' else ''
+                    ),
+                    'invoice_client_phone': (
+                        order.billing_phone
+                        or order.shipping_phone
+                        or (order.client.phone if order.client else '')
+                    ),
+                    'invoice_client_email': (
+                        order.billing_email or (order.client.email if order.client else '')
+                    ),
+                    'invoice_client_address': order.billing_address_1,
+                    'invoice_client_city': order.billing_city,
+                }
+            else:
+                defaults = {}
+
+            editable_fields = [
+                'invoice_client_name', 'invoice_client_type',
+                'invoice_client_matricule_fiscale', 'invoice_client_phone',
+                'invoice_client_email', 'invoice_client_address', 'invoice_client_city',
+            ]
+            order.invoice_number = invoice_number
+            order.invoice_date = invoice_date
+            for field in editable_fields:
+                if field in values:
+                    setattr(order, field, values[field])
+                elif creating:
+                    setattr(order, field, defaults[field])
+            if creating:
+                order.invoice_issued_at = timezone.now()
+                order.invoice_issued_by = request.user
+            order._actor = request.user
+            update_fields = [
+                'invoice_number', 'invoice_date', *editable_fields, 'updated_at',
+            ]
+            if creating:
+                update_fields.extend(['invoice_issued_at', 'invoice_issued_by'])
+            order.save(update_fields=update_fields)
+
+            OrderLoggingService.log(
+                order=order,
+                action=OrderLog.Action.UPDATED,
+                user=request.user,
+                details={
+                    'event': 'invoice_issued' if creating else 'invoice_updated',
+                    'invoice_number': order.invoice_number,
+                    'invoice_date': order.invoice_date,
+                },
+            )
+
+        return Response(OrderDetailSerializer(order, context={'request': request}).data)
 
     @staticmethod
     def _permission_scope_q(user, codename: str) -> Q | None:
@@ -422,7 +665,9 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
     def _permission_for_edit(order: Order) -> str:
         return (
             'update_confirmed_orders'
-            if order.outcome == Order.Outcome.CONFIRMED
+            if order.status in (
+                Order.Status.CONFIRMED, Order.Status.PACKAGING, Order.Status.DONE,
+            )
             else 'update_unconfirmed_orders'
         )
 
@@ -475,6 +720,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             'status':                data.get('status', 'completed'),
             'discount_type':         data.get('discount_type', Order.DiscountType.NONE),
             'discount_value':        str(data.get('discount_value', '0.00')),
+            'delivery_fee':          str(data.get('delivery_fee', '0.00')),
         }
         for key in ('subtotal', 'total_tax', 'shipping_total', 'discount_total', 'total'):
             if key in data:
@@ -496,18 +742,12 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         now = timezone.now()
         update_fields = []
-        if order.outcome != Order.Outcome.CONFIRMED:
-            order.outcome = Order.Outcome.CONFIRMED
+        if not order.confirmed_at:
             order.confirmed_at = now
-            order.outcome_changed_at = now
-            order.outcome_changed_by = request.user
             order.outcome_note = order.outcome_note or 'Direct POS checkout'
-            update_fields.extend([
-                'outcome', 'confirmed_at', 'outcome_changed_at',
-                'outcome_changed_by', 'outcome_note',
-            ])
+            update_fields.extend(['confirmed_at', 'outcome_note'])
 
-        if order.status == Order.Status.COMPLETED:
+        if order.status == Order.Status.DONE:
             if order.payment_status != Order.PaymentStatus.PAID:
                 order.payment_status = Order.PaymentStatus.PAID
                 update_fields.append('payment_status')
@@ -525,10 +765,11 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             order._actor = request.user
             order.save(update_fields=[*update_fields, 'updated_at'])
 
-        # Derive the canonical order_status from the new state (a completed POS
-        # checkout → DONE) so the sale appears in history, earns loyalty points,
-        # and leaves the queue — on every channel type, matching validate_pos().
-        OrderLifecycleService._recompute_outcome(order, actor=request.user)
+        # A completed POS checkout lands on status=done at ingestion; grant the
+        # loyalty points + refresh the aux fields like every other done path.
+        if order.status == Order.Status.DONE:
+            OrderLifecycleService.grant_loyalty_points(order, actor=request.user)
+            OrderLifecycleService.refresh_aux_fields(order, actor=request.user)
 
         return Response(OrderDetailSerializer(order).data, status=status.HTTP_201_CREATED)
 
@@ -607,6 +848,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             'status':                data.get('status', 'processing'),
             'discount_type':         data.get('discount_type', Order.DiscountType.NONE),
             'discount_value':        str(data.get('discount_value', '0.00')),
+            'delivery_fee':          str(data.get('delivery_fee', '0.00')),
         }
         for key in ('subtotal', 'total_tax', 'shipping_total', 'discount_total', 'total'):
             if key in data:
@@ -634,106 +876,100 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response(OrderDetailSerializer(order).data, status=status.HTTP_201_CREATED)
 
-    # ── Status update ────────────────────────────────────────────────────
+    # ── Canonical lifecycle transition ───────────────────────────────────
 
-    @action(detail=True, methods=['patch'], url_path='status')
-    def update_status(self, request, pk=None):
-        """Patch explicit status fields without mixing Woo/local/delivery/contact meanings."""
+    @action(detail=True, methods=['post'], url_path='transition')
+    def transition(self, request, pk=None):
+        """POST /orders/{id}/transition/ — body: {"status": "...", "note": "..."}.
+
+        THE lifecycle endpoint. Dispatches to the rich lifecycle methods so
+        every business side effect holds (confirm reserves stock, cancel
+        releases it, return restores it, …); each of them funnels the actual
+        write through OrderStatusService.transition() — validated + audited.
+        ``delayed`` additionally requires ``delay_date`` (+ optional reason).
+        """
         order = self.get_object()
-        self._require_permission(request.user, self._permission_for_edit(order), order)
-        serializer = OrderStatusUpdateSerializer(data=request.data)
+        serializer = OrderTransitionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        target = data['status']
+        note = data.get('note', '')
 
-        with transaction.atomic():
-            locked = Order.all_objects.select_for_update().get(pk=order.pk)
-            if locked.is_deleted:
-                return Response(
-                    {'detail': 'Order is soft-deleted and cannot be edited.'},
-                    status=status.HTTP_400_BAD_REQUEST,
+        from apps.orders.status_service import TransitionError
+        S = Order.Status
+        try:
+            if target == S.CONFIRMED:
+                self._require_permission(request.user, 'confirm_orders', order)
+                order = OrderLifecycleService.confirm(order, actor=request.user, note=note)
+            elif target == S.NOT_ANSWERED:
+                self._require_permission(request.user, 'update_unconfirmed_orders', order)
+                order = OrderLifecycleService.mark_not_answered(order, actor=request.user, note=note)
+            elif target == S.DELAYED:
+                self._require_permission(request.user, 'delay_orders', order)
+                if not data.get('delay_date'):
+                    return Response(
+                        {'delay_date': ['Delay date is required to delay an order.']},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                order = OrderLifecycleService.delay(
+                    order, actor=request.user,
+                    delay_date=data['delay_date'],
+                    delay_reason=data.get('reason', '') or note,
+                    note=note,
                 )
-
-            old_order_status = locked.order_status  # workflow state before the patch
-            update_fields = []
-            for field in (
-                'status',
-                'wc_status',
-                'delivery_status',
-                'contact_status',
-                'outcome',
-                'return_exchange_status',
-                'delay_date',
-                'delay_reason',
-            ):
-                if field in data:
-                    setattr(locked, field, data[field] or ('' if field == 'delay_reason' else data[field]))
-                    update_fields.append(field)
-
-            if (
-                locked.outcome == Order.Outcome.DELAYED
-                or locked.contact_status == Order.ContactStatus.DELAYED
-            ) and not locked.delay_date:
-                return Response(
-                    {'delay_date': ['Delay date is required for delayed orders.']},
-                    status=status.HTTP_400_BAD_REQUEST,
+            elif target == S.CANCELED:
+                self._require_permission(request.user, 'cancel_orders_lifecycle', order)
+                order = OrderLifecycleService.cancel(
+                    order, actor=request.user,
+                    reason=data.get('reason', '') or note or 'cancelled',
+                    note=note,
                 )
-
-            now = timezone.now()
-            if 'outcome' in data:
-                locked.outcome_changed_at = now
-                locked.outcome_changed_by = request.user
-                update_fields.extend(['outcome_changed_at', 'outcome_changed_by'])
-                if data['outcome'] == Order.Outcome.CONFIRMED and not locked.confirmed_at:
-                    locked.confirmed_at = now
-                    update_fields.append('confirmed_at')
-                if data['outcome'] != Order.Outcome.DELAYED and 'delay_date' not in data:
-                    locked.delay_date = None
-                    locked.delay_reason = ''
-                    update_fields.extend(['delay_date', 'delay_reason'])
-
-            note = data.get('internal_note', '')
-            if note:
-                locked.internal_note = f"{locked.internal_note}\n[{request.user}] {note}".strip()
-                update_fields.append('internal_note')
-
-            if update_fields:
-                locked._actor = request.user
-                locked.save(update_fields=[*dict.fromkeys(update_fields), 'updated_at'])
-                if any(field in data for field in ('delivery_status', 'status', 'return_exchange_status', 'outcome')):
-                    OrderLifecycleService._recompute_outcome(locked, actor=request.user)
-                    # Reject an illegal workflow transition produced by this raw
-                    # status patch — reuse the lifecycle FSM map so the endpoint
-                    # can no longer jump an order into an unreachable state.
-                    # (Raising inside the atomic block rolls the whole patch back
-                    # and DRF returns 400.)
-                    from rest_framework.exceptions import ValidationError as _VErr
-                    from apps.orders.lifecycle_service import LifecycleError
-                    try:
-                        OrderLifecycleService._assert_transition(
-                            old_order_status, locked.order_status,
-                        )
-                    except LifecycleError as exc:
-                        raise _VErr({'status': str(exc)})
-                    # Reconcile stock so a direct status change can never bypass
-                    # the decrement/restock side-effects (e.g. a jump to COMPLETED
-                    # must decrement; moving away from it must restock). The engine
-                    # is idempotent (delta = desired - already_moved).
-                    inventory_channel = locked.pos_sales_channel or locked.sales_channel
-                    if inventory_channel:
-                        from apps.orders.service import (
-                            OrderIngestionError, OrderIngestionService,
-                        )
+            elif target == S.PACKAGING:
+                self._require_permission(request.user, 'update_confirmed_orders', order)
+                from apps.orders.status_service import OrderStatusService
+                with transaction.atomic():
+                    OrderStatusService.transition(
+                        Order.all_objects.select_for_update().get(pk=order.pk),
+                        S.PACKAGING, actor=request.user, note=note or 'started packaging',
+                    )
+                order.refresh_from_db()
+            elif target == S.DONE:
+                self._require_permission(request.user, 'update_confirmed_orders', order)
+                from apps.orders.status_service import OrderStatusService
+                with transaction.atomic():
+                    locked = Order.all_objects.select_for_update().get(pk=order.pk)
+                    OrderStatusService.transition(
+                        locked, S.DONE, actor=request.user, note=note or 'marked done',
+                    )
+                    # Realise the sale (idempotent delta engine keyed on done).
+                    from apps.orders.service import OrderIngestionError, OrderIngestionService
+                    channel = locked.pos_sales_channel or locked.sales_channel
+                    if channel:
                         try:
                             OrderIngestionService._sync_inventory_movements(
                                 locked,
                                 list(locked.lines.filter(is_deleted=False).select_related('product')),
-                                inventory_channel,
-                                request.user,
+                                channel, request.user,
                             )
                         except OrderIngestionError as exc:
-                            raise _VErr({'detail': exc.message, **getattr(exc, 'details', {})})
+                            raise LifecycleError(exc.message) from exc
+                order.refresh_from_db()
+            elif target == S.RETURNED:
+                self._require_permission(request.user, 'process_return_orders', order)
+                order = OrderLifecycleService.process_return(
+                    order, actor=request.user, reason=data.get('reason', '') or note,
+                )
+            else:  # S.NEW — only reachable as an admin override
+                self._require_permission(request.user, 'manual_status_override', order)
+                order = OrderLifecycleService.manual_transition(
+                    order, target=S.NEW, actor=request.user,
+                    reason=note or 'reset to new',
+                )
+        except (LifecycleError, TransitionError) as exc:
+            return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
 
-        return self._transition_response(locked, request)
+        return self._transition_response(order, request)
+
 
     @action(detail=True, methods=['patch'], url_path='edit')
     def edit_order(self, request, pk=None):
@@ -804,7 +1040,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             orders=scoped, channel_id=channel_id,
         )
         open_orders = scoped.filter(
-            order_status__in=OrderStockAvailabilityService.OPEN_DEMAND_STATUSES,
+            status__in=OrderStockAvailabilityService.OPEN_DEMAND_STATUSES,
         )
         if channel_id:
             open_orders = open_orders.filter(sales_channel_id=channel_id)
@@ -928,9 +1164,15 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='edit-lock')
     def acquire_edit_lock(self, request, pk=None):
-        """Acquire or take over an expiring edit lock for collaborative order editing."""
+        """Acquire or take over the working lock for an order.
+
+        The lock marks who is currently handling the order; anyone who can VIEW
+        the order may hold it (the individual write actions still enforce their
+        own permissions). Tying it to a narrow edit permission would stop e.g. a
+        confirm-only operator from ever holding the lock.
+        """
         order = self.get_object()
-        self._require_permission(request.user, self._permission_for_edit(order), order)
+        self._require_permission(request.user, 'view_orders', order)
         serializer = OrderEditLockSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -989,9 +1231,9 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='edit-lock-heartbeat')
     def heartbeat_edit_lock(self, request, pk=None):
-        """Extend the current user's edit lock; returns 409 if another user took over."""
+        """Extend the current user's working lock; returns 409 if another user took over."""
         order = self.get_object()
-        self._require_permission(request.user, self._permission_for_edit(order), order)
+        self._require_permission(request.user, 'view_orders', order)
         serializer = OrderEditLockSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         token = serializer.validated_data.get('token', '')
@@ -1007,21 +1249,43 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                 .select_related('edit_locked_by')
                 .get(pk=order.pk)
             )
-            if locked.edit_locked_by_id != request.user.id or (token and locked.edit_lock_token != token):
+            now = timezone.now()
+            # A heartbeat is only a "takeover" when a DIFFERENT user holds an
+            # UNEXPIRED lock — the exact test acquire uses. A lock that has
+            # lapsed, or that a close/reopen race cleared to NULL, must never be
+            # reported as taken over by someone else (it would surface as the
+            # nameless "another user" error even though nobody is editing).
+            active_other = (
+                locked.edit_locked_by_id
+                and locked.edit_locked_by_id != request.user.id
+                and locked.edit_lock_expires_at
+                and locked.edit_lock_expires_at > now
+            )
+            if active_other:
                 return Response(
                     {'detail': 'Another user is editing this order.', 'lock': self._lock_payload(locked)},
                     status=status.HTTP_409_CONFLICT,
                 )
-            now = timezone.now()
+            # Nobody else holds it → (re)grant and refresh for the caller so a
+            # lapsed or released lock heals silently instead of faking a
+            # takeover. The caller's token stays authoritative.
+            locked.edit_locked_by = request.user
+            if not locked.edit_locked_at:
+                locked.edit_locked_at = now
             locked.edit_lock_heartbeat_at = now
             locked.edit_lock_expires_at = now + timedelta(seconds=90)
-            locked.save(update_fields=['edit_lock_heartbeat_at', 'edit_lock_expires_at', 'updated_at'])
+            if token:
+                locked.edit_lock_token = token
+            locked.save(update_fields=[
+                'edit_locked_by', 'edit_locked_at', 'edit_lock_heartbeat_at',
+                'edit_lock_expires_at', 'edit_lock_token', 'updated_at',
+            ])
         return Response({'lock': self._lock_payload(locked)})
 
     @action(detail=True, methods=['post'], url_path='release-edit-lock')
     def release_edit_lock(self, request, pk=None):
         order = self.get_object()
-        self._require_permission(request.user, self._permission_for_edit(order), order)
+        self._require_permission(request.user, 'view_orders', order)
         serializer = OrderEditLockSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         token = serializer.validated_data.get('token', '')
@@ -1075,7 +1339,10 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         # Run through the lifecycle service so the duplicate-submission guard is
         # enforced before the external API call.
         try:
-            result = OrderLifecycleService.submit_delivery(order, actor=request.user)
+            result = OrderLifecycleService.submit_delivery(
+                order, actor=request.user,
+                force=bool(request.data.get('force', False)),
+            )
         except LifecycleError as exc:
             return Response({'detail': exc.message}, status=status.HTTP_400_BAD_REQUEST)
         except DeliveryError as exc:
@@ -1294,13 +1561,10 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         warnings = []
         if not (order.delivery_code or order.delivery_reference or order.in_store_pickup):
             warnings.append('This order has no delivery code yet. Send it to delivery before packaging.')
-        if order.outcome == Order.Outcome.CANCELLED or order.status == Order.Status.CANCELLED:
+        if order.status == Order.Status.CANCELED:
             warnings.append('This order is cancelled. Packaging should be blocked unless a manager confirms.')
-        if order.returned_at or order.delivery_status in (
-            Order.DeliveryStatus.RETURNED,
-            Order.DeliveryStatus.CANCELLED,
-        ):
-            warnings.append('This order is already returned/cancelled in delivery.')
+        if order.status == Order.Status.RETURNED or order.returned_at:
+            warnings.append('This order is already returned.')
 
         OrderLoggingService.log(
             order=order,
@@ -1637,8 +1901,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             ('wc_status', 'wc_status'),
             ('source', 'source'),
             ('payment_status', 'payment_status'),
-            ('contact_status', 'contact_status'),
-            ('return_exchange_status', 'return_exchange_status'),
+            ('priority_level', 'priority_level'),
         ):
             value = request.query_params.get(param)
             if value and value != 'all':
@@ -1648,134 +1911,36 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         qs = self._apply_search(qs, request.query_params.get('search'))
         deleted_qs = self._apply_search(deleted_qs, request.query_params.get('search'))
 
+        S = Order.Status
         data = qs.aggregate(
-            total_orders        = Count('id'),
-            pending             = Count('id', filter=Q(status=Order.Status.PENDING)),
-            processing          = Count('id', filter=Q(status=Order.Status.PROCESSING)),
-            completed           = Count('id', filter=Q(status=Order.Status.COMPLETED)),
-            cancelled           = Count('id', filter=Q(status=Order.Status.CANCELLED)),
-            revenue             = Sum('total', filter=Q(status__in=[
-                Order.Status.PROCESSING, Order.Status.COMPLETED,
-            ])),
-            woocommerce_count   = Count('id', filter=Q(source=Order.Source.WOOCOMMERCE)),
-            pos_count           = Count('id', filter=Q(source=Order.Source.POS)),
-            manual_count        = Count('id', filter=Q(source=Order.Source.MANUAL)),
-            # Outcome counts
-            confirmed_count     = Count('id', filter=Q(outcome=Order.Outcome.CONFIRMED)),
-            delayed_count       = Count('id', filter=Q(outcome=Order.Outcome.DELAYED)),
-            cancelled_outcome   = Count('id', filter=Q(outcome=Order.Outcome.CANCELLED)),
+            total_orders=Count('id'),
+            new=Count('id', filter=Q(status=S.NEW)),
+            confirmed=Count('id', filter=Q(status=S.CONFIRMED)),
+            not_answered=Count('id', filter=Q(status=S.NOT_ANSWERED)),
+            delayed=Count('id', filter=Q(status=S.DELAYED)),
+            packaging=Count('id', filter=Q(status=S.PACKAGING)),
+            done=Count('id', filter=Q(status=S.DONE)),
+            returned=Count('id', filter=Q(status=S.RETURNED)),
+            canceled=Count('id', filter=Q(status=S.CANCELED)),
+            woocommerce_count=Count('id', filter=Q(source=Order.Source.WOOCOMMERCE)),
+            pos_count=Count('id', filter=Q(source=Order.Source.POS)),
+            manual_count=Count('id', filter=Q(source=Order.Source.MANUAL)),
+            # Gross revenue: everything that is not canceled. Net revenue is
+            # exposed under order_status_kpis (done only).
+            revenue=Sum('total', filter=~Q(status=S.CANCELED) & ~Q(status=S.RETURNED)),
         )
         data['revenue'] = str(data['revenue'] or '0.00')
-        data['flow_counts'] = {
-            'all': qs.count(),
-            'needs_confirmation': qs.filter(
-                outcome=Order.Outcome.NONE,
-            ).exclude(
-                source=Order.Source.POS,
-            ).filter(
-                status__in=[
-                    Order.Status.PENDING,
-                    Order.Status.PROCESSING,
-                    Order.Status.ON_HOLD,
-                    Order.Status.COMPLETED,
-                ],
-            ).count(),
-            'delayed': qs.filter(outcome=Order.Outcome.DELAYED).count(),
-            'ready_delivery': qs.filter(
-                outcome=Order.Outcome.CONFIRMED,
-                in_store_pickup=False,
-            ).exclude(
-                source=Order.Source.POS,
-            ).filter(
-                delivery_status__in=[
-                    Order.DeliveryStatus.NONE,
-                    Order.DeliveryStatus.PENDING,
-                    Order.DeliveryStatus.FAILED,
-                ],
-            ).count(),
-            'pickup': qs.filter(
-                in_store_pickup=True,
-                pos_validated_at__isnull=True,
-            ).count(),
-            'waiting_pos': qs.filter(
-                in_store_pickup=True,
-                sent_to_pos_at__isnull=False,
-                pos_validated_at__isnull=True,
-            ).count(),
-            'in_delivery': qs.filter(delivery_status__in=[
-                Order.DeliveryStatus.QUEUED,
-                Order.DeliveryStatus.SUBMITTED,
-                Order.DeliveryStatus.ACCEPTED,
-                Order.DeliveryStatus.IN_TRANSIT,
-            ]).count(),
-            'packaged': qs.filter(
-                packaging_status__in=[
-                    Order.PackagingStatus.PACKAGED,
-                    Order.PackagingStatus.UPDATED,
-                ],
-                final_outcome=Order.FinalOutcome.NONE,
-            ).count(),
-            'waiting_delivery_result': qs.filter(
-                delivery_status__in=[
-                    Order.DeliveryStatus.SUBMITTED,
-                    Order.DeliveryStatus.ACCEPTED,
-                    Order.DeliveryStatus.IN_TRANSIT,
-                ],
-                final_outcome=Order.FinalOutcome.NONE,
-            ).count(),
-            'failed_delivery': qs.filter(
-                final_outcome=Order.FinalOutcome.FAILED_DELIVERY,
-            ).count(),
-            'done': qs.filter(
-                (
-                    Q(final_outcome=Order.FinalOutcome.SUCCESSFUL_SALE) |
-                    Q(source=Order.Source.POS, status=Order.Status.COMPLETED)
-                )
-                & Q(returned_at__isnull=True)
-                & ~Q(delivery_status=Order.DeliveryStatus.RETURNED)
-                & ~Q(delivery_status=Order.DeliveryStatus.CANCELLED)
-                & ~Q(return_exchange_status__in=[
-                    Order.ReturnExchangeStatus.RETURNED,
-                    Order.ReturnExchangeStatus.EXCHANGED,
-                ])
-            ).count(),
-            'returned': qs.filter(
-                Q(returned_at__isnull=False) |
-                Q(delivery_status=Order.DeliveryStatus.RETURNED) |
-                Q(return_exchange_status=Order.ReturnExchangeStatus.RETURNED) |
-                Q(final_outcome=Order.FinalOutcome.RETURNED)
-            ).count(),
-            'exchanged': qs.filter(
-                return_exchange_status=Order.ReturnExchangeStatus.EXCHANGED
-            ).count(),
-            'cancelled': qs.filter(
-                Q(outcome=Order.Outcome.CANCELLED) |
-                Q(status=Order.Status.CANCELLED)
-            ).count(),
-            'deleted': (
-                deleted_qs.count()
-                if request.user.is_superuser or PermissionService.has_permission(
-                    request.user,
-                    'view_soft_deleted_orders',
-                )
-                else 0
-            ),
+        data['by_status'] = {
+            value: data[value] for value, _ in Order.Status.choices
         }
-
-        # Phase 2 — 10-state workflow tabs (one filter per bucket, clean queries).
-        data['workflow_counts'] = {
-            'all': qs.count(),
-            'pending':          qs.filter(workflow_status=Order.WorkflowStatus.PENDING).count(),
-            'answered':         qs.filter(workflow_status=Order.WorkflowStatus.ANSWERED).count(),
-            'not_answered':     qs.filter(workflow_status=Order.WorkflowStatus.NOT_ANSWERED).count(),
-            'delayed':          qs.filter(workflow_status=Order.WorkflowStatus.DELAYED).count(),
-            'sent_to_delivery': qs.filter(workflow_status=Order.WorkflowStatus.SENT_TO_DELIVERY).count(),
-            'packaging':        qs.filter(workflow_status=Order.WorkflowStatus.PACKAGING).count(),
-            'done':             qs.filter(workflow_status=Order.WorkflowStatus.DONE).count(),
-            'retour':           qs.filter(workflow_status=Order.WorkflowStatus.RETOUR).count(),
-            'cancelled':        qs.filter(workflow_status=Order.WorkflowStatus.CANCELLED).count(),
-            'changed':          qs.filter(workflow_status=Order.WorkflowStatus.CHANGED).count(),
-        }
+        data['deleted'] = (
+            deleted_qs.count()
+            if request.user.is_superuser or PermissionService.has_permission(
+                request.user,
+                'view_soft_deleted_orders',
+            )
+            else 0
+        )
 
         # Phase D — clean order_status KPI block (additive; the legacy buckets
         # above are untouched). Counts realised sales / revenue from the derived
@@ -1842,6 +2007,39 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     @staticmethod
+    def _wc_get_with_retry(wc_api, endpoint: str, params: dict, *, page_label: str):
+        """GET with a short bounded retry on transient network/DNS failures.
+
+        Docker Desktop's embedded DNS occasionally fails one lookup ("Temporary
+        failure in name resolution") and heals immediately — one blind failure
+        must not abort a whole preview/sync. Timeouts are NOT retried here
+        (the caller decides); HTTP errors pass through untouched.
+        """
+        import time as _time
+        last_exc = None
+        for attempt in range(3):
+            try:
+                return wc_api.get(endpoint, params=params)
+            except requests_exceptions.Timeout:
+                raise
+            except requests_exceptions.RequestException as exc:
+                last_exc = exc
+                if attempt < 2:
+                    _time.sleep(1.5 * (attempt + 1))
+        host = ''
+        try:
+            host = urlparse(getattr(wc_api, 'url', '') or '').netloc
+        except Exception:  # noqa: BLE001 - message helper only
+            pass
+        raise ConnectionError(
+            f"Cannot reach the WooCommerce store{f' at {host}' if host else ''} "
+            f"({page_label}). The store domain could not be resolved or the "
+            f"connection failed after 3 attempts — check the Store URL on the "
+            f"sales channel and the server's internet connection. "
+            f"Details: {last_exc}"
+        ) from last_exc
+
+    @staticmethod
     def _fetch_wc_import_orders(
         wc_api,
         per_page: int = WC_FETCH_PER_PAGE,
@@ -1873,14 +2071,12 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
             params['page'] = page
             try:
-                resp = wc_api.get('orders', params=params)
+                resp = OrderViewSet._wc_get_with_retry(
+                    wc_api, 'orders', params, page_label=f'sync page {page}',
+                )
             except requests_exceptions.Timeout as exc:
                 raise TimeoutError(
                     f"WooCommerce timed out at page {page}. Retry later."
-                ) from exc
-            except requests_exceptions.RequestException as exc:
-                raise ConnectionError(
-                    f"WooCommerce request failed at page {page}: {exc}"
                 ) from exc
 
             if resp.status_code >= 400:
@@ -1931,14 +2127,12 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             params['search'] = search
 
         try:
-            resp = wc_api.get('orders', params=params)
+            resp = OrderViewSet._wc_get_with_retry(
+                wc_api, 'orders', params, page_label=f'preview page {page}',
+            )
         except requests_exceptions.Timeout as exc:
             raise TimeoutError(
                 f"WooCommerce timed out while loading preview page {page}."
-            ) from exc
-        except requests_exceptions.RequestException as exc:
-            raise ConnectionError(
-                f"WooCommerce preview request failed at page {page}: {exc}"
             ) from exc
 
         if resp.status_code >= 400:

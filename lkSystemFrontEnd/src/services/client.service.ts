@@ -25,6 +25,7 @@ export interface CreateClientFromPOSRequest {
   last_name?: string;
   phone?: string;
   client_type?: 'PERSON' | 'COMPANY';
+  matricule_fiscale?: string;
   date_of_birth?: string | null;
   address?: string;
   state?: string;

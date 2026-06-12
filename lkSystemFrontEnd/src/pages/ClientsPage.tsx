@@ -332,7 +332,7 @@ function ClientDetailDialog({
                       <TableRow key={order.id} className="cursor-pointer hover:bg-muted/40" onClick={() => void openOrder(order)}>
                         <TableCell className="font-mono text-xs">{order.ticket_id || order.order_number || order.external_order_id}</TableCell>
                         <TableCell className="hidden sm:table-cell"><SourceBadge source={order.source} /></TableCell>
-                        <TableCell><Badge variant="outline" className="text-xs">{order.return_exchange_status !== 'NONE' ? order.return_exchange_status : order.status}</Badge></TableCell>
+                        <TableCell><Badge variant="outline" className="text-xs">{order.status}</Badge></TableCell>
                         <TableCell className="text-right font-medium">{fmtMoney(order.total)}</TableCell>
                       </TableRow>
                     ))}
@@ -408,6 +408,7 @@ function ClientEditDialog({ open, onOpenChange, client, brands, onSave, saving }
         last_name: client.last_name ?? '',
         phone: client.phone ?? '',
         client_type: client.client_type ?? 'PERSON',
+        matricule_fiscale: client.matricule_fiscale ?? '',
         date_of_birth: client.date_of_birth,
         address: client.address ?? '',
         state: client.governorate || client.state || '',
@@ -471,6 +472,12 @@ function ClientEditDialog({ open, onOpenChange, client, brands, onSave, saving }
               </SelectContent>
             </Select>
           </div>
+          {form.client_type === 'COMPANY' && (
+            <div className="col-span-1 sm:col-span-2">
+              <Label className="text-xs font-medium">Matricule Fiscale</Label>
+              <Input value={form.matricule_fiscale ?? ''} onChange={e => set('matricule_fiscale', e.target.value)} placeholder="Tax ID — appears on the client's invoices" className="h-9 mt-1" />
+            </div>
+          )}
           <div>
             <Label className="text-xs font-medium">Email *</Label>
             <Input value={form.email ?? ''} onChange={e => set('email', e.target.value)} placeholder="client@example.com" className="h-9 mt-1" type="email" />

@@ -120,8 +120,35 @@ apiClient.interceptors.response.use(
       _retry?: boolean;
     };
 
-    // If error is not 401 or request has already been retried, reject
-    if (error.response?.status !== 401 || originalRequest._retry) {
+    // A 401 from these endpoints is terminal: they are credential checks, token
+    // operations, or public flows — none has an expired *access* token to
+    // refresh. Trying to refresh on a login 401 is pointless (there is no
+    // session yet) and, worse, replaces the backend's "invalid credentials"
+    // message with a confusing internal "No refresh token available" error.
+    // NOTE: authenticated auth routes (/auth/me, /auth/workspaces,
+    // /auth/switch-workspace) are intentionally NOT listed — their access-token
+    // expiry 401s must still refresh-and-retry.
+    const NO_REFRESH_PATHS = [
+      '/auth/login/',
+      '/auth/refresh/',
+      '/auth/verify/',
+      '/auth/logout/',
+      '/auth/forgot-password/',
+      '/auth/reset-password/',
+      '/auth/validate-reset-token/',
+      '/auth/validate-invitation/',
+      '/auth/accept-invitation/',
+    ];
+    const requestUrl = originalRequest.url ?? '';
+    const skipRefresh = NO_REFRESH_PATHS.some(path => requestUrl.includes(path));
+
+    // If error is not 401, the request was already retried, or it targets an
+    // endpoint that must not refresh, reject so the caller sees the real error.
+    if (
+      error.response?.status !== 401 ||
+      originalRequest._retry ||
+      skipRefresh
+    ) {
       throw error;
     }
 

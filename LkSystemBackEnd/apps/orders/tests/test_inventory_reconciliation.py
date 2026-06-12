@@ -140,7 +140,7 @@ class OrderInventoryReconciliationTests(TestCase):
             1,
         )
         order = Order.objects.get(external_order_id='5001')
-        self.assertEqual(order.status, Order.Status.CANCELLED)
+        self.assertEqual(order.status, Order.Status.CANCELED)
 
     def test_insufficient_stock_raises_error_and_keeps_stock_unchanged(self):
         with self.assertRaises(OrderIngestionError):
@@ -161,7 +161,7 @@ class OrderInventoryReconciliationTests(TestCase):
             source=Order.Source.WOOCOMMERCE,
         )
 
-        self.assertEqual(order.status, Order.Status.PENDING)
+        self.assertEqual(order.status, Order.Status.NEW)
         self.assertEqual(order.wc_status, 'completed')
         self.assertEqual(self.refresh_inventory().quantity, 10)
         self.assertFalse(

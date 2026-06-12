@@ -281,6 +281,7 @@ export interface Company extends CompanyListItem {
   activity_code?: string;
   bank_name?: string;
   rib?: string;
+  invoice_footer?: string;
   created_at: string;
   updated_at: string;
 }
@@ -298,6 +299,7 @@ export interface CreateCompanyRequest {
   activity_code?: string;
   bank_name?: string;
   rib?: string;
+  invoice_footer?: string;
   is_active?: boolean;
   logo?: File | null;
 }
@@ -1203,6 +1205,7 @@ export interface Client {
   phone: string | null;
   phone_normalized: string;
   client_type: 'PERSON' | 'COMPANY';
+  matricule_fiscale?: string;
   date_of_birth: string | null;
   address: string;
   city: string;
@@ -1232,6 +1235,7 @@ export interface CreateClientRequest {
   last_name?: string;
   phone?: string | null;
   client_type?: 'PERSON' | 'COMPANY';
+  matricule_fiscale?: string;
   date_of_birth?: string | null;
   address?: string;
   city?: string;
@@ -1254,14 +1258,20 @@ export interface CreateClientRequest {
 // ORDER TYPES
 // ═════════════════════════════════════════════════════════════════════════════
 
+// THE canonical order lifecycle — the ONLY lifecycle field. Written only by
+// the backend OrderStatusService (validated + audited). Pipeline:
+//   new → confirmed → packaging → done → returned
+// Side flows: new/confirmed/not_answered ↔ delayed; canceled from every
+// non-terminal state; returned/canceled are terminal.
 export type OrderStatus =
-  | 'PENDING'
-  | 'PROCESSING'
-  | 'ON_HOLD'
-  | 'COMPLETED'
-  | 'CANCELLED'
-  | 'REFUNDED'
-  | 'FAILED';
+  | 'new'
+  | 'confirmed'
+  | 'not_answered'
+  | 'delayed'
+  | 'packaging'
+  | 'done'
+  | 'returned'
+  | 'canceled';
 
 export type OrderSource = 'WOOCOMMERCE' | 'POS' | 'MANUAL';
 
@@ -1283,44 +1293,7 @@ export type PaymentStatus = 'UNPAID' | 'PAID' | 'PARTIAL' | 'REFUNDED';
 
 export type OrderDiscountType = 'NONE' | 'FIXED' | 'PERCENTAGE';
 
-export type OrderOutcome = 'NONE' | 'CONFIRMED' | 'DELAYED' | 'CANCELLED';
 
-export type OrderContactStatus = 'NONE' | 'ANSWERED' | 'NOT_ANSWERED' | 'DELAYED';
-
-export type OrderReturnExchangeStatus = 'NONE' | 'RETURNED' | 'EXCHANGED';
-
-export type DeliveryStatus =
-  | 'NONE'
-  | 'PENDING'
-  | 'QUEUED'
-  | 'SUBMITTED'
-  | 'ACCEPTED'
-  | 'IN_TRANSIT'
-  | 'DELIVERED'
-  | 'FAILED'
-  | 'CANCELLED'
-  | 'RETURNED';
-
-// Phase D — clean, derived top-layer status set (the single status the UI reads).
-// These are computed by the backend lifecycle service and are read-only.
-export type CleanOrderStatus =
-  | 'new'
-  | 'awaiting_confirmation'
-  | 'confirmed'
-  | 'delayed'
-  | 'not_answered'
-  | 'canceled'
-  | 'preparing'
-  | 'done'
-  | 'returned'
-  | 'exchanged';
-
-export type CleanConfirmationStatus =
-  | 'pending'
-  | 'accepted'
-  | 'delayed'
-  | 'canceled'
-  | 'no_answer';
 
 export type CleanDeliveryMethod = 'home_delivery' | 'pos_pickup';
 
@@ -1340,12 +1313,16 @@ export interface OrderLine {
   product: number | null;
   product_id: number | null;
   product_type?: ProductType | null;
+  is_pack?: boolean;
+  pack_items_detail?: PackItemDetail[] | null;
   wc_product_id: number | null;
   external_line_id?: string;
   product_name: string;
   barcode: string;
   product_image: string;
   quantity: number;
+  /** Current catalogue TTC price, used to show the effective promotion on invoices. */
+  catalog_unit_price?: string | null;
   unit_price: string;
   subtotal: string;
   tax: string;
@@ -1358,6 +1335,17 @@ export interface OrderLine {
 export interface OrderListItem {
   id: number;
   order_number: string;
+  invoice_number: string;
+  invoice_date: string | null;
+  invoice_client_name: string;
+  invoice_client_type: 'PERSON' | 'COMPANY';
+  invoice_client_matricule_fiscale: string;
+  invoice_client_phone: string;
+  invoice_client_email: string;
+  invoice_client_address: string;
+  invoice_client_city: string;
+  invoice_issued_at: string | null;
+  invoice_issued_by: number | null;
   ticket_id: string;
   client_ticket_uuid: string;
   external_order_id: string;
@@ -1372,10 +1360,27 @@ export interface OrderListItem {
   client_email: string | null;
   client_phone: string | null;
   client_name: string | null;
+  client_type?: 'PERSON' | 'COMPANY';
+  client_matricule_fiscale?: string;
+  /**
+   * Delivery contact — who actually receives the parcel (order shipping block
+   * first, billing snapshot fallback). The orders list displays and searches
+   * these, never the linked client record: customers change the recipient
+   * name/phone/address per order. Empty string when the order has neither.
+   */
+  delivery_name: string;
+  delivery_phone: string;
+  delivery_address: string;
   client_points: number;
   client_is_blocked: boolean;
   client_return_count: number;
+  /** Total orders this client has placed (history at-a-glance on the Customer tab). */
+  client_order_count: number;
+  /** THE canonical lifecycle status. */
   status: OrderStatus;
+  status_display: string;
+  status_changed_at: string | null;
+  status_changed_by: number | null;
   wc_status: string;
   source: OrderSource;
   /** Social channel a manual order came in on (Instagram, WhatsApp…); '' when N/A. */
@@ -1383,45 +1388,23 @@ export interface OrderListItem {
   order_source_display: string;
   payment_status: PaymentStatus;
   payment_method: string;
-  contact_status: OrderContactStatus;
-  return_exchange_status: OrderReturnExchangeStatus;
   return_type: 'NONE' | 'CANCELLED_REFUSED' | 'RETURNED' | 'EXCHANGED' | 'DAMAGED' | 'MISSING' | 'OTHER';
-  packaging_status: 'NOT_PACKAGED' | 'PACKAGED' | 'UPDATED';
   packaged_at: string | null;
   packaged_by: number | null;
   packaged_by_name: string | null;
-  final_outcome:
-    | 'NONE'
-    | 'SUCCESSFUL_SALE'
-    | 'RETURNED'
-    | 'EXCHANGED'
-    | 'CANCELLED_BEFORE_DELIVERY'
-    | 'CANCELLED_AFTER_DELIVERY'
-    | 'FAILED_DELIVERY';
-  workflow_status:
-    | 'pending'
-    | 'answered'
-    | 'not_answered'
-    | 'delayed'
-    | 'sent_to_delivery'
-    | 'packaging'
-    | 'done'
-    | 'retour'
-    | 'cancelled'
-    | 'changed';
   billing_phone: string;
   currency: string;
   subtotal: string;
   tax_total: string;
   shipping_total: string;
+  delivery_fee: string;
   discount_type: OrderDiscountType;
   discount_value: string;
   discount_total: string;
   total: string;
   is_deleted: boolean;
   line_count: number;
-  // Outcome fields
-  outcome: OrderOutcome;
+  // Confirmation / delay / cancel metadata (audit only)
   confirmed_at: string | null;
   delay_date: string | null;
   delay_reason: string;
@@ -1432,7 +1415,7 @@ export interface OrderListItem {
   cancellation_reason: string;
   outcome_note: string;
   outcome_changed_at: string | null;
-  delivery_status: DeliveryStatus;
+  // Delivery technical metadata (never lifecycle)
   delivery_reference: string;
   delivery_code: string;
   delivery_external_reference: string;
@@ -1464,12 +1447,7 @@ export interface OrderListItem {
   edit_lock_heartbeat_at: string | null;
   edit_lock_expires_at: string | null;
   edit_lock_token: string;
-  // Phase D — clean derived top-layer status set (read-only; lifecycle service
-  // is the only writer). The single canonical status the UI surfaces.
-  order_status: CleanOrderStatus;
-  order_status_display: string;
-  confirmation_status: CleanConfirmationStatus;
-  confirmation_status_display: string;
+  // Derived informational fields (never lifecycle)
   delivery_method: CleanDeliveryMethod;
   delivery_method_display: string;
   stock_status: CleanStockStatus;
@@ -1587,6 +1565,7 @@ export interface OrderDetail extends OrderListItem {
   // Shipping details
   shipping_first_name: string;
   shipping_last_name: string;
+  shipping_phone: string;
   shipping_address_1: string;
   shipping_city: string;
   shipping_state: string;
@@ -1621,6 +1600,8 @@ export interface OrderEditRequest {
   lines: OrderEditLineInput[];
   discount_type?: OrderDiscountType;
   discount_value?: string;
+  /** Flat delivery fee, editable. '0.00' = no delivery fee. */
+  delivery_fee?: string;
   customer_note?: string;
   internal_note?: string;
   // Billing details (editable)
@@ -1635,6 +1616,15 @@ export interface OrderEditRequest {
   billing_state?: string;
   billing_postcode?: string;
   billing_country?: string;
+  // Shipping / delivery details (editable) — where the order is delivered.
+  shipping_first_name?: string;
+  shipping_last_name?: string;
+  shipping_phone?: string;
+  shipping_address_1?: string;
+  shipping_city?: string;
+  shipping_state?: string;
+  shipping_postcode?: string;
+  shipping_country?: string;
 }
 
 export interface OrderLogEntry {
@@ -1686,21 +1676,23 @@ export interface POSOrderCreateRequest {
   subtotal?: string;
   total_tax?: string;
   shipping_total?: string;
+  /** Optional flat delivery fee (default 7 DT on the form); folded into total server-side. */
+  delivery_fee?: string;
   discount_type?: 'NONE' | 'FIXED' | 'PERCENTAGE';
   discount_value?: string;
   discount_total?: string;
   total?: string;
 }
 
-// Phase D — KPI block computed from the clean ``order_status`` (genuinely
-// successful sales only; returns / exchanges / cancellations excluded).
+// KPI block computed from the canonical ``status`` (successful sales = done).
 export interface OrderStatusKpis {
   total_orders: number;
-  by_status: Partial<Record<CleanOrderStatus, number>>;
+  by_status: Partial<Record<OrderStatus, number>>;
   successful_sales: number;
   revenue: string;
   returned: number;
   exchanged: number;
+  refunded: number;
   canceled: number;
   in_confirmation: number;
   in_fulfillment: number;
@@ -1708,21 +1700,20 @@ export interface OrderStatusKpis {
 
 export interface OrderSummary {
   total_orders: number;
-  pending: number;
-  processing: number;
-  completed: number;
-  cancelled: number;
+  // One bucket per canonical status.
+  new: number;
+  confirmed: number;
+  not_answered: number;
+  delayed: number;
+  packaging: number;
+  done: number;
+  returned: number;
+  canceled: number;
+  by_status: Partial<Record<OrderStatus, number>>;
+  deleted: number;
   revenue: string;
   woocommerce_count: number;
   pos_count: number;
   manual_count: number;
-  // Outcome counts
-  confirmed_count: number;
-  delayed_count: number;
-  cancelled_outcome: number;
-  flow_counts?: Record<string, number>;
-  workflow_counts?: Record<string, number>;
-  exchanged?: number;
-  // Phase D — additive clean-status KPI block.
   order_status_kpis?: OrderStatusKpis;
 }

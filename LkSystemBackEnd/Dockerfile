@@ -59,4 +59,8 @@ ENTRYPOINT ["/app/entrypoint.sh"]
 
 EXPOSE 8000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "3", "--timeout", "240", "--graceful-timeout", "30", "core.wsgi:application"]
+# gthread workers: requests regularly block on outbound I/O (WooCommerce sync
+# and status pushes, JAX delivery submissions). With 3 sync workers, three such
+# calls starve every other request and the SPA's API calls time out client-side.
+# 3 processes x 8 threads = 24 concurrent requests for the same memory budget.
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "3", "--worker-class", "gthread", "--threads", "8", "--timeout", "240", "--graceful-timeout", "30", "core.wsgi:application"]

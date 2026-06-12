@@ -10,13 +10,15 @@
  *   - Mobile-responsive table with progressive column hiding
  *   - Always-visible action buttons (no opacity tricks)
  */
-import { useEffect, useMemo, useRef, useState, useCallback, useDeferredValue, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback, useDeferredValue } from 'react';
 import {
   ShoppingCart, Search, RefreshCw, Eye, MoreVertical,
   CheckCircle, Clock, Package, Pencil, History, Trash2,
   Undo2, Loader2, TrendingUp,
   Truck, Store, RotateCcw, Star, ArrowUpDown, ArrowUp, ArrowDown,
   X, SlidersHorizontal, AlertTriangle, Phone, ShieldAlert, Plus, Ban,
+  User, ChevronRight,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -34,7 +36,6 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem,
   DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
@@ -47,19 +48,34 @@ import { salesChannelService } from '@/services/salesChannel.service';
 import { useAuthStore } from '@/store/authStore';
 import { hasPermission } from '@/hooks/useAuth';
 import { useWebSocket } from '@/hooks/useWebSocket';
+import {
+  DEFAULT_LIFO_ORDERING,
+  PENDING_FIFO_ORDERING,
+  buildPaginationItems,
+  defaultOrderingForFlow,
+} from './orderQueue';
 import type {
   OrderListItem, OrderDetail, OrderEditLineInput, OrderEditRequest,
   OrderDiscountType, OrderSummary, OrderStatus, SalesChannel, ProductListItem,
-  OrderLogEntry, CleanOrderStatus, POSOrderCreateRequest,
+  OrderLogEntry, POSOrderCreateRequest,
 } from '@/types';
-import type { OrderStatusFieldsPayload, OrderSyncEvent, WooCommerceOrderPreviewResponse, BulkOrderAction } from '@/services/order.service';
+import type {
+  OrderSyncEvent,
+  WooCommerceOrderPreviewResponse,
+  BulkOrderAction,
+  ReturnLineCondition,
+} from '@/services/order.service';
 
 import {
   OrderDetailDialog, SyncDialog, PreviewDialog, LogsDialog, MessageAlert,
   SendToPOSDialog, ReturnLookupDialog, ReturnDialog, CreateOrderDialog,
-  PackagingDialog,
+  PackagingDialog, ALLOWED_NEXT_STATUSES,
 } from './components/OrderDialogs';
-import { CleanStatusBadge, SyncStatusBadge, cleanStatusLabel } from './components/orderStatusBadges';
+import { getMissingStock, type MissingStockLine } from './components/orderStock';
+import {
+  ORDER_STATUS_ROW_STYLES, OrderStatusBadge,
+  SyncStatusBadge, orderStatusLabel,
+} from './components/orderStatusBadges';
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
 /* HELPERS                                                                   */
@@ -114,58 +130,63 @@ const PAYMENT_STYLES: Record<string, string> = {
 
 type OrderFlowTab =
   | 'all'
-  | 'pending'
+  | 'new'
   | 'confirmed'
   | 'not_answered'
   | 'delayed'
-  | 'preparing'
+  | 'packaging'
   | 'done'
-  | 'returns'
-  | 'canceled'
-  | 'deleted';
+  | 'returned'
+  | 'canceled';
 
-const DEFAULT_ORDERING = 'lifecycle_priority,-client__points,-created_at';
+const PRIORITY_QUEUE_ORDERING = 'lifecycle_priority,business_priority_rank,-client__points,-created_at';
 
-// Phase D — the tabs speak ONE language: the clean derived ``order_status``.
-// Each tab maps to the order_status value(s) it represents, so the tab filter
-// (?order_status=…), the count (order_status_kpis.by_status) and the row chip
-// (CleanStatusBadge) are always consistent. 'all' and 'deleted' are special
-// (no order_status filter); 'deleted' is gated by view_soft_deleted_orders.
+const ORDER_SORT_OPTIONS = [
+  { value: DEFAULT_LIFO_ORDERING, label: 'Recently updated first (LIFO)' },
+  { value: PENDING_FIFO_ORDERING, label: 'Oldest created first (FIFO)' },
+  { value: PRIORITY_QUEUE_ORDERING, label: 'Action and business priority' },
+  { value: '-total,-created_at', label: 'Highest total first' },
+  { value: 'total,-created_at', label: 'Lowest total first' },
+  { value: 'business_priority_rank,-created_at', label: 'Business priority' },
+  { value: '-client__points,-created_at', label: 'Client points' },
+] as const;
+
+// The tabs ARE the canonical lifecycle (plus "All"). Each tab maps 1:1 to a
+// status value, so the tab filter (?status=…), the count (by_status) and the
+// row chip always agree.
 const FLOW_TABS: Array<{
   value: OrderFlowTab;
   label: string;
   shortLabel: string;
   icon: ReactNode;
-  statuses: CleanOrderStatus[];
+  statuses: OrderStatus[];
 }> = [
   { value: 'all',          label: 'All',          shortLabel: 'All',     icon: <ShoppingCart className="size-3.5" />, statuses: [] },
-  { value: 'pending',      label: 'Pending',      shortLabel: 'Pending', icon: <Clock className="size-3.5" />,        statuses: ['new', 'awaiting_confirmation'] },
+  { value: 'new',          label: 'New',          shortLabel: 'New',     icon: <Clock className="size-3.5" />,        statuses: ['new'] },
   { value: 'confirmed',    label: 'Confirmed',    shortLabel: 'Conf',    icon: <CheckCircle className="size-3.5" />,  statuses: ['confirmed'] },
   { value: 'not_answered', label: 'Not Answered', shortLabel: 'No ans',  icon: <Phone className="size-3.5" />,        statuses: ['not_answered'] },
   { value: 'delayed',      label: 'Delayed',      shortLabel: 'Delay',   icon: <Clock className="size-3.5" />,        statuses: ['delayed'] },
-  { value: 'preparing',    label: 'Preparing',    shortLabel: 'Prep',    icon: <Package className="size-3.5" />,      statuses: ['preparing'] },
+  { value: 'packaging',    label: 'Packaging',    shortLabel: 'Pack',    icon: <Package className="size-3.5" />,      statuses: ['packaging'] },
   { value: 'done',         label: 'Done',         shortLabel: 'Done',    icon: <CheckCircle className="size-3.5" />,  statuses: ['done'] },
-  { value: 'returns',      label: 'Returns',      shortLabel: 'Return',  icon: <RotateCcw className="size-3.5" />,    statuses: ['returned', 'exchanged'] },
-  { value: 'canceled',     label: 'Canceled',     shortLabel: 'Cancel',  icon: <X className="size-3.5" />,            statuses: ['canceled'] },
-  { value: 'deleted',      label: 'Deleted',      shortLabel: 'Trash',   icon: <Trash2 className="size-3.5" />,       statuses: [] },
+  { value: 'returned',     label: 'Returned',     shortLabel: 'Return',  icon: <RotateCcw className="size-3.5" />,    statuses: ['returned'] },
+  { value: 'canceled',     label: 'Canceled',     shortLabel: 'Cancel',  icon: <Ban className="size-3.5" />,          statuses: ['canceled'] },
 ];
 
-// Phase D — admin/manager backward overrides. Mirrors the backend
-// ALLOWED_MANUAL_TRANSITIONS exactly; the server re-validates, so this map is
-// purely to drive the UI (which targets to offer, when to show the action).
+// Admin/manager backward overrides on the canonical pipeline. Mirrors the
+// backend ALLOWED_MANUAL_TRANSITIONS (server re-validates; this only drives
+// which targets the UI offers).
 const MANUAL_TRANSITIONS: Record<string, string[]> = {
-  done:         ['preparing'],
-  preparing:    ['confirmed'],
-  confirmed:    ['awaiting_confirmation'],
-  delayed:      ['awaiting_confirmation'],
-  not_answered: ['awaiting_confirmation'],
-  canceled:     ['awaiting_confirmation', 'confirmed'],
+  done:         ['packaging'],
+  packaging:    ['confirmed'],
+  confirmed:    ['new'],
+  delayed:      ['new'],
+  not_answered: ['new'],
   returned:     ['done'],
-  exchanged:    ['done'],
+  canceled:     ['new', 'confirmed'],
 };
 
 function getPrimarySort(ordering: string) {
-  const first = ordering.split(',')[0] || DEFAULT_ORDERING;
+  const first = ordering.split(',')[0] || DEFAULT_LIFO_ORDERING;
   return {
     field: first.replace(/^-/, ''),
     direction: first.startsWith('-') ? 'desc' : 'asc',
@@ -263,12 +284,46 @@ const fmtDate = (d: string) =>
   new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 
 const isDirectPOSCompleted = (order: OrderListItem) =>
-  order.source === 'POS' && order.status === 'COMPLETED' && !order.in_store_pickup;
+  order.source === 'POS' && order.status === 'done' && !order.in_store_pickup;
 
-function PriorityBadge({ priority }: { priority?: number | null }) {
-  if (!priority || priority > 5) return <Badge variant="outline" className="text-[10px]">Normal</Badge>;
-  if (priority <= 2) return <Badge className="text-[10px] bg-rose-600 hover:bg-rose-600">Call client</Badge>;
-  return <Badge className="text-[10px] bg-blue-600 hover:bg-blue-600">Next step</Badge>;
+function PriorityBadge({
+  actionPriority,
+  businessPriority,
+}: Readonly<{
+  actionPriority?: number | null;
+  businessPriority?: OrderListItem['priority_level'];
+}>) {
+  let actionBadge: ReactNode;
+  if (actionPriority === 0) {
+    actionBadge = <Badge className="bg-rose-600 text-[10px] hover:bg-rose-600">Overdue</Badge>;
+  } else if (actionPriority === 1) {
+    actionBadge = <Badge className="bg-rose-600 text-[10px] hover:bg-rose-600">Action now</Badge>;
+  } else if (actionPriority === 2) {
+    actionBadge = <Badge className="bg-amber-600 text-[10px] hover:bg-amber-600">Follow-up</Badge>;
+  } else if (actionPriority != null && actionPriority <= 5) {
+    actionBadge = <Badge className="bg-blue-600 text-[10px] hover:bg-blue-600">Next step</Badge>;
+  } else {
+    actionBadge = <Badge variant="outline" className="text-[10px]">Normal</Badge>;
+  }
+
+  const businessClass = businessPriority === 'high'
+    ? 'border-violet-300 bg-violet-50 text-violet-700'
+    : businessPriority === 'low'
+      ? 'border-slate-300 bg-slate-50 text-slate-600'
+      : 'border-amber-300 bg-amber-50 text-amber-700';
+
+  return (
+    <div className="flex min-w-[92px] flex-col items-start gap-1">
+      {actionBadge}
+      <Badge
+        variant="outline"
+        className={`text-[9px] capitalize ${businessClass}`}
+        title="Business priority combines order value and stock availability."
+      >
+        {businessPriority ?? 'medium'} priority
+      </Badge>
+    </div>
+  );
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
@@ -303,14 +358,15 @@ export default function OrdersPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [flowFilter, setFlowFilter] = useState<OrderFlowTab>('all');
-  const [statusFilter, setStatusFilter] = useState('all');
+  const [priorityFilter, setPriorityFilter] = useState('all');
   const [sourceFilter, setSourceFilter] = useState('all');
   const [paymentFilter, setPaymentFilter] = useState('all');
   const [brandFilter, setBrandFilter] = useState('all');
   const [channelFilter, setChannelFilter] = useState('all');
-  const [ordering, setOrdering] = useState(DEFAULT_ORDERING);
+  const [ordering, setOrdering] = useState(DEFAULT_LIFO_ORDERING);
   const [includeDeleted, setIncludeDeleted] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
+  const [pageJump, setPageJump] = useState('1');
   const [totalOrders, setTotalOrders] = useState(0);
   const pageSize = 20;
 
@@ -318,7 +374,11 @@ export default function OrdersPage() {
   const [viewOrder, setViewOrder] = useState<OrderDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [editMode, setEditMode] = useState(false);
+  // The working lock. `editLockToken` is non-empty only while WE hold the lock
+  // (acquired on open); `lockedByOther` carries the holder when SOMEONE ELSE has
+  // it (we then view read-only until we take over).
   const [editLockToken, setEditLockToken] = useState('');
+  const [lockedByOther, setLockedByOther] = useState<{ user_name: string; user_id: number | null } | null>(null);
   // Take-over prompt shown when another user already holds this order's lock.
   const [takeoverInfo, setTakeoverInfo] = useState<{ orderId: number; userName: string } | null>(null);
   // Mirror of the active lock so it can be best-effort released on page unload.
@@ -330,6 +390,18 @@ export default function OrdersPage() {
   const [loadingPackagingProducts, setLoadingPackagingProducts] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   const [mutatingOrder, setMutatingOrder] = useState(false);
+  // Per-order tally of failed Confirm/Delay attempts, keyed by order id so one
+  // order's failures never leak into another's (scoped per order, not global).
+  // Drives the last-resort Cancel button in the detail popup: it stays hidden
+  // until an order's confirm/delay has failed 3 times, and the count resets the
+  // moment either action succeeds.
+  const [actionFailures, setActionFailures] = useState<Record<number, number>>({});
+  const bumpActionFailure = (id: number) =>
+    setActionFailures(prev => ({ ...prev, [id]: (prev[id] ?? 0) + 1 }));
+  const resetActionFailure = (id: number) =>
+    setActionFailures(prev => (prev[id] ? { ...prev, [id]: 0 } : prev));
+  // Missing-stock review popup shown before Confirm / Send-delivery proceed.
+  const [stockWarn, setStockWarn] = useState<{ title: string; items: MissingStockLine[]; onProceed: () => void } | null>(null);
   const [logsDialog, setLogsDialog] = useState(false);
   const [orderLogs, setOrderLogs] = useState<OrderLogEntry[]>([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
@@ -420,6 +492,8 @@ export default function OrdersPage() {
   const canSoftDelete = hasPermission(user, 'soft_delete_orders');
   const canRestoreDeleted = hasPermission(user, 'restore_soft_deleted_orders');
   const canViewDeleted = hasPermission(user, 'view_soft_deleted_orders');
+  const canViewInvoices = hasPermission(user, 'view_invoices');
+  const canEditInvoiceNumbers = hasPermission(user, 'edit_invoice_numbers');
   // Phase D — admin/manager-only audited backward status override.
   const canManualOverride = hasPermission(user, 'manual_status_override');
   const deferredSearch = useDeferredValue(search);
@@ -431,21 +505,20 @@ export default function OrdersPage() {
     return Array.from(m.entries()).map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
   }, [channels]);
 
-  const visibleFlowTabs = useMemo(
-    () => FLOW_TABS.filter(tab => tab.value !== 'deleted' || canViewDeleted),
-    [canViewDeleted],
-  );
+  // The tabs are exactly the six canonical statuses (+ All); soft-deleted
+  // rows live behind the "Include deleted" checkbox, not a tab.
+  const visibleFlowTabs = FLOW_TABS;
 
   const hasActiveFilters = Boolean(
     deferredSearch ||
     flowFilter !== 'all' ||
-    statusFilter !== 'all' ||
+    priorityFilter !== 'all' ||
     sourceFilter !== 'all' ||
     paymentFilter !== 'all' ||
     brandFilter !== 'all' ||
     channelFilter !== 'all' ||
     includeDeleted ||
-    ordering !== DEFAULT_ORDERING,
+    ordering !== defaultOrderingForFlow(flowFilter),
   );
 
   /* ══════════════════════════════════════════════════════════════════════════ */
@@ -463,42 +536,47 @@ export default function OrdersPage() {
   const clearFilters = useCallback(() => {
     setSearch('');
     setFlowFilter('all');
-    setStatusFilter('all');
+    setPriorityFilter('all');
     setSourceFilter('all');
     setPaymentFilter('all');
     setBrandFilter('all');
     setChannelFilter('all');
     setIncludeDeleted(false);
-    setOrdering(DEFAULT_ORDERING);
+    setOrdering(DEFAULT_LIFO_ORDERING);
+  }, []);
+
+  const handleFlowFilterChange = useCallback((flow: OrderFlowTab) => {
+    setFlowFilter(flow);
+    setOrdering(defaultOrderingForFlow(flow));
+    setCurrentPage(1);
   }, []);
 
   const fetchData = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!silent) setLoading(true);
     try {
       const sharedFilters = {
-        ...(statusFilter !== 'all' ? { status: statusFilter as OrderStatus } : {}),
+        ...(priorityFilter !== 'all'
+          ? { priority_level: priorityFilter as 'high' | 'medium' | 'low' }
+          : {}),
         ...(sourceFilter !== 'all' ? { source: sourceFilter } : {}),
         ...(paymentFilter !== 'all' ? { payment_status: paymentFilter } : {}),
         ...(brandFilter !== 'all' ? { brand: Number(brandFilter) } : {}),
         ...(channelFilter !== 'all' ? { sales_channel: Number(channelFilter) } : {}),
         ...(deferredSearch ? { search: deferredSearch } : {}),
       };
-      // Phase D — translate the active tab into the clean order_status filter.
-      // 'all' filters nothing; 'deleted' is orthogonal to order_status so it
-      // keeps the dedicated is_deleted flow; every other tab maps to one or
-      // more order_status values (joined for grouped tabs like Pending/Returns).
+      // Each tab maps 1:1 to a canonical order_status value; 'all' filters
+      // nothing. The backend excludes exception-overlaid rows from specific
+      // status queries, so tab contents always match the tab counts.
       const activeTab = FLOW_TABS.find(t => t.value === flowFilter);
-      const tabParams: { flow?: string; order_status?: string } =
+      const tabParams: { status?: string } =
         flowFilter === 'all'
           ? {}
-          : flowFilter === 'deleted'
-            ? { flow: 'deleted' }
-            : { order_status: (activeTab?.statuses ?? []).join(',') };
+          : { status: (activeTab?.statuses ?? []).join(',') };
       const [ordersRes, summaryRes] = await Promise.all([
         orderService.getAll({
           page: currentPage,
           page_size: pageSize,
-          include_deleted: (includeDeleted || flowFilter === 'deleted') && canViewDeleted,
+          include_deleted: includeDeleted && canViewDeleted,
           ordering,
           ...tabParams,
           ...sharedFilters,
@@ -533,7 +611,7 @@ export default function OrdersPage() {
     ordering,
     paymentFilter,
     sourceFilter,
-    statusFilter,
+    priorityFilter,
   ]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
@@ -650,60 +728,112 @@ export default function OrdersPage() {
     ordering,
     paymentFilter,
     sourceFilter,
-    statusFilter,
+    priorityFilter,
   ]);
 
   const totalPages = Math.max(1, Math.ceil(totalOrders / pageSize));
+  const paginationItems = useMemo(
+    () => buildPaginationItems(currentPage, totalPages),
+    [currentPage, totalPages],
+  );
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+      return;
+    }
+    setPageJump(String(currentPage));
+  }, [currentPage, totalPages]);
+
+  const goToPage = useCallback(() => {
+    const parsed = Number.parseInt(pageJump, 10);
+    if (!Number.isFinite(parsed)) {
+      setPageJump(String(currentPage));
+      return;
+    }
+    const target = Math.min(totalPages, Math.max(1, parsed));
+    setCurrentPage(target);
+    setPageJump(String(target));
+  }, [currentPage, pageJump, totalPages]);
 
   /* ══════════════════════════════════════════════════════════════════════════ */
   /* DETAIL / EDIT ACTIONS                                                    */
   /* ══════════════════════════════════════════════════════════════════════════ */
 
-  const openDetail = async (id: number, opts?: { force?: boolean }) => {
+  // Build the editable form snapshot from an order detail. Pure — reused when
+  // opening the popup and when (re)entering edit mode with a fresh snapshot.
+  const buildEditForm = (detail: OrderDetail): OrderEditRequest => {
+    const customerLines = detail.customer_lines ?? detail.lines.filter(line => line.product_type !== 'packaging_item');
+    return {
+      lines: customerLines.map((l): OrderEditLineInput => ({
+        id: l.id, product: l.product, product_name: l.product_name,
+        barcode: l.barcode, quantity: l.quantity, unit_price: l.unit_price,
+      })),
+      discount_type: detail.discount_type,
+      discount_value: detail.discount_value,
+      // Seed the EFFECTIVE delivery fee: WooCommerce orders carry the courier
+      // fee on shipping_total (not always mirrored to delivery_fee on older
+      // rows), so fall back to it. This makes the edit fee toggle start checked
+      // for any order that actually has a fee, and saving heals delivery_fee.
+      delivery_fee: parseFloat(detail.delivery_fee) > 0 ? detail.delivery_fee : detail.shipping_total,
+      customer_note: detail.customer_note,
+      internal_note: detail.internal_note,
+      // Billing fields
+      billing_first_name: detail.billing_first_name,
+      billing_last_name: detail.billing_last_name,
+      billing_company: detail.billing_company,
+      billing_email: detail.billing_email,
+      billing_phone: detail.billing_phone,
+      billing_address_1: detail.billing_address_1,
+      billing_address_2: detail.billing_address_2,
+      billing_city: detail.billing_city,
+      billing_state: detail.billing_state,
+      billing_postcode: detail.billing_postcode,
+      billing_country: detail.billing_country,
+      // Shipping / delivery fields
+      shipping_first_name: detail.shipping_first_name,
+      shipping_last_name: detail.shipping_last_name,
+      shipping_phone: detail.shipping_phone,
+      shipping_address_1: detail.shipping_address_1,
+      shipping_city: detail.shipping_city,
+      shipping_state: detail.shipping_state,
+      shipping_postcode: detail.shipping_postcode,
+      shipping_country: detail.shipping_country,
+    };
+  };
+
+  // Open an order and ACQUIRE its working lock so only one user handles it at a
+  // time. If another user already holds the lock, open read-only and remember
+  // who has it — the user can then take over. The backend rejects (409) any
+  // mutating action from a non-holder, so this is a real concurrency guard, not
+  // just UI.
+  const openDetail = async (id: number) => {
     setDetailLoading(true);
     try {
-      // Acquire (or take over) the exclusive lock BEFORE opening the popup —
-      // the backend is the source of truth for who is handling the order.
-      let lockResult;
+      let lockResult: Awaited<ReturnType<typeof orderService.acquireEditLock>> | null = null;
+      let heldBy: { user_name?: string | null; user_id?: number | null } | null = null;
       try {
-        lockResult = await orderService.acquireEditLock(id, opts?.force ?? false);
+        lockResult = await orderService.acquireEditLock(id, false);
       } catch (err: unknown) {
-        const response = (err as { response?: { status?: number; data?: { lock?: { user_name?: string | null } } } }).response;
-        if (response?.status === 409 && !opts?.force) {
-          // Held by someone else → ask whether to take over (take-over dialog).
-          setTakeoverInfo({ orderId: id, userName: response.data?.lock?.user_name || 'another user' });
-          return;
+        const response = (err as { response?: { status?: number; data?: { lock?: { user_name?: string | null; user_id?: number | null } } } }).response;
+        if (response?.status === 409) {
+          heldBy = response.data?.lock ?? null; // held by someone else → take over
         }
-        throw err;
+        // Any other failure (permission, transient) just degrades to read-only —
+        // opening an order to view must never hard-fail on the lock.
       }
-
-      const detail = await orderService.getById(id);
-      setEditLockToken(lockResult.lock.token);
+      // Prefer the fresh snapshot the lock response carries; otherwise fetch.
+      const detail = lockResult?.order ?? await orderService.getById(id);
       setViewOrder(detail);
       setEditMode(false);
-      const customerLines = detail.customer_lines ?? detail.lines.filter(line => line.product_type !== 'packaging_item');
-      setEditForm({
-        lines: customerLines.map((l): OrderEditLineInput => ({
-          id: l.id, product: l.product, product_name: l.product_name,
-          barcode: l.barcode, quantity: l.quantity, unit_price: l.unit_price,
-        })),
-        discount_type: detail.discount_type,
-        discount_value: detail.discount_value,
-        customer_note: detail.customer_note,
-        internal_note: detail.internal_note,
-        // Billing fields
-        billing_first_name: detail.billing_first_name,
-        billing_last_name: detail.billing_last_name,
-        billing_company: detail.billing_company,
-        billing_email: detail.billing_email,
-        billing_phone: detail.billing_phone,
-        billing_address_1: detail.billing_address_1,
-        billing_address_2: detail.billing_address_2,
-        billing_city: detail.billing_city,
-        billing_state: detail.billing_state,
-        billing_postcode: detail.billing_postcode,
-        billing_country: detail.billing_country,
-      });
+      setEditForm(buildEditForm(detail));
+      if (lockResult) {
+        setEditLockToken(lockResult.lock.token);
+        setLockedByOther(null);
+      } else {
+        setEditLockToken('');
+        setLockedByOther({ user_name: heldBy?.user_name || 'another user', user_id: heldBy?.user_id ?? null });
+      }
     } catch (err) {
       console.error('Failed to load order detail', err);
       setErrorMessage(extractErrorMessage(err, 'Failed to load order detail.'));
@@ -713,10 +843,35 @@ export default function OrdersPage() {
     }
   };
 
+  // Take over an order another user holds — force-acquires the lock (logged on
+  // the backend as EDIT_LOCK_TAKEN_OVER) so the previous holder's in-flight
+  // actions are rejected and we become the sole handler.
+  const takeOverLock = async (id: number) => {
+    try {
+      const lockResult = await orderService.acquireEditLock(id, true);
+      if (lockResult.order) {
+        setViewOrder(lockResult.order);
+        setEditForm(buildEditForm(lockResult.order));
+      }
+      setEditLockToken(lockResult.lock.token);
+      setLockedByOther(null);
+    } catch (err) {
+      setErrorMessage(extractErrorMessage(err, 'Failed to take over this order.'));
+      setErrorDialog(true);
+    }
+  };
+
   const handleStatusChange = async (id: number, status: OrderStatus) => {
     try {
-      await orderService.updateStatus(id, status);
-      const updated = await orderService.getById(id);
+      const current = viewOrder?.id === id ? viewOrder.status : undefined;
+      const onMatrix = current
+        ? (ALLOWED_NEXT_STATUSES[current] ?? []).includes(status)
+        : true;
+      // Off-matrix moves (reopening canceled/returned) go through the
+      // audited, permission-gated manual-override endpoint.
+      const updated = onMatrix
+        ? await orderService.transitionStatus(id, status)
+        : await orderService.manualTransition(id, status, 'Status changed manually from the order detail.');
       setViewOrder(updated);
       fetchData();
     } catch (err) {
@@ -726,47 +881,49 @@ export default function OrdersPage() {
     }
   };
 
-  const handleStatusFieldsChange = async (id: number, payload: OrderStatusFieldsPayload) => {
-    try {
-      const updated = await orderService.updateStatusFields(id, payload);
-      setViewOrder(updated);
-      fetchData();
-      setSuccessMessage('Order status updated.');
-      setSuccessDialog(true);
-    } catch (err) {
-      console.error('Failed to update order statuses', err);
-      setErrorMessage(extractErrorMessage(err, 'Failed to update order statuses.'));
-      setErrorDialog(true);
-    }
-  };
 
   const handleEditModeChange = (enabled: boolean) => {
     if (!viewOrder) return;
-    // The exclusive lock is acquired when the popup opens and held for its whole
-    // lifetime (released on close / takeover), so toggling edit mode only flips
-    // the UI here — there is no separate lock to acquire or release.
+    // We already hold the working lock for the whole detail session (taken on
+    // open), so toggling edit mode is a pure UI flip — the lock is released on
+    // close, not here.
     setEditMode(enabled);
   };
 
-  // Keep the lock alive while the popup is open. A 409 means another user took
-  // the order over, so we close our popup (the backend rejects us anyway).
+  // Keep the lock alive while we hold it (the detail is open). A genuine 409
+  // where a DIFFERENT user actively holds the lock means someone took over: we
+  // drop to read-only (the backend rejects our writes anyway) and surface who.
+  // Network blips, timeouts, transient 5xx, or our own lapsed lock must NOT
+  // trigger the takeover handling — the next heartbeat simply retries.
   useEffect(() => {
     if (!viewOrder || !editLockToken) return undefined;
     const timer = window.setInterval(async () => {
       try {
         await orderService.heartbeatEditLock(viewOrder.id, editLockToken);
       } catch (err: unknown) {
-        const response = (err as { response?: { data?: { lock?: { user_name?: string | null } } } }).response;
-        const name = response?.data?.lock?.user_name || 'another user';
+        const response = (err as {
+          response?: {
+            status?: number;
+            data?: { lock?: { user_id?: number | null; user_name?: string | null; locked?: boolean } };
+          };
+        }).response;
+        const lock = response?.data?.lock;
+        const takenOverByOther =
+          response?.status === 409 &&
+          lock?.locked === true &&
+          lock?.user_id != null &&
+          lock.user_id !== user?.id;
+        if (!takenOverByOther) return; // transient error / self-heal → keep holding
+        // Lost the lock — switch this popup to read-only and show who took over.
         setEditLockToken('');
         setEditMode(false);
-        setViewOrder(null);
-        setErrorMessage(`This order was taken over by ${name}.`);
+        setLockedByOther({ user_name: lock?.user_name || 'another user', user_id: lock?.user_id ?? null });
+        setErrorMessage(`This order was taken over by ${lock?.user_name || 'another user'}. You're now in read-only mode.`);
         setErrorDialog(true);
       }
     }, 20_000);
     return () => window.clearInterval(timer);
-  }, [editMode, editLockToken, viewOrder?.id]);
+  }, [editLockToken, viewOrder?.id, user?.id]);
 
   // Mirror the active lock into a ref + release it best-effort if the user
   // navigates away or closes the tab with the popup still open. The 90s server
@@ -967,15 +1124,28 @@ export default function OrdersPage() {
           unit_price: String(l.unit_price ?? '0'),
         })),
       };
+      const customerIdentityChanged = (
+        (payload.billing_first_name ?? '') !== (viewOrder.billing_first_name ?? '')
+        || (payload.billing_last_name ?? '') !== (viewOrder.billing_last_name ?? '')
+        || (payload.billing_email ?? '') !== (viewOrder.billing_email ?? '')
+        || (payload.billing_phone ?? '') !== (viewOrder.billing_phone ?? '')
+      );
       const updated = await orderService.editOrder(viewOrder.id, payload);
-      if (editLockToken) {
-        orderService.releaseEditLock(viewOrder.id, editLockToken).catch(() => undefined);
-        setEditLockToken('');
-      }
+      // Keep the working lock — the user is still on the order. It's released
+      // when the detail popup closes, not on each save.
       setViewOrder(updated);
       setEditMode(false);
-      await fetchData();
-      setSuccessMessage('Order updated successfully.'); setSuccessDialog(true);
+      if (customerIdentityChanged && search.trim()) {
+        // A search for the previous name/phone would immediately hide the row
+        // after saving. Clear it and let the normal filter effect reload page 1.
+        setSearch('');
+        setCurrentPage(1);
+        setSuccessMessage('Order updated. Customer search was cleared to keep the order visible.');
+      } else {
+        await fetchData();
+        setSuccessMessage('Order updated successfully.');
+      }
+      setSuccessDialog(true);
     } catch (err) {
       setErrorMessage(extractErrorMessage(err, 'Failed to update order.')); setErrorDialog(true);
     } finally {
@@ -1009,6 +1179,33 @@ export default function OrdersPage() {
     } finally { setMutatingOrder(false); }
   };
 
+  const handleCreateInvoice = async () => {
+    if (!viewOrder) return;
+    setMutatingOrder(true);
+    try {
+      const updated = await orderService.createInvoice(viewOrder.id);
+      setViewOrder(updated);
+      setOrders(current => current.map(order => (
+        order.id === updated.id ? { ...order, ...updated } : order
+      )));
+    } catch (err) {
+      setErrorMessage(extractErrorMessage(err, 'Failed to create invoice.'));
+      setErrorDialog(true);
+      throw err;
+    } finally {
+      setMutatingOrder(false);
+    }
+  };
+
+  const handleUpdateInvoice = async (payload: Parameters<typeof orderService.updateInvoice>[1]) => {
+    if (!viewOrder) return;
+    const updated = await orderService.updateInvoice(viewOrder.id, payload);
+    setViewOrder(updated);
+    setOrders(current => current.map(order => (
+      order.id === updated.id ? { ...order, ...updated } : order
+    )));
+  };
+
   const handleOpenLogs = async () => {
     if (!viewOrder) return;
     setLoadingLogs(true); setLogsDialog(true);
@@ -1030,9 +1227,11 @@ export default function OrdersPage() {
       const updated = await orderService.confirmOrder(id);
       setViewOrder(updated);
       await fetchData();
+      resetActionFailure(id); // success → clear the failed-attempt tally
       setSuccessMessage('Order confirmed successfully.');
       setSuccessDialog(true);
     } catch (err) {
+      bumpActionFailure(id); // no successful response → count it toward Cancel
       setErrorMessage(extractErrorMessage(err, 'Failed to confirm order.'));
       setErrorDialog(true);
     } finally { setMutatingOrder(false); }
@@ -1046,8 +1245,8 @@ export default function OrdersPage() {
       await fetchData();
       const attempts = updated.not_answered_attempts ?? 0;
       setSuccessMessage(
-        attempts > 3
-          ? `No answer recorded (${attempts} attempts). You can now delay or cancel the order.`
+        attempts >= 3
+          ? `No answer recorded (${attempts} attempts). Consider delaying the order for a later follow-up.`
           : `No answer recorded (${attempts} attempt${attempts === 1 ? '' : 's'}).`
       );
       setSuccessDialog(true);
@@ -1063,9 +1262,11 @@ export default function OrdersPage() {
       const updated = await orderService.delayOrder(id, data);
       setViewOrder(updated);
       await fetchData();
+      resetActionFailure(id); // success → clear the failed-attempt tally
       setSuccessMessage('Order marked as delayed.');
       setSuccessDialog(true);
     } catch (err) {
+      bumpActionFailure(id); // no successful response → count it toward Cancel
       setErrorMessage(extractErrorMessage(err, 'Failed to delay order.'));
       setErrorDialog(true);
     } finally { setMutatingOrder(false); }
@@ -1161,13 +1362,13 @@ export default function OrdersPage() {
   // Mirror the per-row gates: only confirmed orders not already routed qualify.
   const posEligibleIds = useMemo(
     () => selectedOrders
-      .filter(o => !o.is_deleted && o.outcome === 'CONFIRMED' && !o.sent_to_pos_at && !o.delivery_reference)
+      .filter(o => !o.is_deleted && o.status === 'confirmed' && !o.sent_to_pos_at && !o.delivery_reference)
       .map(o => o.id),
     [selectedOrders],
   );
   const deliveryEligibleIds = useMemo(
     () => selectedOrders
-      .filter(o => !o.is_deleted && o.outcome === 'CONFIRMED' && !o.in_store_pickup && !o.delivery_reference)
+      .filter(o => !o.is_deleted && o.status === 'confirmed' && !o.in_store_pickup && !o.delivery_reference)
       .map(o => o.id),
     [selectedOrders],
   );
@@ -1253,9 +1454,14 @@ export default function OrdersPage() {
     setBulkReason('');
   };
 
-  /* ── manual rollback + WC re-sync (Phase D) ─── */
+  /* ── manual rollback + exception reopen + WC re-sync ─── */
+  // Targets come from the overlay map when the order is cancelled/returned/
+  // exchanged (reopen), otherwise from the backward pipeline map.
+  const manualTargetsFor = (order: OrderListItem | OrderDetail) =>
+    MANUAL_TRANSITIONS[order.status] ?? [];
+
   const openManualRollback = (order: OrderListItem | OrderDetail) => {
-    const targets = MANUAL_TRANSITIONS[order.order_status] ?? [];
+    const targets = manualTargetsFor(order);
     setManualOrder(order);
     setManualTarget(targets[0] ?? '');
     setManualReason('');
@@ -1267,13 +1473,13 @@ export default function OrdersPage() {
     try {
       const updated = await orderService.manualTransition(
         manualOrder.id,
-        manualTarget as OrderListItem['order_status'],
+        manualTarget as OrderListItem['status'],
         manualReason.trim(),
       );
       if (viewOrder?.id === updated.id) setViewOrder(updated);
       setManualOrder(null);
       await fetchData();
-      setSuccessMessage(`Order rolled back to "${cleanStatusLabel(updated.order_status)}".`);
+      setSuccessMessage(`Order rolled back to "${orderStatusLabel(updated.status)}".`);
       setSuccessDialog(true);
     } catch (err) {
       setErrorMessage(extractErrorMessage(err, 'Failed to override order status.'));
@@ -1328,10 +1534,10 @@ export default function OrdersPage() {
     }
   };
 
-  const handleSubmitDelivery = async (id: number) => {
+  const handleSubmitDelivery = async (id: number, force = false) => {
     setMutatingOrder(true);
     try {
-      await orderService.submitDelivery(id);
+      await orderService.submitDelivery(id, { force });
       // Pull the fresh detail (now carrying the delivery reference/code) so the
       // packaging popup can show the dispatch context.
       const detail = await orderService.getById(id);
@@ -1362,6 +1568,23 @@ export default function OrdersPage() {
       setMutatingOrder(false);
     }
   };
+
+  // Stock guard — stock is reserved when an order is SENT TO DELIVERY (not at
+  // confirm, which is now a plain status move). Dispatching an order whose
+  // products are short stays POSSIBLE, but we surface a review popup first
+  // listing the shortfalls; acknowledging it sends as a backorder (force).
+  // (Only the detail popup carries per-product stock, so the guard runs there.)
+  const guardStock = (id: number, title: string, run: (forced: boolean) => void) => {
+    const ord = viewOrder?.id === id ? viewOrder : undefined;
+    const missing = ord ? getMissingStock(ord) : [];
+    if (missing.length > 0) {
+      setStockWarn({ title, items: missing, onProceed: () => run(true) });
+    } else {
+      run(false);
+    }
+  };
+  const submitDeliveryWithStockGuard = (id: number) =>
+    guardStock(id, 'Send to delivery with missing products?', forced => handleSubmitDelivery(id, forced));
 
   // Save from the focused packaging popup: persist, mark the order done, refresh
   // the list, then close the popup and confirm.
@@ -1432,7 +1655,7 @@ export default function OrdersPage() {
   const handleConfirmReturn = async (payload: {
     returnReason: string;
     returnType: 'RETURNED' | 'EXCHANGED' | 'DAMAGED' | 'MISSING' | 'OTHER';
-    lineConditions: Array<{ line_id: number; condition: 'GOOD' | 'DAMAGED' | 'MISSING' }>;
+    lineConditions: ReturnLineCondition[];
   }) => {
     if (!returnOrder) return;
     const targetId = returnOrder.id;
@@ -1592,20 +1815,18 @@ export default function OrdersPage() {
   /* RENDER                                                                   */
   /* ══════════════════════════════════════════════════════════════════════════ */
 
-  // Phase D — every tab count is summed from the clean order_status breakdown
-  // (order_status_kpis.by_status), the same field the row chip renders. Tabs,
-  // counts and badges therefore always agree. 'deleted' is counted separately
-  // (it is orthogonal to order_status).
+  // Every tab count comes from the canonical order_status breakdown
+  // (order_status_kpis.by_status, exception-overlaid rows excluded) — the same
+  // field the row chip renders, so tabs, counts and badges always agree.
   const tabCounts = useMemo(() => {
     const byStatus = summary?.order_status_kpis?.by_status ?? {};
-    const sumOf = (keys: CleanOrderStatus[]) =>
+    const sumOf = (keys: OrderStatus[]) =>
       keys.reduce((n, k) => n + (byStatus[k] ?? 0), 0);
     const counts: Record<string, number> = {
       all: summary?.order_status_kpis?.total_orders ?? summary?.total_orders ?? 0,
-      deleted: summary?.flow_counts?.deleted ?? 0,
     };
     for (const tab of FLOW_TABS) {
-      if (tab.value === 'all' || tab.value === 'deleted') continue;
+      if (tab.value === 'all') continue;
       counts[tab.value] = sumOf(tab.statuses);
     }
     return counts;
@@ -1617,10 +1838,10 @@ export default function OrdersPage() {
       {/* ── Header ─── */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-2 tracking-tight">
-            <ShoppingCart className="size-6" /> Order Operations
+          <h1 className="text-xl sm:text-2xl font-bold flex items-center gap-2 tracking-tight">
+            <ShoppingCart className="size-5 sm:size-6" /> Order Operations
           </h1>
-          <p className="text-muted-foreground text-sm mt-0.5">
+          <p className="text-muted-foreground text-xs sm:text-sm mt-0.5">
             Confirm clients, route orders to POS, submit delivery, and process returns
           </p>
         </div>
@@ -1683,67 +1904,53 @@ export default function OrdersPage() {
         </Card>
       )}
 
-      {/* ── KPIs ─── */}
-      {summary && (
-        <div className="space-y-3">
-          <div className={`grid grid-cols-2 gap-3 ${showRevenue ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
-            <KpiCard title="Total" value={summary.total_orders} icon={<ShoppingCart className="size-3" />} />
-            <KpiCard title="Pending" value={summary.pending} tone="text-amber-600" icon={<Clock className="size-3" />} />
-            <KpiCard title="Processing" value={summary.processing} tone="text-blue-600" icon={<Package className="size-3" />} />
-            <KpiCard title="Completed" value={summary.completed} tone="text-emerald-600" icon={<CheckCircle className="size-3" />} />
+
+      {/* ── Lifecycle tabs ──────────────────────────────────────────────────
+          Canonical status tabs choose the lifecycle stage; the Filters card
+          below then narrows the working set shown in the queue. */}
+      <div className="space-y-3">
+        {canViewRevenue && summary && (showRevenue || showNetRevenue) && (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            {showNetRevenue && (
+              <KpiCard title="Net Revenue" value={`TND ${summary.order_status_kpis?.revenue}`} tone="text-emerald-600" icon={<TrendingUp className="size-3" />} />
+            )}
             {showRevenue && (
-              <KpiCard title="Revenue" value={`TND ${summary.revenue}`} tone="text-emerald-600" icon={<TrendingUp className="size-3" />} />
+              <KpiCard title="Gross Revenue" value={`TND ${summary.revenue}`} tone="text-muted-foreground" icon={<TrendingUp className="size-3" />} />
+            )}
+            {summary.order_status_kpis?.successful_sales != null && (
+              <KpiCard title="Successful Sales" value={summary.order_status_kpis.successful_sales} tone="text-emerald-600" icon={<CheckCircle className="size-3" />} />
             )}
           </div>
-          <div className="grid grid-cols-3 gap-3">
-            <KpiCard title="Confirmed" value={summary.confirmed_count} tone="text-emerald-600" icon={<CheckCircle className="size-3" />} />
-            <KpiCard title="Delayed" value={summary.delayed_count} tone="text-amber-600" icon={<Clock className="size-3" />} />
-            <KpiCard title="Cancelled" value={summary.cancelled_outcome} tone="text-red-600" icon={<ShoppingCart className="size-3" />} />
-          </div>
-          {/* Phase D — clean order_status KPIs (genuinely successful sales only). */}
-          {summary.order_status_kpis && (
-            <div className={`grid grid-cols-2 gap-3 ${showNetRevenue ? 'md:grid-cols-6' : 'md:grid-cols-5'}`}>
-              <KpiCard title="Successful Sales" value={summary.order_status_kpis.successful_sales} tone="text-emerald-600" icon={<CheckCircle className="size-3" />} />
-              {showNetRevenue && (
-                <KpiCard title="Net Revenue" value={`TND ${summary.order_status_kpis.revenue}`} tone="text-emerald-600" icon={<TrendingUp className="size-3" />} />
-              )}
-              <KpiCard title="In Confirmation" value={summary.order_status_kpis.in_confirmation} tone="text-amber-600" icon={<Phone className="size-3" />} />
-              <KpiCard title="In Fulfillment" value={summary.order_status_kpis.in_fulfillment} tone="text-blue-600" icon={<Package className="size-3" />} />
-              <KpiCard title="Returned" value={summary.order_status_kpis.returned} tone="text-purple-600" icon={<RotateCcw className="size-3" />} />
-              <KpiCard title="Canceled" value={summary.order_status_kpis.canceled} tone="text-red-600" icon={<X className="size-3" />} />
-            </div>
-          )}
-        </div>
-      )}
+        )}
 
-      {/* Flow tabs */}
-      <Tabs value={flowFilter} onValueChange={value => setFlowFilter(value as OrderFlowTab)}>
-        <TabsList className="flex h-auto w-full justify-start gap-1 overflow-x-auto rounded-md bg-muted/60 p-1">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-7">
           {visibleFlowTabs.map(tab => {
             const count = tabCounts[tab.value] ?? 0;
             const active = flowFilter === tab.value;
             return (
-              <TabsTrigger
+              <button
                 key={tab.value}
-                value={tab.value}
-                className="h-11 min-w-[118px] justify-between gap-2 px-2 text-xs data-[state=active]:shadow-sm"
+                type="button"
+                onClick={() => handleFlowFilterChange(tab.value)}
+                aria-pressed={active}
+                className={`flex flex-col gap-1 rounded-xl border p-3 text-left transition ${
+                  active
+                    ? 'border-primary bg-primary/5 shadow-sm ring-1 ring-primary'
+                    : 'border-border bg-card hover:border-primary/40 hover:bg-muted/40'
+                }`}
               >
-                <span className="flex min-w-0 items-center gap-1.5">
+                <span className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
                   {tab.icon}
-                  <span className="hidden truncate 2xl:inline">{tab.label}</span>
-                  <span className="truncate 2xl:hidden">{tab.shortLabel}</span>
+                  <span className="truncate">{tab.label}</span>
                 </span>
-                <Badge
-                  variant={active ? 'default' : 'secondary'}
-                  className={`h-5 min-w-6 justify-center rounded-full px-1.5 text-[10px] tabular-nums ${count === 0 ? 'opacity-60' : ''}`}
-                >
-                  {count > 999 ? '999+' : count}
-                </Badge>
-              </TabsTrigger>
+                <span className={`text-xl font-bold tabular-nums ${active ? 'text-primary' : ''}`}>
+                  {count > 9999 ? '9999+' : count}
+                </span>
+              </button>
             );
           })}
-        </TabsList>
-      </Tabs>
+        </div>
+      </div>
 
       {/* ── Filters ─── */}
       <Card className="border-muted/70">
@@ -1754,7 +1961,7 @@ export default function OrdersPage() {
           </CardTitle>
         </CardHeader>
         <CardContent className="p-4">
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-8">
             <div className="space-y-1.5 md:col-span-2 xl:col-span-2">
               <span className="text-xs font-medium text-muted-foreground">Search</span>
               <div className="relative">
@@ -1770,27 +1977,23 @@ export default function OrdersPage() {
                     <X className="size-3.5" />
                   </Button>
                 )}
-              <Input
-                  placeholder="Order id, order number, client name, phone..."
+                <Input
+                  placeholder="Order #, delivery name, phone, address..."
                   className="pl-9 pr-9"
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-              />
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                />
               </div>
             </div>
             <div className="space-y-1.5">
-              <span className="text-xs font-medium text-muted-foreground">Status</span>
-              <Select value={statusFilter} onValueChange={setStatusFilter}>
-                <SelectTrigger><SelectValue placeholder="Status" /></SelectTrigger>
+              <span className="text-xs font-medium text-muted-foreground">Business priority</span>
+              <Select value={priorityFilter} onValueChange={setPriorityFilter}>
+                <SelectTrigger><SelectValue placeholder="Priority" /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">All Status</SelectItem>
-                  <SelectItem value="PENDING">Pending</SelectItem>
-                  <SelectItem value="PROCESSING">Processing</SelectItem>
-                  <SelectItem value="ON_HOLD">On Hold</SelectItem>
-                  <SelectItem value="COMPLETED">Completed</SelectItem>
-                  <SelectItem value="CANCELLED">Cancelled</SelectItem>
-                  <SelectItem value="REFUNDED">Refunded</SelectItem>
-                  <SelectItem value="FAILED">Failed</SelectItem>
+                  <SelectItem value="all">All priorities</SelectItem>
+                  <SelectItem value="high">High</SelectItem>
+                  <SelectItem value="medium">Medium</SelectItem>
+                  <SelectItem value="low">Low</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -1819,6 +2022,20 @@ export default function OrdersPage() {
                 </SelectContent>
               </Select>
             </div>
+            {canFilterByBrand && (
+              <div className="space-y-1.5">
+                <span className="text-xs font-medium text-muted-foreground">Brand</span>
+                <Select value={brandFilter} onValueChange={setBrandFilter}>
+                  <SelectTrigger><SelectValue placeholder="Brand" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Brands</SelectItem>
+                    {availableBrands.map(brand => (
+                      <SelectItem key={brand.id} value={String(brand.id)}>{brand.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             <div className="space-y-1.5">
               <span className="text-xs font-medium text-muted-foreground">Channel</span>
               <Select value={channelFilter} onValueChange={setChannelFilter}>
@@ -1831,20 +2048,17 @@ export default function OrdersPage() {
                 </SelectContent>
               </Select>
             </div>
-            {canFilterByBrand ? (
-              <div className="space-y-1.5">
-                <span className="text-xs font-medium text-muted-foreground">Brand</span>
-                <Select value={brandFilter} onValueChange={setBrandFilter}>
-                  <SelectTrigger><SelectValue placeholder="Brand" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All Brands</SelectItem>
-                    {availableBrands.map(b => (
-                      <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            ) : <div />}
+            <div className="space-y-1.5">
+              <span className="text-xs font-medium text-muted-foreground">Sort</span>
+              <Select value={ordering} onValueChange={setOrdering}>
+                <SelectTrigger><SelectValue placeholder="Sort" /></SelectTrigger>
+                <SelectContent>
+                  {ORDER_SORT_OPTIONS.map(option => (
+                    <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </div>
 
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-sm">
@@ -1877,7 +2091,10 @@ export default function OrdersPage() {
         <div className="flex items-center justify-between border-b bg-muted/20 px-4 py-3">
           <div>
             <h2 className="text-sm font-semibold">Priority order queue</h2>
-            <p className="text-xs text-muted-foreground">Rows are sorted by action needed, client points, then newest.</p>
+            <p className="text-xs text-muted-foreground">
+              Action urgency and business priority are separate signals. Current sort:{' '}
+              {ORDER_SORT_OPTIONS.find(option => option.value === ordering)?.label ?? 'Table column'}.
+            </p>
           </div>
           {wsConnected ? (
             <span
@@ -1900,10 +2117,12 @@ export default function OrdersPage() {
             </span>
           )}
         </div>
-        <div className="overflow-x-auto">
+        {/* Desktop / tablet: full sortable table. Hidden on phones, which get
+            the touch-friendly card list below. */}
+        <div className="hidden overflow-x-auto md:block">
           <Table>
             <TableHeader>
-              <TableRow className="bg-muted/30">
+              <TableRow className="bg-muted/40">
                 <TableHead className="h-10 w-10 px-2">
                   <Checkbox
                     checked={allVisibleSelected ? true : (someVisibleSelected ? 'indeterminate' : false)}
@@ -1912,13 +2131,13 @@ export default function OrdersPage() {
                     aria-label="Select all orders on this page"
                   />
                 </TableHead>
-                <SortableHead label="Priority" field="lifecycle_priority" ordering={ordering} onSort={handleSort} />
+                <SortableHead label="Action / Priority" field="lifecycle_priority" ordering={ordering} onSort={handleSort} />
                 <SortableHead label="Order #" field="order_number" ordering={ordering} onSort={handleSort} />
-                <SortableHead label="Client" field="client__last_name" ordering={ordering} onSort={handleSort} />
+                <SortableHead label="Delivery contact" field="billing_last_name" ordering={ordering} onSort={handleSort} />
                 <SortableHead label="Points" field="client__points" ordering={ordering} onSort={handleSort} className="hidden lg:table-cell" />
                 <SortableHead label="Channel" field="sales_channel__name" ordering={ordering} onSort={handleSort} className="hidden md:table-cell" />
                 <SortableHead label="Source" field="source" ordering={ordering} onSort={handleSort} className="hidden sm:table-cell" />
-                <SortableHead label="Status" field="order_status" ordering={ordering} onSort={handleSort} />
+                <SortableHead label="Status" field="status" ordering={ordering} onSort={handleSort} />
                 <SortableHead label="Payment" field="payment_status" ordering={ordering} onSort={handleSort} className="hidden lg:table-cell" />
                 <SortableHead label="Total" field="total" ordering={ordering} onSort={handleSort} className="text-right" />
                 <SortableHead label="Date" field="created_at" ordering={ordering} onSort={handleSort} className="hidden md:table-cell" />
@@ -1946,7 +2165,7 @@ export default function OrdersPage() {
               {!loading && orders.map(o => (
                 <TableRow
                   key={o.id}
-                  className={`group hover:bg-muted/30 cursor-pointer transition-colors ${o.is_deleted ? 'opacity-50' : ''}`}
+                  className={`group cursor-pointer transition-colors ${ORDER_STATUS_ROW_STYLES[o.status] ?? 'hover:bg-muted/30'} ${o.is_deleted ? 'opacity-50' : ''}`}
                   onClick={() => openDetail(o.id)}
                 >
                   <TableCell className="px-2" onClick={e => e.stopPropagation()}>
@@ -1957,19 +2176,32 @@ export default function OrdersPage() {
                       aria-label={`Select order ${o.order_number}`}
                     />
                   </TableCell>
-                  <TableCell><PriorityBadge priority={o.lifecycle_priority} /></TableCell>
+                  <TableCell>
+                    <PriorityBadge
+                      actionPriority={o.lifecycle_priority}
+                      businessPriority={o.priority_level}
+                    />
+                  </TableCell>
                   <TableCell className="font-mono text-xs font-semibold">{o.order_number}</TableCell>
                   <TableCell>
-                    <div className="max-w-[170px]">
+                    {/* Delivery contact — the order's recipient snapshot (shipping
+                        block, billing fallback), NEVER the linked client record:
+                        customers change the recipient name/phone/address per order. */}
+                    <div className="max-w-[190px]">
                       <div className="flex items-center gap-1">
-                        <p className="truncate text-sm font-medium">{o.client_name ?? o.client_email ?? '—'}</p>
+                        <p className="truncate text-sm font-medium">{o.delivery_name || o.client_email || '—'}</p>
                         {o.client_is_blocked && (
                           <Badge variant="destructive" className="h-4 px-1 text-[9px] gap-0.5 shrink-0">
                             <AlertTriangle className="size-2.5" /> Blocked
                           </Badge>
                         )}
                       </div>
-                      <p className="truncate text-xs text-muted-foreground">{o.client_phone ?? o.client_email ?? o.billing_phone ?? 'No phone'}</p>
+                      <p className="truncate text-xs text-muted-foreground">{o.delivery_phone || 'No phone'}</p>
+                      {o.delivery_address && (
+                        <p className="truncate text-[11px] text-muted-foreground/80" title={o.delivery_address}>
+                          {o.delivery_address}
+                        </p>
+                      )}
                       {o.client_is_blocked && (
                         <p className="text-[10px] text-red-600">Returned {o.client_return_count ?? 0} times</p>
                       )}
@@ -1989,12 +2221,8 @@ export default function OrdersPage() {
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-1.5 flex-wrap">
-                      {/* Phase D — ONE canonical lifecycle chip (the derived
-                          order_status). The internal mechanism fields
-                          (workflow_status / contact_status / outcome / wc_status /
-                          packaging_status / final_outcome) now live only in the
-                          order detail dialog, so the list stays readable. */}
-                      <CleanStatusBadge status={o.order_status} label={o.order_status_display} />
+                      {/* THE canonical lifecycle chip. */}
+                      <OrderStatusBadge status={o.status} label={o.status_display} />
                       {/* WooCommerce push-sync state — only when noteworthy (hidden for 'imported'). */}
                       <SyncStatusBadge status={o.sync_status} label={o.sync_status_display} />
                       {o.is_deleted && <Badge variant="destructive" className="text-xs">Deleted</Badge>}
@@ -2025,7 +2253,7 @@ export default function OrdersPage() {
                           <DropdownMenuItem onClick={() => openDetail(o.id)} className="gap-2">
                             <Eye className="size-4" /> View Details
                           </DropdownMenuItem>
-                          {!o.is_deleted && (o.outcome === 'CONFIRMED' ? canUpdateConfirmedOrders : canUpdateUnconfirmedOrders) && (
+                          {!o.is_deleted && (['confirmed', 'packaging', 'done'].includes(o.status) ? canUpdateConfirmedOrders : canUpdateUnconfirmedOrders) && (
                             <DropdownMenuItem onClick={() => openDetail(o.id)} className="gap-2">
                               <Pencil className="size-4" /> Edit Order
                             </DropdownMenuItem>
@@ -2033,22 +2261,26 @@ export default function OrdersPage() {
                           <DropdownMenuItem onClick={() => { openDetail(o.id).then(() => { setLogsDialog(true); }); }} className="gap-2">
                             <History className="size-4" /> View Logs
                           </DropdownMenuItem>
-                          {!o.is_deleted && !isDirectPOSCompleted(o) && o.outcome !== 'CONFIRMED' && canConfirmOrders && (
+                          {/* Actions follow the one transition matrix:
+                              new → confirmed / not_answered / delayed;
+                              delayed | not_answered → confirmed;
+                              confirmed → packaging (POS / delivery) → done. */}
+                          {!o.is_deleted && !isDirectPOSCompleted(o) && ['new', 'delayed', 'not_answered'].includes(o.status) && canConfirmOrders && (
                             <DropdownMenuItem onClick={() => runLifecycleAction(() => orderService.confirmOrder(o.id), 'Order confirmed.')} className="gap-2">
                               <CheckCircle className="size-4" /> Confirm
                             </DropdownMenuItem>
                           )}
-                          {!o.is_deleted && !isDirectPOSCompleted(o) && o.outcome !== 'CONFIRMED' && o.contact_status !== 'DELAYED' && canUpdateUnconfirmedOrders && (
+                          {!o.is_deleted && !isDirectPOSCompleted(o) && o.status === 'new' && canUpdateUnconfirmedOrders && (
                             <DropdownMenuItem onClick={() => runLifecycleAction(() => orderService.markNotAnswered(o.id), 'No-answer attempt recorded.')} className="gap-2">
                               <Phone className="size-4" /> No Answer ({o.not_answered_attempts ?? 0})
                             </DropdownMenuItem>
                           )}
-                          {!o.is_deleted && o.outcome === 'DELAYED' && canDelayOrders && (
+                          {!o.is_deleted && o.status === 'delayed' && canDelayOrders && (
                             <DropdownMenuItem onClick={() => runLifecycleAction(() => orderService.restoreDelayed(o.id), 'Delayed order restored to pending.')} className="gap-2">
                               <Undo2 className="size-4" /> Restore Delay
                             </DropdownMenuItem>
                           )}
-                          {!o.is_deleted && !isDirectPOSCompleted(o) && o.outcome === 'CONFIRMED' && !o.sent_to_pos_at && !o.delivery_reference && canSendToPos && (
+                          {!o.is_deleted && !isDirectPOSCompleted(o) && o.status === 'confirmed' && !o.sent_to_pos_at && !o.delivery_reference && canSendToPos && (
                             <DropdownMenuItem onClick={() => openSendPOSDialog(o)} className="gap-2">
                               <Store className="size-4" /> Send to POS
                             </DropdownMenuItem>
@@ -2058,24 +2290,24 @@ export default function OrdersPage() {
                               <CheckCircle className="size-4" /> Validate POS
                             </DropdownMenuItem>
                           )}
-                          {!o.is_deleted && !isDirectPOSCompleted(o) && o.outcome === 'CONFIRMED' && !o.in_store_pickup && !o.delivery_reference && canSendToDelivery && (
+                          {!o.is_deleted && !isDirectPOSCompleted(o) && o.status === 'confirmed' && !o.in_store_pickup && !o.delivery_reference && canSendToDelivery && (
                             <DropdownMenuItem onClick={() => handleSubmitDelivery(o.id)} className="gap-2">
                               <Truck className="size-4" /> Send Delivery
                             </DropdownMenuItem>
                           )}
-                          {!o.is_deleted && !o.returned_at && (o.final_outcome === 'SUCCESSFUL_SALE' || o.delivery_status === 'DELIVERED' || o.pos_validated_at) && canProcessReturn && (
+                          {!o.is_deleted && o.status === 'done' && canProcessReturn && (
                             <DropdownMenuItem onClick={() => handleProcessReturn(o.id)} className="gap-2">
                               <RotateCcw className="size-4" /> Process Return
                             </DropdownMenuItem>
                           )}
-                          {/* Phase D — WooCommerce push retry for parked / failed syncs. */}
+                          {/* WooCommerce push retry for parked / failed syncs. */}
                           {!o.is_deleted && o.source === 'WOOCOMMERCE' && o.external_order_id && (o.sync_status === 'sync_failed' || o.sync_status === 'pending_sync') && canImportOrders && (
                             <DropdownMenuItem onClick={() => handleRetrySync(o.id)} className="gap-2">
                               <RefreshCw className="size-4" /> Retry WC Sync
                             </DropdownMenuItem>
                           )}
-                          {/* Phase D — audited, reason-required backward override (admin/manager). */}
-                          {!o.is_deleted && canManualOverride && (MANUAL_TRANSITIONS[o.order_status]?.length ?? 0) > 0 && (
+                          {/* Audited, reason-required backward override / exception reopen. */}
+                          {!o.is_deleted && canManualOverride && manualTargetsFor(o).length > 0 && (
                             <DropdownMenuItem onClick={() => openManualRollback(o)} className="gap-2 text-amber-700">
                               <ShieldAlert className="size-4" /> Manual Rollback
                             </DropdownMenuItem>
@@ -2105,13 +2337,92 @@ export default function OrdersPage() {
             </TableBody>
           </Table>
         </div>
+
+        {/* Phones: each order as a tappable card. Tap opens the full detail
+            (where every lifecycle action lives); the checkbox feeds bulk
+            actions. Keeps the data dense but readable on a narrow screen. */}
+        <div className="divide-y md:hidden">
+          {loading && (
+            <div className="flex flex-col items-center gap-2 py-16">
+              <Loader2 className="size-6 animate-spin text-muted-foreground" />
+              <span className="text-sm text-muted-foreground">Loading orders…</span>
+            </div>
+          )}
+          {!loading && orders.length === 0 && (
+            <div className="py-16 text-center text-sm text-muted-foreground">No orders found.</div>
+          )}
+          {!loading && orders.map(o => (
+            <div
+              key={o.id}
+              role="button"
+              tabIndex={0}
+              onClick={() => openDetail(o.id)}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(o.id); } }}
+              className={`flex w-full cursor-pointer flex-col gap-2 px-3 py-3 text-left transition-colors active:bg-muted/50 ${ORDER_STATUS_ROW_STYLES[o.status] ?? ''} ${o.is_deleted ? 'opacity-60' : ''}`}
+            >
+              {/* Top: select + order# + priority, status on the right */}
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span onClick={e => e.stopPropagation()} className="flex">
+                    <Checkbox
+                      checked={selectedIds.has(o.id)}
+                      onCheckedChange={() => toggleSelectOne(o.id)}
+                      disabled={o.is_deleted}
+                      aria-label={`Select order ${o.order_number}`}
+                    />
+                  </span>
+                  <span className="truncate font-mono text-xs font-semibold">{o.order_number}</span>
+                  <PriorityBadge actionPriority={o.lifecycle_priority} businessPriority={o.priority_level} />
+                </div>
+                <OrderStatusBadge status={o.status} label={o.status_display} />
+              </div>
+
+              {/* Delivery contact (recipient snapshot — never the client record) */}
+              <div className="min-w-0 pl-7">
+                <div className="flex items-center gap-1.5">
+                  <User className="size-3.5 shrink-0 text-muted-foreground" />
+                  <span className="truncate text-sm font-medium">{o.delivery_name || o.client_email || '—'}</span>
+                  {o.client_is_blocked && (
+                    <Badge variant="destructive" className="h-4 shrink-0 px-1 text-[9px]">Blocked</Badge>
+                  )}
+                </div>
+                {(o.delivery_phone || o.delivery_address) && (
+                  <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Phone className="size-3 shrink-0" />
+                    <span className="truncate">{o.delivery_phone || o.delivery_address}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer: badges + total/date + chevron affordance */}
+              <div className="flex items-center justify-between gap-2 border-t border-border/50 pt-2 pl-7">
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  <SourceBadge source={o.source} />
+                  <SyncStatusBadge status={o.sync_status} label={o.sync_status_display} />
+                  {o.is_deleted && <Badge variant="destructive" className="text-[10px]">Deleted</Badge>}
+                </div>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <div className="text-right">
+                    <p className="text-sm font-semibold tabular-nums">{fmtCurrency(o.currency, o.total)}</p>
+                    <p className="text-[11px] text-muted-foreground">{fmtDate(o.created_at)}</p>
+                  </div>
+                  <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
       </Card>
 
-      <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+      <div className="flex flex-col gap-3 text-sm lg:flex-row lg:items-center lg:justify-between">
         <span className="text-muted-foreground">
+          {totalOrders > 0
+            ? `Showing ${(currentPage - 1) * pageSize + 1}-${Math.min(currentPage * pageSize, totalOrders)} of ${totalOrders}`
+            : 'No orders'}
+          {' · '}
           Page {currentPage} of {totalPages}
         </span>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           <Button
             variant="outline"
             size="sm"
@@ -2120,6 +2431,35 @@ export default function OrdersPage() {
           >
             Previous
           </Button>
+
+          <div className="flex items-center gap-1" aria-label="Order result pages">
+            {paginationItems.map(item => (
+              typeof item === 'number' ? (
+                <Button
+                  key={item}
+                  type="button"
+                  variant={item === currentPage ? 'default' : 'outline'}
+                  size="icon"
+                  className="size-8 text-xs"
+                  disabled={loading}
+                  aria-label={`Go to page ${item}`}
+                  aria-current={item === currentPage ? 'page' : undefined}
+                  onClick={() => setCurrentPage(item)}
+                >
+                  {item}
+                </Button>
+              ) : (
+                <span
+                  key={item}
+                  className="flex size-8 items-center justify-center text-muted-foreground"
+                  aria-hidden
+                >
+                  …
+                </span>
+              )
+            ))}
+          </div>
+
           <Button
             variant="outline"
             size="sm"
@@ -2128,6 +2468,40 @@ export default function OrdersPage() {
           >
             Next
           </Button>
+
+          <div className="ml-1 flex items-center gap-1.5 border-l pl-2">
+            <Label htmlFor="orders-page-jump" className="whitespace-nowrap text-xs text-muted-foreground">
+              Go to
+            </Label>
+            <Input
+              id="orders-page-jump"
+              type="number"
+              min={1}
+              max={totalPages}
+              inputMode="numeric"
+              value={pageJump}
+              onChange={event => setPageJump(event.target.value)}
+              onKeyDown={event => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  goToPage();
+                }
+              }}
+              className="h-8 w-16 px-2 text-center text-xs"
+              aria-label={`Page number between 1 and ${totalPages}`}
+              disabled={loading}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 px-2.5"
+              onClick={goToPage}
+              disabled={loading}
+            >
+              Go
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -2135,11 +2509,11 @@ export default function OrdersPage() {
       <Dialog open={!!takeoverInfo} onOpenChange={(open) => { if (!open) setTakeoverInfo(null); }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Order in use</DialogTitle>
+            <DialogTitle>Take over this order?</DialogTitle>
             <DialogDescription>
               This order is currently being handled by{' '}
               <span className="font-semibold text-foreground">{takeoverInfo?.userName}</span>.
-              {' '}Do you want to take over this order?
+              {' '}Taking over ends their session and makes you the sole handler. This is logged.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2 sm:gap-2">
@@ -2148,10 +2522,45 @@ export default function OrdersPage() {
               onClick={() => {
                 const id = takeoverInfo?.orderId;
                 setTakeoverInfo(null);
-                if (id != null) openDetail(id, { force: true });
+                if (id != null) void takeOverLock(id);
               }}
             >
               Yes, take over
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Missing-stock review — shown before Confirm / Send-delivery proceeds. */}
+      <Dialog open={!!stockWarn} onOpenChange={(open) => { if (!open) setStockWarn(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-amber-700">
+              <AlertTriangle className="size-5" /> {stockWarn?.title}
+            </DialogTitle>
+            <DialogDescription>
+              This order has products that aren't fully in stock on its fulfilment channel:
+            </DialogDescription>
+          </DialogHeader>
+          <ul className="max-h-60 space-y-1.5 overflow-y-auto rounded-lg border bg-muted/30 p-3 text-sm">
+            {(stockWarn?.items ?? []).map(it => (
+              <li key={it.name} className="flex items-center justify-between gap-3">
+                <span className="min-w-0 truncate font-medium">{it.name}</span>
+                <span className="shrink-0 tabular-nums text-muted-foreground">
+                  required <span className="font-semibold text-foreground">{it.required}</span>,
+                  available <span className={`font-semibold ${it.available <= 0 ? 'text-rose-600' : 'text-amber-600'}`}>{it.available}</span>
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="text-xs text-muted-foreground">Are you sure you want to continue anyway?</p>
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button variant="outline" onClick={() => setStockWarn(null)}>Cancel</Button>
+            <Button
+              className="bg-amber-600 hover:bg-amber-700"
+              onClick={() => { const proceed = stockWarn?.onProceed; setStockWarn(null); proceed?.(); }}
+            >
+              Continue anyway
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2161,10 +2570,12 @@ export default function OrdersPage() {
       <OrderDetailDialog
         open={detailLoading || !!viewOrder}
         onOpenChange={() => {
+          // Release our working lock so the order frees up for the next user.
           if (viewOrder && editLockToken) {
             orderService.releaseEditLock(viewOrder.id, editLockToken).catch(() => undefined);
           }
           setEditLockToken('');
+          setLockedByOther(null);
           setViewOrder(null);
           setDetailLoading(false);
           setEditMode(false);
@@ -2179,15 +2590,18 @@ export default function OrdersPage() {
         loadingPackagingProducts={loadingPackagingProducts}
         savingEdit={savingEdit}
         mutatingOrder={mutatingOrder}
+        failedActionAttempts={viewOrder ? (actionFailures[viewOrder.id] ?? 0) : 0}
+        isLockOwner={!!editLockToken}
+        lockedByName={lockedByOther?.user_name ?? null}
+        onTakeOver={() => { if (viewOrder) setTakeoverInfo({ orderId: viewOrder.id, userName: lockedByOther?.user_name || 'another user' }); }}
         onStatusChange={handleStatusChange}
-        onStatusFieldsChange={handleStatusFieldsChange}
         onConfirmOrder={handleConfirmOrder}
         onNotAnswered={handleNotAnswered}
         onDelayOrder={handleDelayOrder}
         onRestoreDelayed={handleRestoreDelayed}
         onCancelOrder={handleCancelOrder}
         onOpenSendPOS={openSendPOSDialog}
-        onSendDelivery={handleSubmitDelivery}
+        onSendDelivery={submitDeliveryWithStockGuard}
         onProcessReturn={handleProcessReturn}
         onPackageOrder={handlePackageOrder}
         onUnpackageOrder={handleUnpackageOrder}
@@ -2203,20 +2617,31 @@ export default function OrdersPage() {
         onChangeNote={(field, val) => {
           setEditForm(prev => prev ? { ...prev, [field === 'customer' ? 'customer_note' : 'internal_note']: val } : prev);
         }}
+        onChangeBilling={(field, val) => {
+          setEditForm(prev => prev ? { ...prev, [field]: val } : prev);
+        }}
         onOpenLogs={handleOpenLogs}
         onDelete={handleSoftDelete}
         onRestore={handleRestoreOrder}
+        onCreateInvoice={handleCreateInvoice}
+        onUpdateInvoice={handleUpdateInvoice}
         permissions={{
-          edit: viewOrder ? (viewOrder.outcome === 'CONFIRMED' ? canUpdateConfirmedOrders : canUpdateUnconfirmedOrders) : false,
-          confirm: canConfirmOrders,
-          delay: canDelayOrders,
-          cancel: canCancelOrders,
-          sendToPos: canSendToPos,
-          sendToDelivery: canSendToDelivery,
-          processReturn: canProcessReturn,
-          packageOrder: canPackageOrders,
-          delete: canSoftDelete,
-          restore: canRestoreDeleted,
+          // Every mutating action also requires holding the working lock — a
+          // read-only viewer (someone else holds it) sees the buttons hidden and
+          // the take-over banner instead. The backend enforces the same rule.
+          edit: !!editLockToken && (viewOrder ? (['confirmed', 'packaging', 'done'].includes(viewOrder.status) ? canUpdateConfirmedOrders : canUpdateUnconfirmedOrders) : false),
+          confirm: !!editLockToken && canConfirmOrders,
+          delay: !!editLockToken && canDelayOrders,
+          cancel: !!editLockToken && canCancelOrders,
+          sendToPos: !!editLockToken && canSendToPos,
+          sendToDelivery: !!editLockToken && canSendToDelivery,
+          processReturn: !!editLockToken && canProcessReturn,
+          packageOrder: !!editLockToken && canPackageOrders,
+          delete: !!editLockToken && canSoftDelete,
+          restore: !!editLockToken && canRestoreDeleted,
+          manualOverride: !!editLockToken && canManualOverride,
+          viewInvoice: canViewInvoices,
+          editInvoice: canEditInvoiceNumbers,
         }}
       />
 
@@ -2464,15 +2889,15 @@ export default function OrdersPage() {
           <div className="space-y-4 py-2">
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               Current status:
-              <CleanStatusBadge status={manualOrder?.order_status} label={manualOrder?.order_status_display} />
+              <OrderStatusBadge status={manualOrder?.status} label={manualOrder?.status_display} />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="manual-target">Roll back to</Label>
               <Select value={manualTarget} onValueChange={setManualTarget}>
                 <SelectTrigger id="manual-target"><SelectValue placeholder="Select a status" /></SelectTrigger>
                 <SelectContent>
-                  {(manualOrder ? MANUAL_TRANSITIONS[manualOrder.order_status] ?? [] : []).map(t => (
-                    <SelectItem key={t} value={t}>{cleanStatusLabel(t)}</SelectItem>
+                  {(manualOrder ? MANUAL_TRANSITIONS[manualOrder.status] ?? [] : []).map(t => (
+                    <SelectItem key={t} value={t}>{orderStatusLabel(t)}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>

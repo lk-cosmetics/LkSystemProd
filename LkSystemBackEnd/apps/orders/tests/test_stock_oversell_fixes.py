@@ -101,8 +101,7 @@ class DeliveryDecrementTests(_Base):
         order = Order.objects.create(
             company=self.company, sales_channel=self.channel, brand=self.brand,
             order_number='ORD-DEL-1', external_order_id='9001',
-            status=Order.Status.PROCESSING, outcome=Order.Outcome.CONFIRMED,
-            delivery_status=Order.DeliveryStatus.SUBMITTED,
+            status=Order.Status.CONFIRMED,
             billing_first_name='T', billing_last_name='C', billing_phone='+21620000000',
             total=Decimal('200.00'),
         )
@@ -118,7 +117,7 @@ class DeliveryDecrementTests(_Base):
         DeliverySubmissionService().update_from_provider(order, 'delivered', actor=self.actor)
         order.refresh_from_db()
         self.inv.refresh_from_db()
-        self.assertEqual(order.status, Order.Status.COMPLETED)
+        self.assertEqual(order.status, Order.Status.DONE)
         self.assertEqual(self.inv.quantity, 6)  # 8 - 2; previously never decremented
         self.assertEqual(
             InventoryMovement.objects.filter(

@@ -40,6 +40,7 @@ export function POSAddClientDialog({
     phone: '',
     email: '',
     client_type: 'PERSON' as 'PERSON' | 'COMPANY',
+    matricule_fiscale: '',
     date_of_birth: '',
     state: '',
   });
@@ -47,7 +48,7 @@ export function POSAddClientDialog({
   const [error, setError] = useState('');
 
   const resetForm = useCallback(() => {
-    setForm({ first_name: '', last_name: '', phone: '', email: '', client_type: 'PERSON', date_of_birth: '', state: '' });
+    setForm({ first_name: '', last_name: '', phone: '', email: '', client_type: 'PERSON', matricule_fiscale: '', date_of_birth: '', state: '' });
     setError('');
   }, []);
 
@@ -80,6 +81,7 @@ export function POSAddClientDialog({
         phone: form.phone.trim(),
         email: form.email.trim(),
         client_type: form.client_type,
+        matricule_fiscale: form.client_type === 'COMPANY' ? form.matricule_fiscale.trim() : '',
         date_of_birth: form.date_of_birth || null,
         state: form.state,
         // Note: NO need to send brand_id, source, or company
@@ -133,6 +135,18 @@ export function POSAddClientDialog({
               </SelectContent>
             </Select>
           </div>
+          {form.client_type === 'COMPANY' && (
+            <div className="col-span-2">
+              <Label className="text-xs">Matricule Fiscale</Label>
+              <Input
+                value={form.matricule_fiscale}
+                onChange={e => updateField('matricule_fiscale', e.target.value)}
+                placeholder="Tax ID — appears on the client's invoices"
+                className="h-9 mt-1"
+                onKeyDown={e => e.key === 'Enter' && handleSubmit()}
+              />
+            </div>
+          )}
           <div>
             <Label className="text-xs">First Name</Label>
             <Input

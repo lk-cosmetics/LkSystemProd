@@ -4,7 +4,7 @@ The default threshold is 3 days, overridable via the Django setting
 `ORDER_AUTO_CANCEL_DAYS` or the `--days N` flag on the management command.
 
 Selection criteria:
-  workflow_status = 'not_answered'
+  status = 'not_answered'
   not_answered_at <= now - days
   no delivery_reference
   not already cancelled
@@ -55,15 +55,13 @@ class AutoCancelService:
         qs = (
             Order.all_objects
             .filter(
-                workflow_status=Order.WorkflowStatus.NOT_ANSWERED,
-                contact_status=Order.ContactStatus.NOT_ANSWERED,
+                status=Order.Status.NOT_ANSWERED,
                 not_answered_at__isnull=False,
                 not_answered_at__lte=cutoff,
                 delivery_reference='',
                 is_deleted=False,
             )
-            .exclude(status=Order.Status.CANCELLED)
-            .exclude(outcome=Order.Outcome.CANCELLED)
+            .exclude(status__in=[Order.Status.CANCELED, Order.Status.RETURNED, Order.Status.DONE])
         )
 
         result.candidates = qs.count()

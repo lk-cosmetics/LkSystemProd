@@ -13,10 +13,15 @@
  * Self-contained: only needs the selected channel id from the parent.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowDownToLine, Loader2, Plus, Receipt, Trash2, Wallet,
+  ArrowDownToLine, CloudOff, Loader2, Plus, Receipt, RefreshCw, Trash2, Wallet,
 } from 'lucide-react';
+import { useOnlineStatus } from '@/hooks/useOnlineStatus';
+import {
+  offlineCaisseService,
+  type PendingCaisseOp,
+} from '@/services/offlineCaisse.service';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -49,6 +54,30 @@ const fmtTND = (raw: string | number): string => {
   const n = typeof raw === 'string' ? Number(raw) : raw;
   if (Number.isNaN(n)) return '0.000';
   return n.toLocaleString('fr-FR', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+};
+
+// A failed request with no HTTP response is a connectivity problem (offline /
+// timeout) → safe to queue the write locally and replay it later. A response
+// (4xx/5xx) means the server rejected it → surface the error instead.
+const isNetworkError = (err: unknown): boolean => {
+  const e = err as { response?: unknown; code?: string };
+  return !e?.response || e?.code === 'ERR_NETWORK' || e?.code === 'ECONNABORTED';
+};
+
+// Pull a human message out of a DRF error body without leaning on `any`.
+const extractApiError = (err: unknown, fallback: string): string => {
+  const data = (err as { response?: { data?: unknown } })?.response?.data;
+  if (typeof data === 'string' && data.trim()) return data;
+  if (data && typeof data === 'object') {
+    const detail = (data as { detail?: unknown }).detail;
+    if (typeof detail === 'string' && detail.trim()) return detail;
+    const joined = Object.values(data as Record<string, unknown>)
+      .flat()
+      .filter((v): v is string => typeof v === 'string')
+      .join(' ');
+    if (joined.trim()) return joined;
+  }
+  return fallback;
 };
 
 interface Props {
@@ -144,6 +173,28 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
   const [error, setError] = useState<string | null>(null);
   const [okMessage, setOkMessage] = useState<string | null>(null);
 
+  // ── Offline (queued) cash operations ─────────────────────────────────────
+  const online = useOnlineStatus();
+  const [pending, setPending] = useState<PendingCaisseOp[]>([]);
+  const [syncing, setSyncing] = useState(false);
+  // Guards against a second sync starting before the first finishes (which
+  // could double-POST a queued op) — refs don't trigger re-renders.
+  const syncingRef = useRef(false);
+
+  const pendingDeposits = useMemo(() => pending.filter(p => p.kind === 'deposit'), [pending]);
+  const pendingExpenses = useMemo(() => pending.filter(p => p.kind === 'expense'), [pending]);
+  // Net effect of not-yet-synced ops on the cash drawer (deposits in, expenses out).
+  const pendingNet = useMemo(
+    () =>
+      pendingDeposits.reduce((s, p) => s + p.amount, 0) -
+      pendingExpenses.reduce((s, p) => s + p.amount, 0),
+    [pendingDeposits, pendingExpenses],
+  );
+  const estimatedBalance = useMemo(
+    () => (stats ? Number(stats.cash_balance) + pendingNet : pendingNet),
+    [stats, pendingNet],
+  );
+
   const todayISO = useMemo(() => new Date().toISOString().slice(0, 10), []);
 
   const refresh = useCallback(async () => {
@@ -152,24 +203,27 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
       setHistoryRows([]);
       setExpenses([]);
       setDeposits([]);
+      setPending([]);
       return;
     }
     setStatsLoading(true);
     setListLoading(true);
     setHistoryLoading(true);
     try {
-      const [s, history, expList, depList] = await Promise.all([
+      const [s, history, expList, depList, pendingOps] = await Promise.all([
         expenseService.caisseStats(channelId).catch(() => null),
         expenseService.caisseHistory(channelId).catch(() => [] as CaisseHistoryRow[]),
         expenseService.list({ sales_channel: channelId, date_from: todayISO, date_to: todayISO })
           .catch(() => [] as Expense[]),
         cashDepositService.list({ sales_channel: channelId, date_from: todayISO, date_to: todayISO })
           .catch(() => [] as CashDeposit[]),
+        offlineCaisseService.listPending(channelId).catch(() => [] as PendingCaisseOp[]),
       ]);
       setStats(s);
       setHistoryRows(history);
       setExpenses(expList);
       setDeposits(depList);
+      setPending(pendingOps);
     } finally {
       setStatsLoading(false);
       setListLoading(false);
@@ -187,24 +241,29 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
     if (!channelId) { setError('Sélectionnez d\'abord une caisse.'); return; }
     const n = parseAmount(amount);
     if (!n || n <= 0) { setError('Le montant de la dépense doit être strictement positif.'); return; }
+    const payload = { sales_channel: channelId, amount: n, category, note: note.trim() };
+    const label = EXPENSE_CATEGORY_OPTIONS.find(o => o.value === category)?.label ?? category;
+    const queueOffline = async () => {
+      await offlineCaisseService.queueExpense(payload, label);
+      setAmount(''); setNote(''); setCategory('OTHER');
+      setOkMessage(`Dépense de ${fmtTND(n)} TND enregistrée hors ligne — synchronisation à la reconnexion.`);
+      await refresh();
+    };
     setSubmitting(true);
     try {
-      await expenseService.create({ sales_channel: channelId, amount: n, category, note: note.trim() });
+      if (!online) { await queueOffline(); return; }
+      await expenseService.create(payload);
       setAmount(''); setNote(''); setCategory('OTHER');
       setOkMessage(`Dépense de ${fmtTND(n)} TND enregistrée.`);
       await refresh();
       onAfterChange?.();
-    } catch (err: any) {
-      const data = err?.response?.data;
-      setError(
-        (typeof data === 'string' && data) || data?.detail ||
-        (data && Object.values(data).flat().join(' ')) ||
-        'Échec de l\'enregistrement de la dépense.',
-      );
+    } catch (err) {
+      if (isNetworkError(err)) { await queueOffline(); return; }
+      setError(extractApiError(err, 'Échec de l\'enregistrement de la dépense.'));
     } finally {
       setSubmitting(false);
     }
-  }, [amount, category, note, channelId, refresh, onAfterChange]);
+  }, [amount, category, note, channelId, online, refresh, onAfterChange]);
 
   const submitDeposit = useCallback(async () => {
     setError(null);
@@ -212,24 +271,29 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
     if (!channelId) { setError('Sélectionnez d\'abord une caisse.'); return; }
     const n = parseAmount(depAmount);
     if (!n || n <= 0) { setError('Le montant de l\'alimentation doit être strictement positif.'); return; }
+    const payload = { sales_channel: channelId, amount: n, kind: depKind, note: depNote.trim() };
+    const label = CASH_DEPOSIT_KIND_OPTIONS.find(o => o.value === depKind)?.label ?? depKind;
+    const queueOffline = async () => {
+      await offlineCaisseService.queueDeposit(payload, label);
+      setDepAmount(''); setDepNote(''); setDepKind('TOP_UP');
+      setOkMessage(`Alimentation de ${fmtTND(n)} TND enregistrée hors ligne — synchronisation à la reconnexion.`);
+      await refresh();
+    };
     setDepSubmitting(true);
     try {
-      await cashDepositService.create({ sales_channel: channelId, amount: n, kind: depKind, note: depNote.trim() });
+      if (!online) { await queueOffline(); return; }
+      await cashDepositService.create(payload);
       setDepAmount(''); setDepNote(''); setDepKind('TOP_UP');
       setOkMessage(`Alimentation de ${fmtTND(n)} TND enregistrée.`);
       await refresh();
       onAfterChange?.();
-    } catch (err: any) {
-      const data = err?.response?.data;
-      setError(
-        (typeof data === 'string' && data) || data?.detail ||
-        (data && Object.values(data).flat().join(' ')) ||
-        'Échec de l\'enregistrement de l\'alimentation.',
-      );
+    } catch (err) {
+      if (isNetworkError(err)) { await queueOffline(); return; }
+      setError(extractApiError(err, 'Échec de l\'enregistrement de l\'alimentation.'));
     } finally {
       setDepSubmitting(false);
     }
-  }, [depAmount, depKind, depNote, channelId, refresh, onAfterChange]);
+  }, [depAmount, depKind, depNote, channelId, online, refresh, onAfterChange]);
 
   const handleDeleteExpense = useCallback(async (id: number) => {
     if (!confirm('Supprimer cette dépense ? Le solde sera ajusté.')) return;
@@ -253,6 +317,37 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
     }
   }, [refresh, onAfterChange]);
 
+  // Drop a not-yet-synced (offline) operation from the local queue.
+  const handleRemovePending = useCallback(async (localId: string) => {
+    await offlineCaisseService.remove(localId);
+    await refresh();
+  }, [refresh]);
+
+  // On reconnect, flush any queued cash operations to the backend, then refresh.
+  useEffect(() => {
+    if (!online || !channelId || syncingRef.current) return;
+    let cancelled = false;
+    void (async () => {
+      const queued = await offlineCaisseService.listPending(channelId).catch(() => []);
+      if (cancelled || queued.length === 0 || syncingRef.current) return;
+      syncingRef.current = true;
+      setSyncing(true);
+      try {
+        const res = await offlineCaisseService.sync(channelId);
+        if (cancelled) return;
+        if (res.synced > 0) {
+          setOkMessage(`${res.synced} opération(s) de caisse synchronisée(s).`);
+          onAfterChange?.();
+        }
+        await refresh();
+      } finally {
+        syncingRef.current = false;
+        if (!cancelled) setSyncing(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [online, channelId, refresh, onAfterChange]);
+
   if (!channelId) {
     return (
       <div className="p-6 text-sm text-muted-foreground">
@@ -265,6 +360,28 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
     <div className="flex flex-col gap-4 p-1">
       {/* Cash register statement */}
       <CaisseStatsBanner stats={stats} loading={statsLoading} />
+
+      {/* Offline / pending-sync status */}
+      {(!online || pending.length > 0) && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <span className="flex items-center gap-1.5 font-medium">
+            {syncing
+              ? <RefreshCw className="size-3.5 animate-spin" />
+              : <CloudOff className="size-3.5" />}
+            {!online ? 'Hors ligne' : syncing ? 'Synchronisation…' : 'Reconnecté'}
+          </span>
+          {pending.length > 0 ? (
+            <span>
+              {pending.length} opération(s) en attente · solde estimé{' '}
+              <span className="font-semibold tabular-nums">{fmtTND(estimatedBalance)} TND</span>
+            </span>
+          ) : (
+            <span className="text-amber-800">
+              Dépenses et alimentations seront enregistrées localement et synchronisées à la reconnexion.
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Header */}
       <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -360,18 +477,39 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
         {/* Cash-ins */}
         <Card className="p-4">
           <div className="mb-3 flex items-center justify-between">
-            <p className="text-sm font-medium">Alimentations aujourd'hui</p>
-            <span className="text-xs text-muted-foreground">{deposits.length} ligne{deposits.length === 1 ? '' : 's'}</span>
+            <p className="text-sm font-medium">Alimentations aujourd&apos;hui</p>
+            <span className="text-xs text-muted-foreground">
+              {deposits.length + pendingDeposits.length} ligne{deposits.length + pendingDeposits.length === 1 ? '' : 's'}
+            </span>
           </div>
           <Separator className="mb-2" />
           {listLoading ? (
             <div className="py-6 text-center text-xs text-muted-foreground">
               <Loader2 className="mr-1.5 inline size-4 animate-spin" /> Chargement…
             </div>
-          ) : deposits.length === 0 ? (
-            <p className="py-6 text-center text-xs text-muted-foreground">Aucune alimentation aujourd'hui.</p>
+          ) : deposits.length === 0 && pendingDeposits.length === 0 ? (
+            <p className="py-6 text-center text-xs text-muted-foreground">Aucune alimentation aujourd&apos;hui.</p>
           ) : (
             <ul className="divide-y">
+              {pendingDeposits.map(op => (
+                <li key={op.local_id} className="flex items-start justify-between gap-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline" className="text-[10px]">{op.label}</Badge>
+                      <Badge variant="secondary" className="gap-1 text-[10px] text-amber-700">
+                        <CloudOff className="size-3" /> En attente
+                      </Badge>
+                    </div>
+                    {op.note && <p className="mt-1 break-words text-xs">{op.note}</p>}
+                  </div>
+                  <div className="flex flex-shrink-0 items-center gap-2">
+                    <span className="text-sm font-semibold tabular-nums text-emerald-700">+ {fmtTND(op.amount)}</span>
+                    <Button type="button" variant="ghost" size="icon" className="size-7" onClick={() => handleRemovePending(op.local_id)} title="Retirer de la file d'attente">
+                      <Trash2 className="size-3.5 text-muted-foreground" />
+                    </Button>
+                  </div>
+                </li>
+              ))}
               {deposits.map(dep => (
                 <li key={dep.id} className="flex items-start justify-between gap-3 py-2">
                   <div className="min-w-0 flex-1">
@@ -399,18 +537,39 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
         {/* Cash-outs */}
         <Card className="p-4">
           <div className="mb-3 flex items-center justify-between">
-            <p className="text-sm font-medium">Dépenses aujourd'hui</p>
-            <span className="text-xs text-muted-foreground">{expenses.length} ligne{expenses.length === 1 ? '' : 's'}</span>
+            <p className="text-sm font-medium">Dépenses aujourd&apos;hui</p>
+            <span className="text-xs text-muted-foreground">
+              {expenses.length + pendingExpenses.length} ligne{expenses.length + pendingExpenses.length === 1 ? '' : 's'}
+            </span>
           </div>
           <Separator className="mb-2" />
           {listLoading ? (
             <div className="py-6 text-center text-xs text-muted-foreground">
               <Loader2 className="mr-1.5 inline size-4 animate-spin" /> Chargement…
             </div>
-          ) : expenses.length === 0 ? (
-            <p className="py-6 text-center text-xs text-muted-foreground">Aucune dépense aujourd'hui.</p>
+          ) : expenses.length === 0 && pendingExpenses.length === 0 ? (
+            <p className="py-6 text-center text-xs text-muted-foreground">Aucune dépense aujourd&apos;hui.</p>
           ) : (
             <ul className="divide-y">
+              {pendingExpenses.map(op => (
+                <li key={op.local_id} className="flex items-start justify-between gap-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline" className="text-[10px]">{op.label}</Badge>
+                      <Badge variant="secondary" className="gap-1 text-[10px] text-amber-700">
+                        <CloudOff className="size-3" /> En attente
+                      </Badge>
+                    </div>
+                    {op.note && <p className="mt-1 break-words text-xs">{op.note}</p>}
+                  </div>
+                  <div className="flex flex-shrink-0 items-center gap-2">
+                    <span className="text-sm font-semibold tabular-nums text-red-700">− {fmtTND(op.amount)}</span>
+                    <Button type="button" variant="ghost" size="icon" className="size-7" onClick={() => handleRemovePending(op.local_id)} title="Retirer de la file d'attente">
+                      <Trash2 className="size-3.5 text-muted-foreground" />
+                    </Button>
+                  </div>
+                </li>
+              ))}
               {expenses.map(exp => (
                 <li key={exp.id} className="flex items-start justify-between gap-3 py-2">
                   <div className="min-w-0 flex-1">

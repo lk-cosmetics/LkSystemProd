@@ -132,6 +132,12 @@ SEED_PERMISSIONS: list[tuple[str, str, str, str]] = [
     ('manual_status_override', 'Manual Status Override', 'orders',
      'Manually roll an order back to an earlier status (admin/manager only, reason required)'),
 
+    # Invoices
+    ('view_invoices', 'View Invoices', 'invoices',
+     'Access the generated invoice registry and invoice details'),
+    ('edit_invoice_numbers', 'Edit Invoice Numbers', 'invoices',
+     'Manually edit invoice numbers and advance the automatic sequence'),
+
     # POS
     ('use_pos', 'Use POS', 'pos',
      'Access the Point of Sale interface'),
@@ -262,6 +268,7 @@ SYSTEM_ROLES: dict[str, dict] = {
             'restore_stock_from_return_orders', 'soft_delete_orders',
             'view_soft_deleted_orders', 'restore_soft_deleted_orders',
             'manual_status_override',
+            'view_invoices', 'edit_invoice_numbers',
             'use_pos',
             'view_clients', 'create_clients', 'edit_clients', 'delete_clients',
             'view_promotions', 'create_promotions', 'edit_promotions', 'delete_promotions',
@@ -342,6 +349,7 @@ SYSTEM_ROLES: dict[str, dict] = {
             'restore_stock_from_return_orders', 'soft_delete_orders',
             'view_soft_deleted_orders', 'restore_soft_deleted_orders',
             'manual_status_override',
+            'view_invoices', 'edit_invoice_numbers',
             'use_pos',
             'view_clients', 'create_clients', 'edit_clients', 'delete_clients',
             'view_promotions', 'create_promotions', 'edit_promotions', 'delete_promotions',

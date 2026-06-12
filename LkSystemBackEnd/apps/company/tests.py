@@ -76,7 +76,7 @@ class CompanyCascadeDeletionTests(TestCase):
         order = Order.objects.create(
             company=company, sales_channel=channel, brand=brand,
             order_number=f'ORD-{label}', external_order_id=f'EX{label}',
-            source=Order.Source.POS, status=Order.Status.COMPLETED,
+            source=Order.Source.POS, status=Order.Status.DONE,
             billing_first_name='T', billing_last_name='C', billing_phone='+21620000000',
             total=Decimal('10.00'),
         )

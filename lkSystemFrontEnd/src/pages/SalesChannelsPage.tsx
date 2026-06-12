@@ -9,14 +9,13 @@
  *    dependencies (no @radix-ui/react-popover or cmdk required).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   Eye, Pencil, Trash2, Search, Filter, MoreVertical,
   Building2, Tag, Calendar, Store, Plus, Globe, Key,
   Copy, Check, RefreshCw, Link2, Power, MapPin, Truck,
-  ChevronDown, X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -42,6 +41,7 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
+import { SearchSelect } from '@/components/ui/search-select';
 import {
   useSalesChannels, useCreateSalesChannel, usePartialUpdateSalesChannel,
   useDeleteSalesChannel, useRegenerateWebhook, salesChannelsKeys,
@@ -51,121 +51,8 @@ import { useWebSocket } from '@/hooks/useWebSocket';
 import { TUNISIA_GOVERNORATE_OPTIONS } from '@/constants/tunisia';
 import type { SalesChannel, ChannelType, CreateSalesChannelRequest } from '@/types';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SearchSelect – lightweight combobox, defined at module level
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface SearchSelectProps {
-  value: string;
-  onChange: (v: string) => void;
-  options: { label: string; value: string }[];
-  placeholder: string;
-  disabled?: boolean;
-}
-
-function SearchSelect({ value, onChange, options, placeholder, disabled }: SearchSelectProps) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState('');
-  const containerRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  // Close on outside click
-  useEffect(() => {
-    const onMouseDown = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpen(false);
-        setQuery('');
-      }
-    };
-    document.addEventListener('mousedown', onMouseDown);
-    return () => document.removeEventListener('mousedown', onMouseDown);
-  }, []);
-
-  const filtered = useMemo(() => {
-    if (!query) return options;
-    const q = query.toLowerCase();
-    return options.filter(o => o.label.toLowerCase().includes(q));
-  }, [options, query]);
-
-  const selected = options.find(o => o.value === value);
-
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setQuery(e.target.value);
-    if (!open) setOpen(true);
-  };
-
-  const handleInputFocus = () => {
-    setQuery('');
-    setOpen(true);
-  };
-
-  const handleSelect = (opt: { label: string; value: string }) => {
-    onChange(opt.value);
-    setOpen(false);
-    setQuery('');
-    inputRef.current?.blur();
-  };
-
-  const handleClear = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    onChange('');
-    setQuery('');
-    setOpen(false);
-  };
-
-  const displayValue = open ? query : (selected?.label ?? '');
-
-  return (
-    <div ref={containerRef} className="relative">
-      <div className="relative">
-        <Input
-          ref={inputRef}
-          value={displayValue}
-          onChange={handleInputChange}
-          onFocus={handleInputFocus}
-          placeholder={placeholder}
-          disabled={disabled}
-          className="pr-14"
-          autoComplete="off"
-        />
-        <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-0.5">
-          {value && !disabled && (
-            <button
-              type="button"
-              onMouseDown={handleClear}
-              className="p-0.5 rounded text-muted-foreground hover:text-foreground transition-colors"
-              tabIndex={-1}
-            >
-              <X className="size-3.5" />
-            </button>
-          )}
-          <ChevronDown className={`size-3.5 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`} />
-        </div>
-      </div>
-
-      {open && (
-        <div className="absolute z-50 w-full mt-1 bg-background border rounded-md shadow-lg max-h-56 overflow-y-auto">
-          {filtered.length === 0 ? (
-            <p className="px-3 py-2 text-sm text-muted-foreground">No results found</p>
-          ) : (
-            filtered.map(opt => (
-              <div
-                key={opt.value}
-                onMouseDown={e => { e.preventDefault(); handleSelect(opt); }}
-                className={`px-3 py-2 text-sm cursor-pointer select-none transition-colors hover:bg-accent hover:text-accent-foreground ${
-                  opt.value === value ? 'bg-accent/60 font-medium' : ''
-                }`}
-              >
-                {opt.label}
-              </div>
-            ))
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
+// SearchSelect (shared, dependency-free combobox) now lives in
+// @/components/ui/search-select and is imported above.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Form types
@@ -191,7 +78,7 @@ const EMPTY_FORM: ChannelFormData = {
   name: '', brand: '', channel_type: 'WOOCOMMERCE', is_active: true,
   state: '', city: '',
   wc_store_url: '', wc_consumer_key: '', wc_consumer_secret: '', delivery_api_key: '',
-  wc_push_status_enabled: false,
+  wc_push_status_enabled: true,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
