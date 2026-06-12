@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient, useIsMutating } from '@tanstack/react-query';
 import { companyService } from '@/services/company.service';
+import { useAuthStore } from '@/store/authStore';
 import type { CompanyListItem, CreateCompanyRequest } from '@/types';
 
 // Query Keys
@@ -43,6 +44,23 @@ export function useCompany(id: number | null) {
     queryKey: companiesKeys.detail(id!),
     queryFn: () => companyService.getCompanyById(id!),
     enabled: id != null && id > 0,
+  });
+}
+
+/**
+ * Fetch the signed-in user's own company (full billing detail). Drives the
+ * invoice header and the company billing form. Billing data changes rarely, so
+ * it is cached aggressively. Returns `undefined` while loading / when the user
+ * has no company (e.g. a platform admin with no workspace selected).
+ */
+export function useCurrentCompany() {
+  const companyId = useAuthStore(s => s.user?.company_id ?? null);
+  return useQuery({
+    queryKey: companiesKeys.detail(companyId ?? -1),
+    queryFn: () => companyService.getCompanyById(companyId!),
+    enabled: companyId != null && companyId > 0,
+    staleTime: 5 * 60 * 1000,
+    gcTime: 30 * 60 * 1000,
   });
 }
 

@@ -89,3 +89,18 @@ docker-build-*.log
 
 # ─── Claude / plan files (workspace-local) ─────────────────────────────────
 .claude/
+
+# ─── Local capture / automation scratch (browser profiles, ad-hoc scripts) ──
+.capture-profile/
+.capture-tools/
+__cap_auth.html
+capture-*.cjs
+wire-figures.cjs
+main_recovered.txt
+
+# ─── Personal report / thesis documents — kept out of the app repo ──────────
+LkSystem_latex_Pfe/
+conception/
+Bilan*.docx
+Bilan*.pdf
+project-plan.html

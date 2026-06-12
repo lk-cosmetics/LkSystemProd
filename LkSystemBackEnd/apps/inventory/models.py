@@ -7,6 +7,7 @@ from django.db import models
 from django.conf import settings
 from django.core.validators import MinValueValidator
 from decimal import Decimal
+from uuid import uuid4
 
 
 class SalesChannelInventory(models.Model):
@@ -277,11 +278,9 @@ class InventoryMovement(models.Model):
     def save(self, *args, **kwargs):
         # Auto-generate reference number
         if not self.reference_number:
-            from django.utils import timezone
-            import random
-            timestamp = timezone.now().strftime('%Y%m%d%H%M%S')
-            random_suffix = random.randint(1000, 9999)
-            self.reference_number = f"MOV-{timestamp}-{random_suffix}"
+            # UUID entropy avoids collisions when a return/reservation creates
+            # several movements inside the same second or across workers.
+            self.reference_number = f"MOV-{uuid4().hex.upper()}"
         
         # Calculate total cost
         if self.unit_cost and self.quantity:

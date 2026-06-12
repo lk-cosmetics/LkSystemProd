@@ -1,10 +1,12 @@
-import { lazy, Suspense } from 'react';
+import { Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from '@/components/layout/Layout';
 import DashbordLayout from '@/components/dashboardLayout/pageDashbord';
 import ProtectedRoute from '@/components/ProtectedRoute';
 import RoleGuard from '@/components/RoleGuard';
 import PageLoader from '@/components/PageLoader';
+import { RouteErrorBoundary } from '@/components/RouteErrorBoundary';
+import { lazyWithRetry } from '@/utils/lazyWithRetry';
 import { useAuthStore } from '@/store/authStore';
 import { isPosOnlyUser } from '@/hooks/useAuth';
 
@@ -12,32 +14,33 @@ import { isPosOnlyUser } from '@/hooks/useAuth';
 // fetched on demand. This keeps the initial bundle small (the router,
 // guards and shared layouts ship eagerly; everything else streams in
 // behind the <Suspense> boundary below).
-const HomePage = lazy(() => import('@/pages/HomePage'));
-const LoginPage = lazy(() => import('@/pages/login'));
-const ForgotPasswordPage = lazy(() => import('@/pages/ForgotPasswordPage'));
-const ResetPasswordPage = lazy(() => import('@/pages/ResetPasswordPage'));
-const AcceptInvitationPage = lazy(() => import('@/pages/AcceptInvitationPage'));
-const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
-const StatisticsPage = lazy(() => import('@/pages/StatisticsPage'));
-const AddUserPageNew = lazy(() => import('@/pages/AddUserPageNew'));
-const UsersPageNew = lazy(() => import('@/pages/UsersPageNew'));
-const UserDetailsPage = lazy(() => import('@/pages/UserDetailsPage'));
-const EditUserPage = lazy(() => import('@/pages/EditUserPage'));
-const RolesPage = lazy(() => import('@/pages/RolesPage'));
-const CompaniesPage = lazy(() => import('@/pages/CompaniesPage'));
-const AddCompanyPage = lazy(() => import('@/pages/AddCompanyPage'));
-const BrandsPage = lazy(() => import('@/pages/BrandsPage'));
-const SalesChannelsPage = lazy(() => import('@/pages/SalesChannelsPage'));
-const ProductsPage = lazy(() => import('@/pages/ProductsPage'));
-const InventoryPage = lazy(() => import('@/pages/InventoryPage'));
-const ManufacturingPage = lazy(() => import('@/pages/ManufacturingPage'));
-const CategoriesPage = lazy(() => import('@/pages/CategoriesPage'));
-const PromotionsPage = lazy(() => import('@/pages/PromotionsPage'));
-const OrdersPage = lazy(() => import('@/pages/OrdersPage'));
-const ClientsPage = lazy(() => import('@/pages/ClientsPage'));
-const POSPage = lazy(() => import('@/pages/POSPage'));
-const NotificationsPage = lazy(() => import('@/pages/NotificationsPage'));
-const SettingsPage = lazy(() => import('@/pages/SettingsPage'));
+const HomePage = lazyWithRetry(() => import('@/pages/HomePage'));
+const LoginPage = lazyWithRetry(() => import('@/pages/login'));
+const ForgotPasswordPage = lazyWithRetry(() => import('@/pages/ForgotPasswordPage'));
+const ResetPasswordPage = lazyWithRetry(() => import('@/pages/ResetPasswordPage'));
+const AcceptInvitationPage = lazyWithRetry(() => import('@/pages/AcceptInvitationPage'));
+const NotFoundPage = lazyWithRetry(() => import('@/pages/NotFoundPage'));
+const StatisticsPage = lazyWithRetry(() => import('@/pages/StatisticsPage'));
+const AddUserPageNew = lazyWithRetry(() => import('@/pages/AddUserPageNew'));
+const UsersPageNew = lazyWithRetry(() => import('@/pages/UsersPageNew'));
+const UserDetailsPage = lazyWithRetry(() => import('@/pages/UserDetailsPage'));
+const EditUserPage = lazyWithRetry(() => import('@/pages/EditUserPage'));
+const RolesPage = lazyWithRetry(() => import('@/pages/RolesPage'));
+const CompaniesPage = lazyWithRetry(() => import('@/pages/CompaniesPage'));
+const AddCompanyPage = lazyWithRetry(() => import('@/pages/AddCompanyPage'));
+const BrandsPage = lazyWithRetry(() => import('@/pages/BrandsPage'));
+const SalesChannelsPage = lazyWithRetry(() => import('@/pages/SalesChannelsPage'));
+const ProductsPage = lazyWithRetry(() => import('@/pages/ProductsPage'));
+const InventoryPage = lazyWithRetry(() => import('@/pages/InventoryPage'));
+const ManufacturingPage = lazyWithRetry(() => import('@/pages/ManufacturingPage'));
+const CategoriesPage = lazyWithRetry(() => import('@/pages/CategoriesPage'));
+const PromotionsPage = lazyWithRetry(() => import('@/pages/PromotionsPage'));
+const OrdersPage = lazyWithRetry(() => import('@/pages/OrdersPage'));
+const InvoicesPage = lazyWithRetry(() => import('@/pages/InvoicesPage'));
+const ClientsPage = lazyWithRetry(() => import('@/pages/ClientsPage'));
+const POSPage = lazyWithRetry(() => import('@/pages/POSPage'));
+const NotificationsPage = lazyWithRetry(() => import('@/pages/NotificationsPage'));
+const SettingsPage = lazyWithRetry(() => import('@/pages/SettingsPage'));
 
 function DashboardIndexRedirect() {
   const user = useAuthStore(state => state.user);
@@ -52,7 +55,8 @@ function DashboardIndexRedirect() {
 export function AppRouter() {
   return (
     <BrowserRouter>
-      <Suspense fallback={<PageLoader />}>
+      <RouteErrorBoundary>
+        <Suspense fallback={<PageLoader />}>
         <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<HomePage />} />
@@ -197,6 +201,14 @@ export function AppRouter() {
                 </RoleGuard>
               }
             />
+            <Route
+              path="invoices"
+              element={
+                <RoleGuard requiredPermission="view_invoices">
+                  <InvoicesPage />
+                </RoleGuard>
+              }
+            />
             {/* Older sessions may have a /dashboard/orders/:id bookmark from
                 when the page briefly opened in a new tab. Order details now
                 always render as a popup inside /dashboard/orders, so we send
@@ -253,7 +265,8 @@ export function AppRouter() {
         {/* 404 Page - catches all unmatched routes */}
         <Route path="*" element={<NotFoundPage />} />
         </Routes>
-      </Suspense>
+        </Suspense>
+      </RouteErrorBoundary>
     </BrowserRouter>
   );
 }

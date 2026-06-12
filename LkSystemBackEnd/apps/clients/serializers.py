@@ -33,7 +33,7 @@ class ClientListSerializer(serializers.ModelSerializer):
             'brand', 'brand_name',
             'reseller', 'reseller_name',
             'email', 'first_name', 'last_name', 'full_name',
-            'phone', 'phone_normalized', 'client_type', 'date_of_birth',
+            'phone', 'phone_normalized', 'client_type', 'matricule_fiscale', 'date_of_birth',
             'governorate', 'state', 'city', 'country',
             'source', 'sales_channel', 'sales_channel_name',
             'wc_customer_id', 'is_active',
@@ -89,7 +89,7 @@ class ClientCreateSerializer(serializers.ModelSerializer):
             'company',
             'brand', 'reseller',
             'email', 'first_name', 'last_name',
-            'phone', 'client_type', 'date_of_birth',
+            'phone', 'client_type', 'matricule_fiscale', 'date_of_birth',
             'address', 'city', 'state', 'postcode', 'country',
             'source', 'sales_channel', 'wc_customer_id', 'notes',
             'points', 'number_of_orders', 'number_of_returns', 'is_blocked',
@@ -143,7 +143,7 @@ class ClientCreateFromPOSSerializer(serializers.ModelSerializer):
         model = Client
         fields = [
             'id', 'email', 'first_name', 'last_name', 'full_name',
-            'phone', 'phone_normalized', 'client_type', 'date_of_birth',
+            'phone', 'phone_normalized', 'client_type', 'matricule_fiscale', 'date_of_birth',
             'address', 'state', 'postcode', 'country',
             'reseller', 'wc_customer_id', 'notes',
             'sales_channel',  # Write-only input

@@ -122,7 +122,7 @@ class SalesChannel(models.Model):
         help_text='Token for authenticating incoming webhooks'
     )
     wc_push_status_enabled = models.BooleanField(
-        default=False,
+        default=True,
         verbose_name='Push order status to WooCommerce',
         help_text=(
             'When enabled, completing an order in the system (e.g. after '

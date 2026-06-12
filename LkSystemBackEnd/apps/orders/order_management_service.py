@@ -18,7 +18,16 @@ class OrderManagementService:
     @staticmethod
     @transaction.atomic
     def edit_order(*, order: Order, data: dict[str, Any], actor=None) -> Order:
+        # Mutation callers may hold a stale instance after a lifecycle service
+        # locked and updated the same row. Read the reservation flag from the DB.
+        order.refresh_from_db(fields=['stock_reserved'])
         order._actor = actor
+        reservation_was_active = order.stock_reserved
+        if reservation_was_active:
+            # Release using the original line quantities. If editing or the new
+            # reservation fails, this transaction restores the previous state.
+            from .stock_service import OrderStockReservationService
+            OrderStockReservationService.release(order, actor=actor)
 
         existing_lines = {
             l.id: l
@@ -49,7 +58,8 @@ class OrderManagementService:
             tax = line.tax if line.pk else Decimal('0.00')
             total = subtotal + tax
 
-            line.product = product_obj if product_obj is not None else line.product
+            if 'product' in line_data:
+                line.product = product_obj
             line.product_name = line_data.get('product_name') or (
                 product_obj.name if product_obj else line.product_name
             )
@@ -77,18 +87,28 @@ class OrderManagementService:
         if order.discount_type == Order.DiscountType.NONE:
             order.discount_value = Decimal('0.00')
 
+        # Editable delivery fee — recalculate_totals() folds it into the total.
+        if 'delivery_fee' in data:
+            order.delivery_fee = data['delivery_fee'] or Decimal('0.00')
+
         if 'customer_note' in data:
             order.customer_note = data['customer_note']
         if 'internal_note' in data:
             order.internal_note = data['internal_note']
 
-        # Update billing fields if provided
+        # Update billing (client) + shipping (delivery) address fields if provided.
         billing_fields = [
             'billing_first_name', 'billing_last_name', 'billing_company',
             'billing_email', 'billing_phone', 'billing_address_1', 'billing_address_2',
             'billing_city', 'billing_state', 'billing_postcode', 'billing_country',
         ]
-        for field in billing_fields:
+        shipping_fields = [
+            'shipping_first_name', 'shipping_last_name', 'shipping_phone',
+            'shipping_address_1', 'shipping_city', 'shipping_state',
+            'shipping_postcode', 'shipping_country',
+        ]
+        address_fields = billing_fields + shipping_fields
+        for field in address_fields:
             if field in data:
                 setattr(order, field, data[field])
 
@@ -98,6 +118,7 @@ class OrderManagementService:
             'discount_type',
             'discount_value',
             'discount_total',
+            'delivery_fee',
             'subtotal',
             'tax_total',
             'total',
@@ -105,12 +126,26 @@ class OrderManagementService:
             'internal_note',
             'updated_at',
         ]
-        # Add billing fields to update if they were in the request
-        for field in billing_fields:
+        # Add billing/shipping fields to update if they were in the request
+        for field in address_fields:
             if field in data:
                 update_fields.append(field)
         
         order.save(update_fields=update_fields)
+
+        # Quantities and totals directly affect stock availability and business
+        # priority, so these derived fields cannot remain stale after editing.
+        from .lifecycle_service import OrderLifecycleService
+        OrderLifecycleService.refresh_derived_fields(order, actor=actor)
+
+        if reservation_was_active:
+            # The order was already confirmed (held a reservation), so editing it
+            # must not fail on stock — re-reserve best-effort (backorder) for the
+            # new quantities, mirroring a force-confirmed order.
+            from .stock_service import OrderStockReservationService
+            OrderStockReservationService.reserve(order, actor=actor, force=True)
+
+        order.refresh_from_db()
         return order
 
     @staticmethod

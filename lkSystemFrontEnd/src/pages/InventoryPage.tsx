@@ -2588,6 +2588,7 @@ export default function InventoryPage() {
                 <TableRow>
                   <TableHead>Reference</TableHead>
                   <TableHead>Product</TableHead>
+                  <TableHead>Order / Source</TableHead>
                   <TableHead>Channel</TableHead>
                   <TableHead>Type</TableHead>
                   <TableHead className="text-right">Qty</TableHead>
@@ -2599,7 +2600,7 @@ export default function InventoryPage() {
               <TableBody>
                 {filteredMovements.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="text-center py-12">
+                    <TableCell colSpan={9} className="text-center py-12">
                       <div className="flex flex-col items-center gap-2 text-muted-foreground">
                         <ArrowUpDown className="h-10 w-10 opacity-30" />
                         <p className="text-sm">No movements found</p>
@@ -2629,6 +2630,19 @@ export default function InventoryPage() {
                             {mov.product_barcode}
                           </span>
                         </div>
+                      </TableCell>
+                      <TableCell className="max-w-[280px]">
+                        <span className="block font-mono text-xs">
+                          {mov.external_reference || '\u2014'}
+                        </span>
+                        {mov.notes && (
+                          <span
+                            className="block truncate text-xs text-muted-foreground"
+                            title={mov.notes}
+                          >
+                            {mov.notes}
+                          </span>
+                        )}
                       </TableCell>
                       <TableCell className="text-sm">
                         {mov.sales_channel_name}

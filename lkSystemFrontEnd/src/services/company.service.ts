@@ -37,6 +37,7 @@ function normalizeCompany(company: Partial<Company> & { id: number; name: string
     activity_code: company.activity_code ?? '',
     bank_name: company.bank_name ?? '',
     rib: company.rib ?? '',
+    invoice_footer: company.invoice_footer ?? '',
     created_at: company.created_at ?? '',
     updated_at: company.updated_at ?? '',
   };

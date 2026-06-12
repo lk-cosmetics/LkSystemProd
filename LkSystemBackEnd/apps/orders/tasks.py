@@ -403,7 +403,7 @@ def submit_order_to_delivery(self, order_id: int, actor_user_id: Optional[int] =
     Submit a single order to the external delivery provider.
 
     Retries up to MAX_DELIVERY_ATTEMPTS times with exponential back-off.
-    On final failure the order delivery_status is set to FAILED so the
+    On final failure the order's delivery_response records 'failed' so the
     operator can review and manually retry.
     """
     from apps.orders.models import Order
@@ -452,9 +452,11 @@ def retry_failed_deliveries():
     from apps.orders.models import Order
 
     eligible = Order.objects.filter(
-        delivery_status=Order.DeliveryStatus.FAILED,
+        delivery_response__provider_status='failed',
         delivery_attempts__lt=MAX_DELIVERY_ATTEMPTS,
         is_deleted=False,
+    ).exclude(
+        status__in=[Order.Status.DONE, Order.Status.RETURNED, Order.Status.CANCELED],
     ).values_list('id', flat=True)[:50]
 
     queued = 0

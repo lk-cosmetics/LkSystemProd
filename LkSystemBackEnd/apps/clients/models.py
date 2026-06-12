@@ -87,6 +87,15 @@ class Client(models.Model):
         default=ClientType.PERSON,
         db_index=True,
     )
+    # Tax ID for business (COMPANY-type) clients — shown as the bill-to tax
+    # number on invoices. Optional; individuals leave it blank.
+    matricule_fiscale = models.CharField(
+        max_length=50,
+        blank=True,
+        default='',
+        verbose_name='Matricule Fiscale',
+        help_text='Tax registration number for business clients (shown on invoices).',
+    )
     date_of_birth = models.DateField(null=True, blank=True)
 
     # ── Address ──────────────────────────────────────────────────────────
@@ -199,10 +208,10 @@ class Client(models.Model):
 
         qs = Order.all_objects.filter(client=self, is_deleted=False)
         agg = qs.aggregate(
-            # Money from COMPLETED orders only — the basis for loyalty points.
+            # Money from DONE orders only — the basis for loyalty points.
             done_total=Sum(
                 'total',
-                filter=Q(order_status=Order.OrderStatus.DONE),
+                filter=Q(status=Order.Status.DONE),
             ),
             order_count=Count('id'),
             return_count=Count(
@@ -211,8 +220,7 @@ class Client(models.Model):
                     Q(source=Order.Source.WOOCOMMERCE)
                     & (
                         Q(returned_at__isnull=False)
-                        | Q(delivery_status=Order.DeliveryStatus.RETURNED)
-                        | Q(return_exchange_status=Order.ReturnExchangeStatus.RETURNED)
+                        | Q(status=Order.Status.RETURNED)
                     )
                 ),
             ),

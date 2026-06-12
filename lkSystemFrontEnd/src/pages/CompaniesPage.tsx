@@ -52,6 +52,7 @@ const TUNISIA_CITIES = [
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import {
@@ -116,6 +117,11 @@ export default function CompaniesPage() {
   // dynamic permission, not a hardcoded role name: a CEO no longer holds
   // delete_company, so the Delete action is hidden for them.
   const canManageTenants = hasPermission(user, 'delete_company');
+  // Brand Manager / Manager / CEO / Super Admin hold edit_company → they may
+  // edit the company's billing details (the data the invoice renders from).
+  // The backend re-enforces this on the PATCH; gating the trigger keeps the
+  // edit button out of read-only users' way.
+  const canEditCompany = hasPermission(user, 'edit_company');
 
   // React Query - Fetch data with caching
   const { data: companies = [], isLoading, error: fetchError, refetch } = useCompanies();
@@ -297,6 +303,7 @@ export default function CompaniesPage() {
         activity_code: editFormData.activity_code,
         bank_name: editFormData.bank_name,
         rib: editFormData.rib,
+        invoice_footer: editFormData.invoice_footer,
         is_active: editFormData.is_active,
       };
 
@@ -587,10 +594,12 @@ export default function CompaniesPage() {
                           <Eye className="size-4 mr-2" />
                           View Details
                         </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => handleEdit(company)}>
-                          <Pencil className="size-4 mr-2" />
-                          Edit Company
-                        </DropdownMenuItem>
+                        {canEditCompany && (
+                          <DropdownMenuItem onClick={() => handleEdit(company)}>
+                            <Pencil className="size-4 mr-2" />
+                            Edit Company
+                          </DropdownMenuItem>
+                        )}
                         <DropdownMenuItem onClick={() => handleToggleStatus(company)}>
                           <Ban className="size-4 mr-2" />
                           {company.is_active ? 'Deactivate' : 'Activate'}
@@ -661,15 +670,17 @@ export default function CompaniesPage() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
+              <div className={`grid gap-2 ${canEditCompany ? 'grid-cols-2' : 'grid-cols-1'}`}>
                 <Button variant="outline" onClick={() => handleView(company)} className="gap-2">
                   <Eye className="size-4" />
                   View
                 </Button>
-                <Button onClick={() => handleEdit(company)} className="gap-2">
-                  <Pencil className="size-4" />
-                  Edit
-                </Button>
+                {canEditCompany && (
+                  <Button onClick={() => handleEdit(company)} className="gap-2">
+                    <Pencil className="size-4" />
+                    Edit
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   onClick={() => handleToggleStatus(company)}
@@ -874,6 +885,7 @@ export default function CompaniesPage() {
 
               {/* Action Buttons */}
               <div className="flex gap-3 pt-4 border-t">
+                {canEditCompany && (
                 <Button onClick={() => {
                   // We already have full detail data, pass it directly to edit
                   setEditFormData({ ...selectedCompany });
@@ -885,6 +897,7 @@ export default function CompaniesPage() {
                   <Pencil className="size-4" />
                   Edit Company
                 </Button>
+                )}
                 <Button
                   variant="outline"
                   onClick={() => {
@@ -1191,6 +1204,23 @@ export default function CompaniesPage() {
                     <p className="text-xs text-l-text-3 dark:text-d-text-3">20-digit bank account number</p>
                   </div>
                 </div>
+              </div>
+
+              {/* Invoice footer — printed at the bottom of every generated invoice */}
+              <div className="space-y-2 pt-4 border-t">
+                <Label htmlFor="edit-invoice-footer">Invoice Footer</Label>
+                <Textarea
+                  id="edit-invoice-footer"
+                  value={editFormData.invoice_footer || ''}
+                  onChange={(e) =>
+                    setEditFormData({ ...editFormData, invoice_footer: e.target.value })
+                  }
+                  rows={2}
+                  placeholder="e.g. Merci pour votre confiance. Paiement à réception."
+                />
+                <p className="text-xs text-l-text-3 dark:text-d-text-3">
+                  Shown at the bottom of every generated invoice (terms, legal mentions, thank-you note…).
+                </p>
               </div>
 
               {/* Action Buttons */}

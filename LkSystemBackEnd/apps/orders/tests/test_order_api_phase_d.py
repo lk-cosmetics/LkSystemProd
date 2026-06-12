@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -50,7 +51,7 @@ class _PhaseDAPIBase(TestCase):
             brand=self.brand,
             sales_channel=self.channel,
             order_number='ORD-PHD-001',
-            status=Order.Status.PENDING,
+            status=Order.Status.NEW,
             source=Order.Source.WOOCOMMERCE,
             external_order_id='9001',
             total='150.00',
@@ -75,8 +76,7 @@ class _PhaseDAPIBase(TestCase):
 
 class CleanFieldExposureTests(_PhaseDAPIBase):
     CLEAN_FIELDS = [
-        'order_status', 'order_status_display',
-        'confirmation_status', 'confirmation_status_display',
+        'status', 'status_display',
         'delivery_method', 'delivery_method_display',
         'stock_status', 'stock_status_display',
         'priority_level', 'priority_level_display',
@@ -100,13 +100,13 @@ class CleanFieldExposureTests(_PhaseDAPIBase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 1)
         row = response.data['results'][0]
-        self.assertIn('order_status', row)
-        self.assertIn('order_status_display', row)
+        self.assertIn('status', row)
+        self.assertIn('status_display', row)
 
     def test_clean_fields_are_declared_read_only(self):
         serializer = OrderDetailSerializer()
         for field in (
-            'order_status', 'confirmation_status', 'delivery_method',
+            'status', 'delivery_method',
             'stock_status', 'priority_level', 'sync_status',
             'sync_error_message', 'last_sync_at',
         ):
@@ -124,20 +124,19 @@ class ManualTransitionEndpointTests(_PhaseDAPIBase):
         # Make the order derive as ``canceled`` (live derivation, not the stored
         # field) and start from a clean sync state.
         self._set_fields(
-            status=Order.Status.CANCELLED,
-            outcome=Order.Outcome.CANCELLED,
+            status=Order.Status.CANCELED,
             sync_status=Order.SyncStatus.IMPORTED,
         )
         reason = 'Customer called back and wants the order reinstated.'
 
         response = self.client.post(
             self._url(),
-            {'target': Order.OrderStatus.CONFIRMED, 'reason': reason},
+            {'target': Order.Status.CONFIRMED, 'reason': reason},
             format='json',
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['order_status'], Order.OrderStatus.CONFIRMED)
+        self.assertEqual(response.data['status'], Order.Status.CONFIRMED)
         # WooCommerce order + WC-mappable status change => parked for a deferred push.
         self.assertEqual(response.data['sync_status'], Order.SyncStatus.PENDING_SYNC)
 
@@ -148,19 +147,16 @@ class ManualTransitionEndpointTests(_PhaseDAPIBase):
         )
         self.assertIsNotNone(log, 'manual override must be audited')
         self.assertEqual(log.details.get('reason'), reason)
-        self.assertEqual(log.details.get('target'), Order.OrderStatus.CONFIRMED)
-        self.assertEqual(log.details.get('old'), Order.OrderStatus.CANCELED)
+        self.assertEqual(log.details.get('from'), Order.Status.CANCELED)
+        self.assertEqual(log.details.get('to'), Order.Status.CONFIRMED)
 
     def test_disallowed_target_returns_400(self):
         # canceled -> done is not an allowed backward move.
-        self._set_fields(
-            status=Order.Status.CANCELLED,
-            outcome=Order.Outcome.CANCELLED,
-        )
+        self._set_fields(status=Order.Status.CANCELED)
 
         response = self.client.post(
             self._url(),
-            {'target': Order.OrderStatus.DONE, 'reason': 'should be rejected'},
+            {'target': Order.Status.DONE, 'reason': 'should be rejected'},
             format='json',
         )
 
@@ -168,14 +164,11 @@ class ManualTransitionEndpointTests(_PhaseDAPIBase):
         self.assertIn('detail', response.data)
 
     def test_missing_reason_returns_400(self):
-        self._set_fields(
-            status=Order.Status.CANCELLED,
-            outcome=Order.Outcome.CANCELLED,
-        )
+        self._set_fields(status=Order.Status.CANCELED)
 
         response = self.client.post(
             self._url(),
-            {'target': Order.OrderStatus.CONFIRMED},
+            {'target': Order.Status.CONFIRMED},
             format='json',
         )
 
@@ -205,7 +198,7 @@ class ManualTransitionEndpointTests(_PhaseDAPIBase):
 
         response = viewer_client.post(
             self._url(),
-            {'target': Order.OrderStatus.CONFIRMED, 'reason': 'no permission'},
+            {'target': Order.Status.CONFIRMED, 'reason': 'no permission'},
             format='json',
         )
 
@@ -227,7 +220,7 @@ class RetrySyncEndpointTests(_PhaseDAPIBase):
     def test_retry_pushes_status_and_records_success(self):
         # Simulate a previously failed push of a confirmed order.
         self._set_fields(
-            order_status=Order.OrderStatus.CONFIRMED,
+            status=Order.Status.CONFIRMED,
             sync_status=Order.SyncStatus.SYNC_FAILED,
         )
 
@@ -254,7 +247,7 @@ class SummaryKPITests(_PhaseDAPIBase):
     def test_summary_includes_order_status_kpi_block(self):
         # One realised sale.
         self._set_fields(
-            order_status=Order.OrderStatus.DONE,
+            status=Order.Status.DONE,
             total='150.00',
         )
 
@@ -267,46 +260,44 @@ class SummaryKPITests(_PhaseDAPIBase):
         self.assertEqual(kpis['successful_sales'], 1)
         # revenue is serialized as a string for safe JSON transport.
         self.assertEqual(kpis['revenue'], '150.00')
-        self.assertEqual(kpis['by_status'][Order.OrderStatus.DONE], 1)
+        self.assertEqual(kpis['by_status'][Order.Status.DONE], 1)
         self.assertEqual(kpis['returned'], 0)
-        self.assertEqual(kpis['exchanged'], 0)
         self.assertEqual(kpis['canceled'], 0)
 
 
 class OrderStatusListFilterTests(_PhaseDAPIBase):
-    """Phase D — the list endpoint filters by the clean ``order_status``.
+    """The list endpoint filters by the canonical six-state ``order_status``.
 
-    The OrdersPage tabs all speak one language: a single ``?order_status=``
-    param. Simple tabs send one value (``delayed``); grouped tabs send a
-    comma-separated union (Pending => ``new,awaiting_confirmation``;
-    Returns => ``returned,exchanged``). This is the same field the tab counts
-    (``order_status_kpis.by_status``) and the row chip read, so the surface
-    stays internally consistent. Mirrors ``OrderFilterSet.filter_order_status``.
+    Each OrdersPage tab sends a single ``?status=`` value (comma-joined
+    unions remain supported). Rows carrying an exception overlay (cancelled /
+    returned / exchanged) are EXCLUDED from specific-status queries — they left
+    the live pipeline. Mirrors ``OrderFilterSet.filter_order_status``.
     """
 
     def setUp(self):
         super().setUp()
-        # Pin the base order to a known clean status, then spread a few more
-        # across the lifecycle. order_status is a derived field recomputed on
-        # save, so write it straight to the row (same trick as _set_fields).
-        self._set_fields(order_status=Order.OrderStatus.DELAYED)
-        self.new_order = self._make_order('ORD-PHD-002', Order.OrderStatus.NEW)
-        self.awaiting = self._make_order('ORD-PHD-003', Order.OrderStatus.AWAITING_CONFIRMATION)
-        self.confirmed = self._make_order('ORD-PHD-004', Order.OrderStatus.CONFIRMED)
-        self.returned = self._make_order('ORD-PHD-005', Order.OrderStatus.RETURNED)
-        self.exchanged = self._make_order('ORD-PHD-006', Order.OrderStatus.EXCHANGED)
+        # Pin the base order to a known status, then spread a few more across
+        # the lifecycle (written straight to the row, same as _set_fields).
+        self._set_fields(status=Order.Status.DELAYED)
+        self.new_order = self._make_order('ORD-PHD-002', Order.Status.NEW)
+        self.packaging = self._make_order('ORD-PHD-003', Order.Status.PACKAGING)
+        self.confirmed = self._make_order('ORD-PHD-004', Order.Status.CONFIRMED)
+        self.returned = self._make_order(
+            'ORD-PHD-005', Order.Status.RETURNED, returned_at=timezone.now(),
+        )
+        self.done = self._make_order('ORD-PHD-006', Order.Status.DONE)
 
-    def _make_order(self, number, order_status):
+    def _make_order(self, number, order_status, **extra):
         order = Order.objects.create(
             company=self.company,
             brand=self.brand,
             sales_channel=self.channel,
             order_number=number,
-            status=Order.Status.PENDING,
+            status=Order.Status.NEW,
             source=Order.Source.WOOCOMMERCE,
             total='10.00',
         )
-        Order.all_objects.filter(pk=order.pk).update(order_status=order_status)
+        Order.all_objects.filter(pk=order.pk).update(status=order_status, **extra)
         order.refresh_from_db()
         return order
 
@@ -315,35 +306,33 @@ class OrderStatusListFilterTests(_PhaseDAPIBase):
         return {row['id'] for row in response.data['results']}
 
     def test_single_value_filter_returns_only_that_status(self):
-        """The Delayed tab (?order_status=delayed) returns exactly the 1 delayed order."""
-        response = self.client.get('/api/v1/orders/?order_status=delayed')
+        """The Delayed tab (?status=delayed) returns exactly the 1 delayed order."""
+        response = self.client.get('/api/v1/orders/?status=delayed')
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 1)
         self.assertEqual(self._ids(response), {self.order.id})
 
     def test_comma_separated_group_unions_statuses(self):
-        """The Pending tab groups new + awaiting_confirmation into one query param."""
+        """Comma-joined values union statuses in one query param."""
         response = self.client.get(
-            '/api/v1/orders/?order_status=new,awaiting_confirmation'
+            '/api/v1/orders/?status=new,confirmed'
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 2)
-        self.assertEqual(self._ids(response), {self.new_order.id, self.awaiting.id})
+        self.assertEqual(self._ids(response), {self.new_order.id, self.confirmed.id})
 
-    def test_returns_group_filter(self):
-        """The Returns tab groups returned + exchanged."""
-        response = self.client.get(
-            '/api/v1/orders/?order_status=returned,exchanged'
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(self._ids(response), {self.returned.id, self.exchanged.id})
+    def test_returned_is_its_own_tab(self):
+        """Returned orders live under ?status=returned, not Done."""
+        response = self.client.get('/api/v1/orders/?status=done')
+        self.assertEqual(self._ids(response), {self.done.id})
+        response = self.client.get('/api/v1/orders/?status=returned')
+        self.assertEqual(self._ids(response), {self.returned.id})
 
     def test_blank_filter_is_ignored(self):
         """An empty value is a no-op (the All tab sends no order_status at all)."""
-        response = self.client.get('/api/v1/orders/?order_status=')
+        response = self.client.get('/api/v1/orders/?status=')
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 6)
@@ -351,7 +340,7 @@ class OrderStatusListFilterTests(_PhaseDAPIBase):
     def test_whitespace_and_empty_segments_are_trimmed(self):
         """Stray spaces / empty segments don't break the IN-filter."""
         response = self.client.get(
-            '/api/v1/orders/?order_status=%20delayed%20,,'
+            '/api/v1/orders/?status=%20delayed%20,,'
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)

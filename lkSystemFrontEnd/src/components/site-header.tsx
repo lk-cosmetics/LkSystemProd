@@ -37,6 +37,7 @@ const PAGE_TITLES: Record<string, string> = {
   categories: 'Categories',
   promotions: 'Promotions',
   orders: 'Orders',
+  invoices: 'Invoices',
   clients: 'Clients',
   pos: 'Point of Sale',
   notifications: 'Notifications',

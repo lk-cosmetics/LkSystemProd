@@ -67,8 +67,7 @@ class ClientViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                     & Q(orders__source=Order.Source.WOOCOMMERCE)
                     & (
                         Q(orders__returned_at__isnull=False)
-                        | Q(orders__delivery_status=Order.DeliveryStatus.RETURNED)
-                        | Q(orders__return_exchange_status=Order.ReturnExchangeStatus.RETURNED)
+                        | Q(orders__status=Order.Status.RETURNED)
                     )
                 ),
                 distinct=True,

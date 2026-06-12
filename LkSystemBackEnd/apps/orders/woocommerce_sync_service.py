@@ -1,4 +1,4 @@
-"""Push local ``order_status`` changes TO WooCommerce (STATUS_MAP.md 5.8/5.9/5.11).
+"""Push local ``status`` changes TO WooCommerce (STATUS_MAP.md 5.8/5.9/5.11).
 
 Design rules baked in here:
 
@@ -10,7 +10,7 @@ Design rules baked in here:
   ``settings.WC_ORDER_PUSH_ENABLED`` (default ``False``). When disabled the order
   is parked in ``pending_sync`` for a later push and no network call is made — so
   unit tests and not-yet-configured environments never hit WooCommerce.
-* **Mapping is configurable.** local ``order_status`` -> WooCommerce status comes
+* **Mapping is configurable.** local ``status`` -> WooCommerce status comes
   from ``SystemSetting.wc_status_map`` (falling back to ``default_wc_status_map``).
   ``new`` / ``delayed`` / ``not_answered`` have no mapping and are never pushed.
 
@@ -29,7 +29,7 @@ from apps.orders.models import Order, OrderLog, SystemSetting, default_wc_status
 
 
 class WooCommerceSyncService:
-    """Owns the ``order_status`` -> WooCommerce status push and its retry."""
+    """Owns the ``status`` -> WooCommerce status push and its retry."""
 
     # ── Configuration helpers ────────────────────────────────────────────────
 
@@ -60,10 +60,9 @@ class WooCommerceSyncService:
         return mapping or default_wc_status_map()
 
     @classmethod
-    def wc_status_for(cls, order: Order, order_status: str | None = None) -> str | None:
-        """WooCommerce status string for a local ``order_status``, or None."""
-        order_status = order_status or order.order_status
-        return cls._status_map(order).get(order_status)
+    def wc_status_for(cls, order: Order, status: str | None = None) -> str | None:
+        """WooCommerce status string for this order's canonical status, or None."""
+        return cls._status_map(order).get(status or order.status)
 
     @classmethod
     def _build_client(cls, channel):
@@ -83,7 +82,7 @@ class WooCommerceSyncService:
 
     @classmethod
     def update_order_status(cls, order: Order, *, actor=None, force: bool = False) -> Order:
-        """Map ``order.order_status`` to a WooCommerce status and push it.
+        """Map ``order.status`` to a WooCommerce status and push it.
 
         Returns the (mutated) order. Never raises on a WooCommerce failure — the
         local status stands and the failure is recorded for a retry.
@@ -137,7 +136,7 @@ class WooCommerceSyncService:
             order=order,
             action=OrderLog.Action.WC_SYNC_RETRIED,
             user=actor,
-            details={'from_sync_status': order.sync_status, 'order_status': order.order_status},
+            details={'from_sync_status': order.sync_status, 'status': order.status},
         )
         if order.sync_status not in (Order.SyncStatus.IMPORTED, Order.SyncStatus.SYNCED):
             # Reset so update_order_status doesn't short-circuit on the intent step.
@@ -168,7 +167,7 @@ class WooCommerceSyncService:
             details={
                 'direction': 'local_to_wc',
                 'pushed_status': target,
-                'order_status': order.order_status,
+                'status': order.status,
             },
         )
 
@@ -185,7 +184,7 @@ class WooCommerceSyncService:
             details={
                 'direction': 'local_to_wc',
                 'attempted_status': target,
-                'order_status': order.order_status,
+                'status': order.status,
                 'error': str(exc)[:500],
             },
         )

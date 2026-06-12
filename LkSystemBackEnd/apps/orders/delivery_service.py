@@ -260,7 +260,7 @@ class DeliverySubmissionService:
             if not order.can_submit_delivery:
                 raise DeliveryError(
                     f"Order {order.order_number} is not eligible for delivery submission "
-                    f"(status={order.status}, delivery_status={order.delivery_status})."
+                    f"(status={order.status})."
                 )
 
             if not self._api_token:
@@ -275,10 +275,9 @@ class DeliverySubmissionService:
 
             payload = self._build_payload(order)
 
-            # Mark as queued before the network call so duplicate parallel submissions stop here.
-            order.delivery_status = Order.DeliveryStatus.QUEUED
+            # Count the attempt before the network call (audit metadata).
             order.delivery_attempts += 1
-            order.save(update_fields=['delivery_status', 'delivery_attempts', 'updated_at'])
+            order.save(update_fields=['delivery_attempts', 'updated_at'])
 
             OrderLoggingService.log(
                 order=order,
@@ -353,7 +352,6 @@ class DeliverySubmissionService:
                     f"Order {order.order_number} has already been sent to delivery."
                 )
 
-            order.delivery_status       = Order.DeliveryStatus.SUBMITTED
             order.delivery_reference    = str(delivery_ref)
             order.delivery_code         = str(response_data.get('code') or '')
             order.delivery_external_reference = str(
@@ -373,7 +371,7 @@ class DeliverySubmissionService:
             order.delivery_submitted_by = actor
             order.delivery_response     = response_data
             order.save(update_fields=[
-                'delivery_status', 'delivery_reference', 'delivery_code',
+                'delivery_reference', 'delivery_code',
                 'delivery_external_reference', 'delivery_status_id',
                 'delivery_order_id', 'delivery_client_id', 'delivery_cod_amount',
                 'delivery_submitted_at', 'delivery_submitted_by',
@@ -394,10 +392,6 @@ class DeliverySubmissionService:
                 },
             )
 
-            # Phase 2 — keep workflow_status in lockstep with delivery state.
-            from apps.orders.lifecycle_service import OrderLifecycleService
-            OrderLifecycleService._recompute_workflow_status(order, actor=actor)
-
         logger.info(
             "Order %s submitted to delivery provider. Reference: %s",
             order.order_number, delivery_ref,
@@ -405,55 +399,61 @@ class DeliverySubmissionService:
         return response_data
 
     def update_from_provider(self, order: Order, provider_status: str, actor=None) -> None:
-        """
-        Update the local delivery status from a provider webhook or polling result.
+        """Apply a provider webhook / polling result.
 
-        This is the ONLY place where delivery_status is transitioned to
-        IN_TRANSIT, DELIVERED, RETURNED, etc.
-        NOTE: This does NOT automatically change the WooCommerce order status.
-        The operator reviews DELIVERED orders and marks them COMPLETED manually
-        (or via a separate controlled action).
+        The raw provider state is technical metadata (kept in
+        ``delivery_response['provider_status']`` + the audit log). Terminal
+        events move the canonical ``Order.status``:
+
+        * delivered → done (the sale is realised; stock deducts on done)
+        * returned  → returned
+        * cancelled → canceled
+        * failed / in-transit / accepted → no lifecycle move (operator decides)
         """
-        new_status = self._map_provider_status(provider_status)
-        if new_status == order.delivery_status:
+        mapped = self._map_provider_status(provider_status)
+        previous = (order.delivery_response or {}).get('provider_status', '')
+        if mapped == previous:
             return  # no-op
-
-        old_status = order.delivery_status
-        update_fields = ['delivery_status', 'updated_at']
-        order.delivery_status = new_status
-
-        # Delivery provider result is the only delivery path allowed to make a
-        # website order "done". Packaging and submission stay non-terminal.
-        if new_status == Order.DeliveryStatus.DELIVERED:
-            order.status = Order.Status.COMPLETED
-            update_fields.append('status')
-        elif new_status == Order.DeliveryStatus.RETURNED:
-            order.status = Order.Status.REFUNDED
-            order.return_exchange_status = Order.ReturnExchangeStatus.RETURNED
-            update_fields.extend(['status', 'return_exchange_status'])
-        elif new_status == Order.DeliveryStatus.CANCELLED:
-            order.status = Order.Status.CANCELLED
-            update_fields.append('status')
-        elif new_status == Order.DeliveryStatus.FAILED:
-            order.status = Order.Status.FAILED
-            update_fields.append('status')
 
         from django.db import transaction
         from apps.orders.service import OrderIngestionService
+        from apps.orders.status_service import OrderStatusService
 
         with transaction.atomic():
-            order.save(update_fields=update_fields)
-            # The provider marking an order DELIVERED is the point a website order
-            # becomes COMPLETED — and thus the point its lines must leave stock.
-            # Previously this method changed status without ever decrementing, so
-            # delivered website orders never reduced stock (systematic oversell).
-            # _sync_inventory_movements reconciles (delta = desired - already_moved):
-            # it decrements on DELIVERED→COMPLETED, no-ops when already decremented,
-            # and reverses stock if the provider reports RETURNED/CANCELLED/FAILED —
-            # same engine and channel resolution as the WooCommerce-completed and
-            # POS-validation paths, so it can never double-apply.
+            response = dict(order.delivery_response or {})
+            response['provider_status'] = mapped
+            response['provider_status_raw'] = str(provider_status or '')
+            response['provider_status_at'] = timezone.now().isoformat()
+            order.delivery_response = response
+            order.save(update_fields=['delivery_response', 'updated_at'])
+
+            if mapped == 'delivered':
+                OrderStatusService.transition(
+                    order, Order.Status.DONE, actor=actor,
+                    note='delivery provider confirmed delivered', force=True,
+                )
+            elif mapped == 'returned':
+                if not order.returned_at:
+                    order.returned_at = timezone.now()
+                    order.return_reason = order.return_reason or 'returned by delivery provider'
+                    order.save(update_fields=['returned_at', 'return_reason', 'updated_at'])
+                OrderStatusService.transition(
+                    order, Order.Status.RETURNED, actor=actor,
+                    note='delivery provider reported returned', force=True,
+                )
+            elif mapped == 'cancelled':
+                OrderStatusService.transition(
+                    order, Order.Status.CANCELED, actor=actor,
+                    note='delivery provider reported cancelled',
+                    force=(order.status in (Order.Status.DONE, Order.Status.RETURNED)),
+                )
+
+            # Reconcile stock with the (possibly new) canonical status — the
+            # delta engine deducts on done, reverses on returned/canceled, and
+            # no-ops otherwise. Same engine as POS validation and packaging,
+            # so it can never double-apply.
             inventory_channel = order.pos_sales_channel or order.sales_channel
-            if inventory_channel:
+            if inventory_channel and mapped in ('delivered', 'returned', 'cancelled', 'failed'):
                 lines = list(
                     order.lines.filter(is_deleted=False).select_related('product')
                 )
@@ -462,26 +462,18 @@ class DeliverySubmissionService:
                 )
 
         action_map = {
-            Order.DeliveryStatus.ACCEPTED:   OrderLog.Action.DELIVERY_ACCEPTED,
-            Order.DeliveryStatus.DELIVERED:  OrderLog.Action.DELIVERY_DELIVERED,
-            Order.DeliveryStatus.FAILED:     OrderLog.Action.DELIVERY_FAILED,
-            Order.DeliveryStatus.RETURNED:   OrderLog.Action.DELIVERY_RETURNED,
+            'accepted':  OrderLog.Action.DELIVERY_ACCEPTED,
+            'delivered': OrderLog.Action.DELIVERY_DELIVERED,
+            'failed':    OrderLog.Action.DELIVERY_FAILED,
+            'returned':  OrderLog.Action.DELIVERY_RETURNED,
         }
-        action = action_map.get(new_status, OrderLog.Action.DELIVERY_SUBMITTED)
+        action = action_map.get(mapped, OrderLog.Action.DELIVERY_SUBMITTED)
 
         OrderLoggingService.log(
             order=order, action=action, user=actor,
-            details={'old_status': old_status, 'new_status': new_status,
-                     'provider_status': provider_status},
+            details={'old_provider_status': previous, 'new_provider_status': mapped,
+                     'provider_status': str(provider_status or '')},
         )
-
-        from apps.orders.lifecycle_service import OrderLifecycleService
-
-        # Recompute the canonical status. When delivery becomes DELIVERED the
-        # order_status flips to DONE, and _recompute_order_status grants the
-        # loyalty points there (single source of truth) — not on earlier
-        # submit/accepted updates.
-        OrderLifecycleService._recompute_outcome(order, actor=actor)
 
     # ─── payload builder ──────────────────────────────────────────────────────
 
@@ -493,8 +485,9 @@ class DeliverySubmissionService:
           referenceExterne, nomContact, tel, tel2, adresseLivraison,
           governorat, delegation, description, cod, echange
         """
-        # Resolve phone numbers
-        primary_phone = order.billing_phone or ''
+        # Resolve phone numbers — the DELIVERY contact (shipping phone first,
+        # billing snapshot fallback): the recipient is who the courier calls.
+        primary_phone = order.delivery_phone or ''
         secondary_phone = order.get_wc_meta('_secondary_phone', '') or primary_phone
 
         # Build item description line
@@ -520,11 +513,9 @@ class DeliverySubmissionService:
         pickup_governorate_id = self._governorate_id(order.sales_channel.state)
         payload = {
             'referenceExterne': order.external_order_id or order.order_number,
-            'nomContact': (
-                f"{order.billing_first_name} {order.billing_last_name}".strip()
-                or f"{order.shipping_first_name} {order.shipping_last_name}".strip()
-                or 'Client'
-            ),
+            # Delivery recipient, NOT the buyer: shipping name wins over the
+            # billing snapshot (people order for someone else all the time).
+            'nomContact': order.delivery_name or 'Client',
             'tel': primary_phone,
             'tel2': secondary_phone or primary_phone,
             'adresseLivraison': self._delivery_address(order),
@@ -630,23 +621,23 @@ class DeliverySubmissionService:
 
     # ─── status mapping ───────────────────────────────────────────────────────
 
+    # Common provider status strings → normalized technical states (metadata
+    # only — the canonical lifecycle lives in Order.status).
     _PROVIDER_STATUS_MAP = {
-        # Common provider status strings → our DeliveryStatus
-        'accepted':    Order.DeliveryStatus.ACCEPTED,
-        'in_transit':  Order.DeliveryStatus.IN_TRANSIT,
-        'in transit':  Order.DeliveryStatus.IN_TRANSIT,
-        'delivered':   Order.DeliveryStatus.DELIVERED,
-        'failed':      Order.DeliveryStatus.FAILED,
-        'cancelled':   Order.DeliveryStatus.CANCELLED,
-        'returned':    Order.DeliveryStatus.RETURNED,
-        'return':      Order.DeliveryStatus.RETURNED,
+        'accepted':    'accepted',
+        'in_transit':  'in_transit',
+        'in transit':  'in_transit',
+        'delivered':   'delivered',
+        'failed':      'failed',
+        'cancelled':   'cancelled',
+        'returned':    'returned',
+        'return':      'returned',
     }
 
     @classmethod
     def _map_provider_status(cls, provider_status: str) -> str:
         return cls._PROVIDER_STATUS_MAP.get(
-            (provider_status or '').lower(),
-            Order.DeliveryStatus.SUBMITTED,
+            (provider_status or '').lower(), 'submitted',
         )
 
     # ─── failure handler ──────────────────────────────────────────────────────
@@ -658,12 +649,12 @@ class DeliverySubmissionService:
             if order.delivery_reference:
                 return
 
-            order.delivery_status = Order.DeliveryStatus.FAILED
             order.delivery_response = {
                 'error': error_msg,
+                'provider_status': 'failed',
                 'failed_at': timezone.now().isoformat(),
             }
-            order.save(update_fields=['delivery_status', 'delivery_response', 'updated_at'])
+            order.save(update_fields=['delivery_response', 'updated_at'])
 
             OrderLoggingService.log(
                 order=order,

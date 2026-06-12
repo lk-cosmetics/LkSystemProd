@@ -239,10 +239,13 @@
 @media print {
   /* Collapse the React app shell so the page height = receipt height.
      Without this, #root keeps a min-height:100vh from the screen layout,
-     which Chrome interprets as a full A4 page and adds a blank sheet. */
-  html, body,
-  #root, #root > *,
-  body > div {
+     which Chrome interprets as a full A4 page and adds a blank sheet. Keep
+     this scoped to receipt mode so it cannot override the invoice's fixed
+     one-page A4 print host. */
+  body.lk-print-receipt,
+  body.lk-print-receipt #root,
+  body.lk-print-receipt #root > *,
+  body.lk-print-receipt > div {
     margin: 0 !important;
     padding: 0 !important;
     height: auto !important;
@@ -252,46 +255,24 @@
     background: #fff !important;
   }
 
-  /* Hide everything on screen */
-  body * { visibility: hidden !important; }
-
-  /* Show only the print target and its children */
-  .pos-receipt,
-  .pos-receipt *,
-  .pos-invoice,
-  .pos-invoice * { visibility: visible !important; }
-
-  /* Position print target at top-left */
-  .pos-receipt,
-  .pos-invoice {
+  /* Receipt isolation — ONLY when we opt in via the body class. The A4 invoice
+     is a separate, shared component (components/invoice) that scopes itself to
+     `body.lk-print-invoice`, so the two print modes never hide each other. */
+  body.lk-print-receipt * { visibility: hidden !important; }
+  body.lk-print-receipt .pos-receipt,
+  body.lk-print-receipt .pos-receipt * { visibility: visible !important; }
+  body.lk-print-receipt .pos-receipt {
     position: absolute !important;
     top: 0 !important;
     left: 0 !important;
+    width: 72mm !important;
+    padding: 1mm 2mm !important;
     background: white !important;
     color: black !important;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }
-
-  /* Lock to the TP80BE printable area: 72 mm with 2 mm horizontal pad. */
-  .pos-receipt {
-    width: 72mm !important;
-    padding: 1mm 2mm !important;
-  }
-
-  /* ── Invoice (A4) ─────────────────────────────────────────────── */
-  .pos-invoice {
-    width: 100% !important;
-    padding: 0 !important;
-    font-family: Arial, Helvetica, sans-serif !important;
-    font-size: 11pt !important;
-    line-height: 1.4 !important;
-  }
-  .pos-invoice table { page-break-inside: avoid; }
-
-  /* No shadows on print */
-  .pos-receipt *,
-  .pos-invoice * { box-shadow: none !important; }
+  body.lk-print-receipt .pos-receipt * { box-shadow: none !important; }
 }
 
 /* Named pages: only one of the two root elements is mounted at a time

@@ -53,6 +53,7 @@ class CompanySerializer(serializers.ModelSerializer):
             'city',
             'phone',
             'email',
+            'invoice_footer',
             'is_active',
             'brands_count',
             'created_at',

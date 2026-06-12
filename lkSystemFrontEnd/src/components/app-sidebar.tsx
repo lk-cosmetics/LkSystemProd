@@ -14,6 +14,7 @@ import {
   IconDiscount,
   IconBoxSeam,
   IconReceipt,
+  IconFileInvoice,
   IconUsersGroup,
   IconCash,
   IconBuildingFactory,
@@ -109,6 +110,12 @@ const navMain = [
     url: '/dashboard/orders',
     icon: IconReceipt,
     requiredPermissions: ['view_orders'],
+  },
+  {
+    title: 'Invoices',
+    url: '/dashboard/invoices',
+    icon: IconFileInvoice,
+    requiredPermissions: ['view_invoices'],
   },
   {
     title: 'Clients',

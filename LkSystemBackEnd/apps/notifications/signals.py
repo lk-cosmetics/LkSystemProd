@@ -88,12 +88,12 @@ def _dispatch_order_log(log, Order, OrderLog, SystemSetting):
     elif action == A.WC_CANCEL_SYNCED:
         NotificationService.wc_sync_recovered(order, actor=actor)
     elif action == A.CONTACT_STATUS_CHANGED:
+        # Emitted by mark_not_answered with the attempt counter in details.
         details = log.details or {}
-        if str(details.get('new')) == str(Order.ContactStatus.NOT_ANSWERED):
-            attempts = details.get('attempts')
-            threshold = _no_answer_threshold(order, SystemSetting)
-            if attempts and threshold and attempts >= threshold:
-                NotificationService.order_not_answered(order, actor=actor, attempts=attempts)
+        attempts = details.get('attempts')
+        threshold = _no_answer_threshold(order, SystemSetting)
+        if attempts and threshold and attempts >= threshold:
+            NotificationService.order_not_answered(order, actor=actor, attempts=attempts)
 
 
 def _no_answer_threshold(order, SystemSetting):

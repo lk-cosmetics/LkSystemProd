@@ -102,9 +102,9 @@ class OrderLifecycleServiceTests(TestCase):
         )
         self.inventory.refresh_from_db()
         self.assertEqual(self.inventory.quantity, 8)
-        OrderLifecycleService.confirm(order, actor=self.actor)
-        order.delivery_status = Order.DeliveryStatus.DELIVERED
-        order.save(update_fields=['delivery_status', 'updated_at'])
+        # A completed till sale lands on done at ingestion.
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.DONE)
 
         OrderLifecycleService.process_return(order, actor=self.actor, reason='Customer returned package')
 
@@ -141,9 +141,8 @@ class OrderLifecycleServiceTests(TestCase):
             order_number='POS-RETURN-001',
             ticket_id='150520260001',
             source=Order.Source.POS,
-            status=Order.Status.COMPLETED,
-            outcome=Order.Outcome.CONFIRMED,
-            payment_status=Order.PaymentStatus.PAID,
+            status=Order.Status.DONE,
+                        payment_status=Order.PaymentStatus.PAID,
             total='100.00',
             pos_validated_at=timezone.now(),
         )
@@ -201,8 +200,8 @@ class OrderLifecycleServiceTests(TestCase):
         checked_out.refresh_from_db()
         self.assertEqual(self.inventory.quantity, 10)
         self.assertEqual(self.pos_inventory.quantity, 8)
-        self.assertEqual(checked_out.outcome, Order.Outcome.CONFIRMED)
-        self.assertEqual(checked_out.status, Order.Status.COMPLETED)
+        self.assertEqual(checked_out.status, Order.Status.DONE)
+        self.assertEqual(checked_out.status, Order.Status.DONE)
         self.assertEqual(checked_out.payment_status, Order.PaymentStatus.PAID)
         self.assertIsNotNone(checked_out.pos_validated_at)
         self.assertEqual(
@@ -311,9 +310,9 @@ class OrderLifecycleServiceTests(TestCase):
         self.assertEqual(self.inventory.quantity, 8)
         self.assertEqual(inventory_b.quantity, 8)
 
-        OrderLifecycleService.confirm(order, actor=self.actor)
-        order.delivery_status = Order.DeliveryStatus.DELIVERED
-        order.save(update_fields=['delivery_status', 'updated_at'])
+        # A completed till sale lands on done at ingestion.
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.DONE)
 
         lines = {ln.product_id: ln for ln in OrderLine.objects.filter(order=order)}
         good_line = lines[self.product.id]

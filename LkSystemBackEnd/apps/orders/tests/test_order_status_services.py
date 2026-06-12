@@ -29,6 +29,7 @@ from apps.inventory.models import InventoryMovement, SalesChannelInventory
 from apps.orders.kpi_service import OrderKPIService
 from apps.orders.lifecycle_service import LifecycleError, OrderLifecycleService
 from apps.orders.models import Order, OrderLine, OrderLog, SystemSetting
+from apps.orders.status_service import OrderStatusService, TransitionError
 from apps.orders.priority_service import OrderPriorityService
 from apps.orders.service import OrderIngestionService
 from apps.orders.stock_service import OrderStockAvailabilityService
@@ -87,12 +88,8 @@ class _BaseOrderServiceTest(TestCase):
         defaults.update(overrides)
         return Order(**defaults)
 
-    def persist_order(self, *, order_status=None, total='100.00', **overrides) -> Order:
-        """A persisted Order with a directly-set ``order_status`` (KPI/sync tests).
-
-        Bypasses the lifecycle recompute on purpose so the aggregation/sync code
-        is exercised against a known clean status.
-        """
+    def persist_order(self, *, status=None, total='100.00', **overrides) -> Order:
+        """A persisted Order with a directly-set canonical ``status``."""
         n = Order.objects.count() + 1
         defaults = dict(
             company=self.company,
@@ -101,12 +98,14 @@ class _BaseOrderServiceTest(TestCase):
             source=Order.Source.WOOCOMMERCE,
             order_number=f'ORD-{n:04d}',
             total=Decimal(total),
+            # Direct moves to 'delayed' must satisfy the model invariant.
+            delay_date=timezone.localdate(),
         )
         defaults.update(overrides)
         order = Order.objects.create(**defaults)
-        if order_status is not None:
-            # Set the derived field directly, without triggering a recompute.
-            Order.objects.filter(pk=order.pk).update(order_status=order_status)
+        if status is not None:
+            # Write the canonical field directly (bypass the service on purpose).
+            Order.objects.filter(pk=order.pk).update(status=status)
             order.refresh_from_db()
         return order
 
@@ -136,99 +135,121 @@ class _BaseOrderServiceTest(TestCase):
         }
 
 
-class OrderStatusDerivationTests(_BaseOrderServiceTest):
-    """STATUS_MAP.md 5.1 / 5.2 / 5.3 — pure functions of the mechanism fields."""
+class OrderStatusTransitionTests(_BaseOrderServiceTest):
+    """The canonical six-state lifecycle: one matrix, one write path, audited."""
 
-    def d(self, order):
-        return OrderLifecycleService._derive_order_status(order)
+    def test_new_is_the_default(self):
+        order = self.persist_order()
+        self.assertEqual(order.status, Order.Status.NEW)
 
-    def test_new_when_no_signals(self):
-        order = self.make_order(
-            outcome=Order.Outcome.NONE, contact_status=Order.ContactStatus.NONE,
+    def test_allowed_transitions_matrix(self):
+        OS = Order.Status
+        cases = [
+            (OS.NEW, OS.CONFIRMED), (OS.NEW, OS.NOT_ANSWERED), (OS.NEW, OS.DELAYED),
+            (OS.NEW, OS.CANCELED),
+            (OS.NOT_ANSWERED, OS.CONFIRMED), (OS.NOT_ANSWERED, OS.DELAYED),
+            (OS.NOT_ANSWERED, OS.CANCELED),
+            (OS.DELAYED, OS.CONFIRMED), (OS.DELAYED, OS.NOT_ANSWERED),
+            (OS.DELAYED, OS.CANCELED),
+            (OS.CONFIRMED, OS.PACKAGING), (OS.CONFIRMED, OS.DELAYED),
+            (OS.CONFIRMED, OS.CANCELED),
+            (OS.PACKAGING, OS.DONE), (OS.PACKAGING, OS.CANCELED),
+            (OS.DONE, OS.RETURNED),
+        ]
+        for start, target in cases:
+            with self.subTest(start=start, target=target):
+                order = self.persist_order(status=start)
+                changed = OrderStatusService.transition(order, target, actor=self.actor)
+                order.refresh_from_db()
+                self.assertTrue(changed)
+                self.assertEqual(order.status, target)
+
+    def test_off_matrix_transition_rejected(self):
+        OS = Order.Status
+        cases = [
+            (OS.NEW, OS.PACKAGING), (OS.NEW, OS.DONE), (OS.NEW, OS.RETURNED),
+            (OS.CONFIRMED, OS.DONE),
+            (OS.DONE, OS.CONFIRMED), (OS.DONE, OS.CANCELED),
+            (OS.RETURNED, OS.NEW), (OS.RETURNED, OS.DONE),
+            (OS.CANCELED, OS.NEW), (OS.CANCELED, OS.CONFIRMED),
+        ]
+        for start, target in cases:
+            with self.subTest(start=start, target=target):
+                order = self.persist_order(status=start)
+                with self.assertRaises(TransitionError):
+                    OrderStatusService.transition(order, target, actor=self.actor)
+                order.refresh_from_db()
+                self.assertEqual(order.status, start)
+
+    def test_transition_writes_one_audit_log(self):
+        order = self.persist_order()
+        OrderStatusService.transition(
+            order, Order.Status.CONFIRMED, actor=self.actor, note='client ok',
         )
-        self.assertEqual(self.d(order), Order.OrderStatus.NEW)
+        log = OrderLog.objects.filter(
+            order=order, action=OrderLog.Action.ORDER_STATUS_CHANGED,
+        ).latest('id')
+        self.assertEqual(log.details['from'], Order.Status.NEW)
+        self.assertEqual(log.details['to'], Order.Status.CONFIRMED)
+        self.assertEqual(log.details['note'], 'client ok')
 
-    def test_awaiting_confirmation_on_first_contact(self):
-        order = self.make_order(contact_status=Order.ContactStatus.ANSWERED)
-        self.assertEqual(self.d(order), Order.OrderStatus.AWAITING_CONFIRMATION)
-
-    def test_confirmed_without_fulfilment_signal(self):
-        order = self.make_order(outcome=Order.Outcome.CONFIRMED)
-        self.assertEqual(self.d(order), Order.OrderStatus.CONFIRMED)
-
-    def test_preparing_when_routed_to_pos(self):
-        order = self.make_order(
-            outcome=Order.Outcome.CONFIRMED, sent_to_pos_at=timezone.now(),
+    def test_forced_jump_is_audited_as_forced(self):
+        order = self.persist_order()
+        OrderStatusService.transition(
+            order, Order.Status.DONE, actor=self.actor,
+            note='system event', force=True,
         )
-        self.assertEqual(self.d(order), Order.OrderStatus.PREPARING)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.DONE)
+        log = OrderLog.objects.filter(
+            order=order, action=OrderLog.Action.ORDER_STATUS_CHANGED,
+        ).latest('id')
+        self.assertTrue(log.details.get('forced'))
 
-    def test_delayed(self):
-        order = self.make_order(outcome=Order.Outcome.DELAYED)
-        self.assertEqual(self.d(order), Order.OrderStatus.DELAYED)
+    def test_same_status_is_a_noop(self):
+        order = self.persist_order(status=Order.Status.CONFIRMED)
+        changed = OrderStatusService.transition(
+            order, Order.Status.CONFIRMED, actor=self.actor,
+        )
+        self.assertFalse(changed)
 
-    def test_not_answered_only_after_threshold(self):
-        below = self.make_order(
-            contact_status=Order.ContactStatus.NOT_ANSWERED, not_answered_attempts=1,
+    def test_confirm_event_moves_new_to_confirmed(self):
+        order, _ = self.service.ingest(
+            self.payload(quantity=1, order_id=9301, status='pending'), self.channel,
         )
-        self.assertEqual(self.d(below), Order.OrderStatus.AWAITING_CONFIRMATION)
-        at_threshold = self.make_order(
-            contact_status=Order.ContactStatus.NOT_ANSWERED, not_answered_attempts=3,
-        )
-        self.assertEqual(self.d(at_threshold), Order.OrderStatus.NOT_ANSWERED)
+        OrderLifecycleService.confirm(order, actor=self.actor)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CONFIRMED)
 
     def test_not_answered_threshold_honours_system_setting(self):
         SystemSetting.objects.create(company=self.company, no_answer_max_attempts=2)
-        order = self.make_order(
-            contact_status=Order.ContactStatus.NOT_ANSWERED, not_answered_attempts=2,
+        order, _ = self.service.ingest(
+            self.payload(quantity=1, order_id=9302, status='pending'), self.channel,
         )
-        self.assertEqual(self.d(order), Order.OrderStatus.NOT_ANSWERED)
+        OrderLifecycleService.mark_not_answered(order, actor=self.actor)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.NEW)  # 1 of 2
+        OrderLifecycleService.mark_not_answered(order, actor=self.actor)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.NOT_ANSWERED)
 
-    def test_canceled(self):
-        order = self.make_order(status=Order.Status.CANCELLED)
-        self.assertEqual(self.d(order), Order.OrderStatus.CANCELED)
-
-    def test_done_on_delivery(self):
-        order = self.make_order(delivery_status=Order.DeliveryStatus.DELIVERED)
-        self.assertEqual(self.d(order), Order.OrderStatus.DONE)
-
-    def test_returned(self):
-        order = self.make_order(returned_at=timezone.now())
-        self.assertEqual(self.d(order), Order.OrderStatus.RETURNED)
-
-    def test_exchanged(self):
-        order = self.make_order(return_type=Order.ReturnType.EXCHANGED)
-        self.assertEqual(self.d(order), Order.OrderStatus.EXCHANGED)
-
-    def test_precedence_exchanged_beats_returned_and_done(self):
-        order = self.make_order(
-            return_type=Order.ReturnType.EXCHANGED,
-            returned_at=timezone.now(),
-            delivery_status=Order.DeliveryStatus.DELIVERED,
+    def test_cancel_event_moves_to_canceled(self):
+        order, _ = self.service.ingest(
+            self.payload(quantity=1, order_id=9303, status='pending'), self.channel,
         )
-        self.assertEqual(self.d(order), Order.OrderStatus.EXCHANGED)
+        OrderLifecycleService.cancel(order, actor=self.actor, reason='changed mind')
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CANCELED)
+        self.assertEqual(order.cancellation_reason, 'changed mind')
 
-    def test_precedence_returned_beats_done(self):
-        order = self.make_order(
-            returned_at=timezone.now(),
-            delivery_status=Order.DeliveryStatus.DELIVERED,
-        )
-        self.assertEqual(self.d(order), Order.OrderStatus.RETURNED)
-
-    def test_confirmation_status_mapping(self):
-        CS = Order.ConfirmationStatus
-        cases = [
-            (dict(outcome=Order.Outcome.CANCELLED), CS.CANCELED),
-            (dict(outcome=Order.Outcome.CONFIRMED), CS.ACCEPTED),
-            (dict(outcome=Order.Outcome.DELAYED), CS.DELAYED),
-            (dict(contact_status=Order.ContactStatus.NOT_ANSWERED), CS.NO_ANSWER),
-            (dict(), CS.PENDING),
-        ]
-        for fields, expected in cases:
-            with self.subTest(fields=fields):
-                order = self.make_order(**fields)
-                self.assertEqual(
-                    OrderLifecycleService._derive_confirmation_status(order), expected,
-                )
+    def test_terminal_statuses_reject_moves(self):
+        for terminal in (Order.Status.RETURNED, Order.Status.CANCELED):
+            with self.subTest(terminal=terminal):
+                order = self.persist_order(status=terminal)
+                with self.assertRaises(TransitionError):
+                    OrderStatusService.transition(
+                        order, Order.Status.CONFIRMED, actor=self.actor,
+                    )
 
     def test_delivery_method_mapping(self):
         DM = Order.DeliveryMethod
@@ -307,7 +328,7 @@ class OrderStockStatusTests(_BaseOrderServiceTest):
     """STATUS_MAP.md 5.5 — stock_status + mapping_required snapshot."""
 
     def _order_with_line(self, *, quantity, product=None, is_linked=True, link_product=True):
-        order = self.persist_order(order_status=Order.OrderStatus.CONFIRMED)
+        order = self.persist_order(status=Order.Status.CONFIRMED)
         OrderLine.objects.create(
             order=order,
             product=(product if link_product else None),
@@ -349,9 +370,9 @@ class OrderStockStatusTests(_BaseOrderServiceTest):
 class WooCommerceSyncServiceTests(_BaseOrderServiceTest):
     """STATUS_MAP.md 5.8 / 5.9 / 5.11 — local stays the source of truth."""
 
-    def _wc_order(self, *, order_status=Order.OrderStatus.DONE, sync=Order.SyncStatus.IMPORTED):
+    def _wc_order(self, *, status=Order.Status.DONE, sync=Order.SyncStatus.IMPORTED):
         return self.persist_order(
-            order_status=order_status,
+            status=status,
             source=Order.Source.WOOCOMMERCE,
             external_order_id='9001',
             sync_status=sync,
@@ -365,7 +386,10 @@ class WooCommerceSyncServiceTests(_BaseOrderServiceTest):
         return resp
 
     def test_parks_pending_sync_when_push_disabled(self):
-        # Channel flag defaults False -> the push is gated and the order parks.
+        # With the per-channel flag explicitly OFF, the push is gated and the
+        # order parks (the model default is now ON, so set it off here).
+        self.channel.wc_push_status_enabled = False
+        self.channel.save(update_fields=['wc_push_status_enabled'])
         order = self._wc_order()
         with mock.patch.object(WooCommerceSyncService, '_build_client') as build:
             result = WooCommerceSyncService.update_order_status(order, actor=self.actor)
@@ -401,7 +425,7 @@ class WooCommerceSyncServiceTests(_BaseOrderServiceTest):
 
     def test_non_woocommerce_order_is_noop(self):
         order = self.persist_order(
-            order_status=Order.OrderStatus.DONE, source=Order.Source.POS,
+            status=Order.Status.DONE, source=Order.Source.POS,
             sync_status=Order.SyncStatus.IMPORTED,
         )
         with mock.patch.object(WooCommerceSyncService, '_build_client') as build:
@@ -429,7 +453,11 @@ class WooCommerceSyncServiceTests(_BaseOrderServiceTest):
         )
 
     def test_cancel_push_logs_cancel_synced(self):
-        order = self._wc_order(order_status=Order.OrderStatus.CANCELED)
+        order = self.persist_order(
+            status=Order.Status.CANCELED,
+            external_order_id='9001',
+            sync_status=Order.SyncStatus.IMPORTED,
+        )
         fake = mock.Mock()
         fake.put.return_value = self._resp(200)
         with mock.patch.object(WooCommerceSyncService, '_build_client', return_value=fake):
@@ -451,7 +479,7 @@ class WooCommerceSyncServiceTests(_BaseOrderServiceTest):
             # Must NOT raise — local order_status stands.
             WooCommerceSyncService.update_order_status(order, actor=self.actor, force=True)
         order.refresh_from_db()
-        self.assertEqual(order.order_status, Order.OrderStatus.DONE)  # unchanged
+        self.assertEqual(order.status, Order.Status.DONE)  # unchanged
         self.assertEqual(order.sync_status, Order.SyncStatus.SYNC_FAILED)
         self.assertIn('500', order.sync_error_message)
         self.assertTrue(
@@ -496,7 +524,7 @@ class ManualTransitionTests(_BaseOrderServiceTest):
         order = self._confirmed_order()
         with self.assertRaises(LifecycleError):
             OrderLifecycleService.manual_transition(
-                order, target=Order.OrderStatus.AWAITING_CONFIRMATION,
+                order, target=Order.Status.NEW,
                 actor=self.actor, reason='nope',
             )
 
@@ -504,7 +532,7 @@ class ManualTransitionTests(_BaseOrderServiceTest):
         order = self._confirmed_order()
         with self.assertRaises(LifecycleError):
             OrderLifecycleService.manual_transition(
-                order, target=Order.OrderStatus.AWAITING_CONFIRMATION,
+                order, target=Order.Status.NEW,
                 actor=None, reason='nope',
             )
 
@@ -512,7 +540,7 @@ class ManualTransitionTests(_BaseOrderServiceTest):
         order = self._confirmed_order()
         with self.assertRaises(LifecycleError):
             OrderLifecycleService.manual_transition(
-                order, target=Order.OrderStatus.AWAITING_CONFIRMATION,
+                order, target=Order.Status.NEW,
                 actor=self.admin, reason='   ',
             )
 
@@ -520,24 +548,24 @@ class ManualTransitionTests(_BaseOrderServiceTest):
         order = self._confirmed_order()
         with self.assertRaises(LifecycleError):
             OrderLifecycleService.manual_transition(
-                order, target=Order.OrderStatus.DONE, actor=self.admin, reason='skip ahead',
+                order, target=Order.Status.DONE, actor=self.admin, reason='skip ahead',
             )
 
-    def test_confirmed_to_awaiting_with_audit(self):
+    def test_confirmed_to_new_with_audit(self):
         order = self._confirmed_order()
-        self.assertEqual(order.order_status, Order.OrderStatus.CONFIRMED)
+        self.assertEqual(order.status, Order.Status.CONFIRMED)
         OrderLifecycleService.manual_transition(
-            order, target=Order.OrderStatus.AWAITING_CONFIRMATION,
+            order, target=Order.Status.NEW,
             actor=self.admin, reason='Customer wants to change items',
         )
         order.refresh_from_db()
-        self.assertEqual(order.order_status, Order.OrderStatus.AWAITING_CONFIRMATION)
+        self.assertEqual(order.status, Order.Status.NEW)
         log = OrderLog.objects.filter(
             order=order, action=OrderLog.Action.MANUAL_STATUS_OVERRIDE,
         ).latest('id')
         self.assertEqual(log.details['reason'], 'Customer wants to change items')
-        self.assertEqual(log.details['old'], Order.OrderStatus.CONFIRMED)
-        self.assertEqual(log.details['new'], Order.OrderStatus.AWAITING_CONFIRMATION)
+        self.assertEqual(log.details['from'], Order.Status.CONFIRMED)
+        self.assertEqual(log.details['to'], Order.Status.NEW)
 
     def test_canceled_reopen_to_confirmed(self):
         order, _ = self.service.ingest(
@@ -545,14 +573,14 @@ class ManualTransitionTests(_BaseOrderServiceTest):
         )
         OrderLifecycleService.cancel(order, actor=self.actor, reason='Wrong address')
         order.refresh_from_db()
-        self.assertEqual(order.order_status, Order.OrderStatus.CANCELED)
+        self.assertEqual(order.status, Order.Status.CANCELED)
 
         OrderLifecycleService.manual_transition(
-            order, target=Order.OrderStatus.CONFIRMED, actor=self.admin, reason='Customer called back',
+            order, target=Order.Status.CONFIRMED, actor=self.admin, reason='Customer called back',
         )
         order.refresh_from_db()
-        self.assertEqual(order.order_status, Order.OrderStatus.CONFIRMED)
-        self.assertEqual(order.status, Order.Status.PROCESSING)
+        self.assertEqual(order.status, Order.Status.CONFIRMED)
+        self.assertEqual(order.cancellation_reason, '')
 
     def test_returned_to_done_rededucts_stock(self):
         # MANUAL order: the sale is recorded at ingest (10 -> 8).
@@ -561,23 +589,22 @@ class ManualTransitionTests(_BaseOrderServiceTest):
         )
         self.inventory.refresh_from_db()
         self.assertEqual(self.inventory.quantity, 8)
-        OrderLifecycleService.confirm(order, actor=self.actor)
-        order.delivery_status = Order.DeliveryStatus.DELIVERED
-        order.save(update_fields=['delivery_status', 'updated_at'])
+        # A completed MANUAL till sale lands directly on done at ingestion.
+        self.assertEqual(order.status, Order.Status.DONE)
         # GOOD return restores stock (8 -> 10) and net SALE/RETURN_IN nets to 0.
         OrderLifecycleService.process_return(order, actor=self.actor, reason='changed mind')
         self.inventory.refresh_from_db()
         order.refresh_from_db()
         self.assertEqual(self.inventory.quantity, 10)
-        self.assertEqual(order.order_status, Order.OrderStatus.RETURNED)
+        self.assertEqual(order.status, Order.Status.RETURNED)
 
         # Override returned -> done must re-deduct exactly once (10 -> 8).
         OrderLifecycleService.manual_transition(
-            order, target=Order.OrderStatus.DONE, actor=self.admin, reason='Customer kept it',
+            order, target=Order.Status.DONE, actor=self.admin, reason='Customer kept it',
         )
         self.inventory.refresh_from_db()
         order.refresh_from_db()
-        self.assertEqual(order.order_status, Order.OrderStatus.DONE)
+        self.assertEqual(order.status, Order.Status.DONE)
         self.assertEqual(self.inventory.quantity, 8)
 
     def test_returned_to_done_does_not_double_deduct_damaged_units(self):
@@ -585,9 +612,7 @@ class ManualTransitionTests(_BaseOrderServiceTest):
         order, _ = self.service.ingest(
             self.payload(quantity=2, order_id=8400), self.channel, source=Order.Source.MANUAL,
         )
-        OrderLifecycleService.confirm(order, actor=self.actor)
-        order.delivery_status = Order.DeliveryStatus.DELIVERED
-        order.save(update_fields=['delivery_status', 'updated_at'])
+        self.assertEqual(order.status, Order.Status.DONE)
         # DAMAGED return: units are NOT returned to the available bin (stays 8).
         OrderLifecycleService.process_return(
             order, actor=self.actor, reason='broken', return_type=Order.ReturnType.DAMAGED,
@@ -598,11 +623,11 @@ class ManualTransitionTests(_BaseOrderServiceTest):
         # Override returned -> done: the delta engine already has the units moved,
         # so it must be a no-op (must NOT deduct again down to 6).
         OrderLifecycleService.manual_transition(
-            order, target=Order.OrderStatus.DONE, actor=self.admin, reason='Re-sold as-is',
+            order, target=Order.Status.DONE, actor=self.admin, reason='Re-sold as-is',
         )
         self.inventory.refresh_from_db()
         order.refresh_from_db()
-        self.assertEqual(order.order_status, Order.OrderStatus.DONE)
+        self.assertEqual(order.status, Order.Status.DONE)
         self.assertEqual(self.inventory.quantity, 8)
 
 
@@ -611,22 +636,21 @@ class OrderKPIServiceTests(_BaseOrderServiceTest):
 
     def setUp(self):
         super().setUp()
-        OS = Order.OrderStatus
-        self.persist_order(order_status=OS.DONE, total='100.00')
-        self.persist_order(order_status=OS.DONE, total='100.00')
-        self.persist_order(order_status=OS.RETURNED, total='100.00')
-        self.persist_order(order_status=OS.EXCHANGED, total='100.00')
-        self.persist_order(order_status=OS.CANCELED, total='100.00')
-        self.persist_order(order_status=OS.NEW, total='50.00')
-        self.persist_order(order_status=OS.CONFIRMED, total='100.00')
+        OS = Order.Status
+        self.persist_order(status=OS.DONE, total='100.00')
+        self.persist_order(status=OS.DONE, total='100.00')
+        self.persist_order(status=OS.RETURNED, total='100.00',
+                           returned_at=timezone.now())
+        self.persist_order(status=OS.CANCELED, total='100.00')
+        self.persist_order(status=OS.NEW, total='50.00')
+        self.persist_order(status=OS.CONFIRMED, total='100.00')
 
-    def test_revenue_and_buckets_exclude_returns_exchanges_cancels(self):
+    def test_revenue_and_buckets_exclude_returns_and_cancels(self):
         kpi = OrderKPIService.compute(company=self.company)
-        self.assertEqual(kpi['total_orders'], 7)
+        self.assertEqual(kpi['total_orders'], 6)
         self.assertEqual(kpi['successful_sales'], 2)
         self.assertEqual(kpi['revenue'], Decimal('200.00'))
         self.assertEqual(kpi['returned'], 1)
-        self.assertEqual(kpi['exchanged'], 1)
         self.assertEqual(kpi['canceled'], 1)
         self.assertEqual(kpi['in_confirmation'], 1)   # the NEW order
         self.assertEqual(kpi['in_fulfillment'], 1)    # the CONFIRMED order
@@ -642,7 +666,7 @@ class OrderKPIServiceTests(_BaseOrderServiceTest):
         Order.objects.filter(pk=Order.objects.create(
             company=other, brand=brand, sales_channel=channel,
             source=Order.Source.WOOCOMMERCE, order_number='OTH-1', total=Decimal('100.00'),
-        ).pk).update(order_status=Order.OrderStatus.RETURNED)
+        ).pk).update(status=Order.Status.RETURNED, returned_at=timezone.now())
         kpi = OrderKPIService.compute(company=other)
         self.assertEqual(kpi['successful_sales'], 0)
         self.assertEqual(kpi['revenue'], Decimal('0.00'))

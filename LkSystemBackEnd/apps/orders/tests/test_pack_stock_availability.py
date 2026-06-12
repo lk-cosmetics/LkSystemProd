@@ -70,7 +70,7 @@ class PackStockAvailabilityTests(TestCase):
             order_number=f'ORD-PACK-{Order.objects.count()}',
             external_order_id=f'PK{Order.objects.count()}',
             source=Order.Source.WOOCOMMERCE,
-            status=Order.Status.PROCESSING,
+            status=Order.Status.NEW,
             billing_first_name='T', billing_last_name='C', billing_phone='+21620000000',
             total=Decimal('35.00') * qty,
         )

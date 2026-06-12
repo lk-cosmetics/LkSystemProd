@@ -29,9 +29,8 @@ class OrderLifecycleService:
     """Single backend source of truth for order lifecycle actions."""
 
     FINAL_STATUSES = {
-        Order.Status.CANCELLED,
-        Order.Status.REFUNDED,
-        Order.Status.FAILED,
+        Order.Status.RETURNED,
+        Order.Status.CANCELED,
     }
 
     @staticmethod
@@ -50,8 +49,8 @@ class OrderLifecycleService:
 
     @staticmethod
     def _ensure_not_cancelled(order: Order) -> None:
-        if order.status == Order.Status.CANCELLED or order.outcome == Order.Outcome.CANCELLED:
-            raise LifecycleError('Order is cancelled and cannot be processed.')
+        if order.status in (Order.Status.CANCELED, Order.Status.RETURNED):
+            raise LifecycleError('Order is in a terminal status and cannot be processed.')
 
     @classmethod
     def _assert_stock_available(
@@ -96,137 +95,6 @@ class OrderLifecycleService:
             message = f'Cannot send to delivery — insufficient stock in {channel_label}: {detail}.'
         raise LifecycleError(message)
 
-    # ── Final-outcome recompute ──────────────────────────────────────────────
-    # Single contract that determines Order.final_outcome from the current state
-    # of every other status field. Called after every lifecycle transition so
-    # KPIs always read from the same derivation.
-
-    _IN_FLIGHT_DELIVERY = (
-        Order.DeliveryStatus.QUEUED,
-        Order.DeliveryStatus.SUBMITTED,
-        Order.DeliveryStatus.ACCEPTED,
-        Order.DeliveryStatus.IN_TRANSIT,
-    )
-
-    @classmethod
-    def _derive_final_outcome(cls, order: Order) -> str:
-        # Exchange wins over any other terminal classification when set.
-        if order.return_exchange_status == Order.ReturnExchangeStatus.EXCHANGED:
-            return Order.FinalOutcome.EXCHANGED
-        # Returns (regardless of how they were captured)
-        if (
-            order.returned_at
-            or order.delivery_status == Order.DeliveryStatus.RETURNED
-            or order.return_exchange_status == Order.ReturnExchangeStatus.RETURNED
-        ):
-            return Order.FinalOutcome.RETURNED
-        # Cancellations split by whether delivery already happened
-        if order.delivery_status == Order.DeliveryStatus.CANCELLED:
-            return Order.FinalOutcome.CANCELLED_AFTER_DELIVERY
-        if order.outcome == Order.Outcome.CANCELLED or order.status == Order.Status.CANCELLED:
-            if order.delivery_status == Order.DeliveryStatus.DELIVERED or order.pos_validated_at:
-                return Order.FinalOutcome.CANCELLED_AFTER_DELIVERY
-            return Order.FinalOutcome.CANCELLED_BEFORE_DELIVERY
-        # Terminal failed delivery
-        if order.delivery_status == Order.DeliveryStatus.FAILED and not order.pos_validated_at:
-            return Order.FinalOutcome.FAILED_DELIVERY
-        # Successful sale: delivery confirmed or POS pickup completed.
-        if order.delivery_status == Order.DeliveryStatus.DELIVERED:
-            return Order.FinalOutcome.SUCCESSFUL_SALE
-        if order.pos_validated_at and order.delivery_status not in cls._IN_FLIGHT_DELIVERY:
-            return Order.FinalOutcome.SUCCESSFUL_SALE
-        return Order.FinalOutcome.NONE
-
-    @classmethod
-    def _recompute_outcome(cls, order: Order, *, actor=None) -> str:
-        """Recompute and persist Order.final_outcome based on current fields.
-        Returns the new outcome. Logs only when the value actually changes.
-        Always followed by _recompute_workflow_status so the 10-state UI status
-        stays in lockstep.
-        """
-        new_outcome = cls._derive_final_outcome(order)
-        if new_outcome != order.final_outcome:
-            old_outcome = order.final_outcome
-            order.final_outcome = new_outcome
-            order.save(update_fields=['final_outcome', 'updated_at'])
-            OrderLoggingService.log(
-                order=order,
-                action=OrderLog.Action.FINAL_OUTCOME_CHANGED,
-                user=actor,
-                details={'old': old_outcome, 'new': new_outcome},
-            )
-        # Always recompute workflow_status — it depends on more than just final_outcome.
-        cls._recompute_workflow_status(order, actor=actor)
-        return new_outcome
-
-    # ── Unified workflow status (Phase 2) ────────────────────────────────────
-
-    @classmethod
-    def _derive_workflow_status(cls, order: Order) -> str:
-        """10-state main workflow derivation. Highest match wins.
-        Stays in sync with the same logic duplicated in migration 0012.
-        """
-        if order.return_exchange_status == Order.ReturnExchangeStatus.EXCHANGED \
-                or order.final_outcome == Order.FinalOutcome.EXCHANGED:
-            return Order.WorkflowStatus.CHANGED
-        if (
-            order.returned_at
-            or order.delivery_status == Order.DeliveryStatus.RETURNED
-            or order.final_outcome == Order.FinalOutcome.RETURNED
-        ):
-            return Order.WorkflowStatus.RETOUR
-        if order.status == Order.Status.CANCELLED or order.outcome == Order.Outcome.CANCELLED:
-            return Order.WorkflowStatus.CANCELLED
-        if order.final_outcome == Order.FinalOutcome.SUCCESSFUL_SALE:
-            return Order.WorkflowStatus.DONE
-        if order.packaging_status in (
-            Order.PackagingStatus.PACKAGED, Order.PackagingStatus.UPDATED,
-        ) and order.delivery_status in cls._IN_FLIGHT_DELIVERY:
-            return Order.WorkflowStatus.PACKAGING
-        if order.delivery_status in cls._IN_FLIGHT_DELIVERY or order.delivery_reference:
-            return Order.WorkflowStatus.SENT_TO_DELIVERY
-        if order.outcome == Order.Outcome.DELAYED or order.contact_status == Order.ContactStatus.DELAYED:
-            return Order.WorkflowStatus.DELAYED
-        if order.outcome == Order.Outcome.CONFIRMED:
-            return Order.WorkflowStatus.ANSWERED
-        if order.contact_status == Order.ContactStatus.NOT_ANSWERED:
-            return Order.WorkflowStatus.NOT_ANSWERED
-        return Order.WorkflowStatus.PENDING
-
-    @classmethod
-    def _recompute_workflow_status(cls, order: Order, *, actor=None) -> str:
-        """Persist + log when the 10-state workflow status changes.
-        Stamps not_answered_at the first time we enter not_answered.
-        """
-        new_ws = cls._derive_workflow_status(order)
-        update_fields: list[str] = []
-        if new_ws != order.workflow_status:
-            old_ws = order.workflow_status
-            order.workflow_status = new_ws
-            update_fields.append('workflow_status')
-        if (
-            new_ws == Order.WorkflowStatus.NOT_ANSWERED
-            and order.not_answered_at is None
-        ):
-            order.not_answered_at = timezone.now()
-            update_fields.append('not_answered_at')
-        if update_fields:
-            update_fields.append('updated_at')
-            order.save(update_fields=update_fields)
-            if 'workflow_status' in update_fields:
-                OrderLoggingService.log(
-                    order=order,
-                    action=OrderLog.Action.WORKFLOW_STATUS_CHANGED,
-                    user=actor,
-                    details={'old': old_ws, 'new': new_ws},
-                )
-        # Keep the clean top-layer fields (order_status / confirmation_status /
-        # delivery_method / stock_status / priority_level) in lockstep with every
-        # workflow recompute. This is the single seam where the public status is
-        # derived (STATUS_MAP.md sections 5.1-5.6); _recompute_outcome reaches it
-        # via this call too, so all transitions stay consistent.
-        cls._recompute_order_status(order, actor=actor)
-        return new_ws
 
     # ── Clean top-layer status derivation (Phase C) ──────────────────────────
     # order_status / confirmation_status / delivery_method are pure functions of
@@ -251,72 +119,6 @@ class OrderLifecycleService:
         )
         return int(value) if value else cls._NO_ANSWER_DEFAULT
 
-    @classmethod
-    def _derive_order_status(cls, order: Order) -> str:
-        """STATUS_MAP.md 5.1 — highest match wins."""
-        OS = Order.OrderStatus
-        if (
-            order.return_exchange_status == Order.ReturnExchangeStatus.EXCHANGED
-            or order.return_type == Order.ReturnType.EXCHANGED
-            or order.final_outcome == Order.FinalOutcome.EXCHANGED
-        ):
-            return OS.EXCHANGED
-        if (
-            order.returned_at
-            or order.delivery_status == Order.DeliveryStatus.RETURNED
-            or order.return_exchange_status == Order.ReturnExchangeStatus.RETURNED
-            or order.final_outcome == Order.FinalOutcome.RETURNED
-        ):
-            return OS.RETURNED
-        if order.status == Order.Status.CANCELLED or order.outcome == Order.Outcome.CANCELLED:
-            return OS.CANCELED
-        if (
-            order.packaging_status in (
-                Order.PackagingStatus.PACKAGED, Order.PackagingStatus.UPDATED,
-            )
-            or order.pos_validated_at
-            or order.delivery_status == Order.DeliveryStatus.DELIVERED
-            or order.final_outcome == Order.FinalOutcome.SUCCESSFUL_SALE
-        ):
-            return OS.DONE
-        if order.outcome == Order.Outcome.CONFIRMED and (
-            order.sent_to_pos_at
-            or bool(order.delivery_reference)
-            or order.delivery_status in cls._IN_FLIGHT_DELIVERY
-        ):
-            return OS.PREPARING
-        if order.outcome == Order.Outcome.CONFIRMED:
-            return OS.CONFIRMED
-        if order.outcome == Order.Outcome.DELAYED or order.contact_status == Order.ContactStatus.DELAYED:
-            return OS.DELAYED
-        if (
-            order.contact_status == Order.ContactStatus.NOT_ANSWERED
-            and (order.not_answered_attempts or 0) >= cls._no_answer_threshold(order)
-        ):
-            return OS.NOT_ANSWERED
-        if (
-            order.assigned_agent_id
-            or order.confirmation_started_at
-            or order.contact_status not in (Order.ContactStatus.NONE, '')
-            or (order.not_answered_attempts or 0) >= 1
-            or order.outcome_changed_at
-        ):
-            return OS.AWAITING_CONFIRMATION
-        return OS.NEW
-
-    @classmethod
-    def _derive_confirmation_status(cls, order: Order) -> str:
-        """STATUS_MAP.md 5.2 — collapses outcome + contact_status."""
-        CS = Order.ConfirmationStatus
-        if order.outcome == Order.Outcome.CANCELLED:
-            return CS.CANCELED
-        if order.outcome == Order.Outcome.CONFIRMED:
-            return CS.ACCEPTED
-        if order.outcome == Order.Outcome.DELAYED or order.contact_status == Order.ContactStatus.DELAYED:
-            return CS.DELAYED
-        if order.contact_status == Order.ContactStatus.NOT_ANSWERED:
-            return CS.NO_ANSWER
-        return CS.PENDING
 
     @classmethod
     def _derive_delivery_method(cls, order: Order) -> str:
@@ -327,46 +129,30 @@ class OrderLifecycleService:
         return DM.HOME_DELIVERY
 
     @classmethod
-    def _recompute_order_status(cls, order: Order, *, actor=None) -> str:
-        """Persist the clean top-layer fields; log ORDER_STATUS_CHANGED on change.
-
-        Pure-derived fields (order_status / confirmation_status / delivery_method)
-        always recompute. stock_status / priority_level read the DB and are wrapped
-        so a transient inventory issue never blocks a legitimate transition. When
-        a WooCommerce-sourced order enters a WC-mappable status the row is marked
-        ``pending_sync`` (DB only) — the network push is deferred (see
-        WooCommerceSyncService), keeping the lifecycle network-free.
-        """
-        new_os = cls._derive_order_status(order)
-        new_cs = cls._derive_confirmation_status(order)
+    def refresh_aux_fields(cls, order: Order, *, actor=None) -> str:
+        """Refresh the informational derived fields ONLY (delivery_method /
+        stock_status / priority_level). Best-effort: a transient inventory
+        issue never blocks a transition. ``status`` is NOT touched here — it
+        moves only through OrderStatusService.transition()."""
         new_dm = cls._derive_delivery_method(order)
 
         update_fields: list[str] = []
-        old_os = order.order_status
-        if new_os != order.order_status:
-            order.order_status = new_os
-            update_fields.append('order_status')
-        if new_cs != order.confirmation_status:
-            order.confirmation_status = new_cs
-            update_fields.append('confirmation_status')
         if new_dm != order.delivery_method:
             order.delivery_method = new_dm
             update_fields.append('delivery_method')
 
         # stock_status + priority_level (best-effort; never block the transition).
-        mapping_required = False
         try:
             from apps.orders.priority_service import OrderPriorityService
             from apps.orders.stock_service import OrderStockAvailabilityService
             snapshot = OrderStockAvailabilityService.status_snapshot(order)
-            mapping_required = snapshot['mapping_required']
             if snapshot['stock_status'] != order.stock_status:
                 order.stock_status = snapshot['stock_status']
                 update_fields.append('stock_status')
             new_priority = OrderPriorityService.compute(
                 order,
                 stock_status=order.stock_status,
-                mapping_required=mapping_required,
+                mapping_required=snapshot['mapping_required'],
             )
             if new_priority != order.priority_level:
                 order.priority_level = new_priority
@@ -374,82 +160,16 @@ class OrderLifecycleService:
         except Exception:  # noqa: BLE001 - derived fields must not break a transition
             pass
 
-        # Mark pending_sync (DB only) when a WC-mappable status changed. The push
-        # itself is gated/deferred to keep tests and the lifecycle network-free.
-        if (
-            'order_status' in update_fields
-            and order.source == Order.Source.WOOCOMMERCE
-            and order.external_order_id
-            and order.sync_status in (Order.SyncStatus.IMPORTED, Order.SyncStatus.SYNCED)
-        ):
-            from apps.orders.models import SystemSetting, default_wc_status_map
-            mapping = (
-                SystemSetting.objects
-                .filter(company_id=order.company_id)
-                .values_list('wc_status_map', flat=True)
-                .first()
-            ) or default_wc_status_map()
-            if mapping.get(new_os):
-                order.sync_status = Order.SyncStatus.PENDING_SYNC
-                update_fields.append('sync_status')
-
         if update_fields:
             update_fields.append('updated_at')
             order.save(update_fields=update_fields)
-            if 'order_status' in update_fields:
-                OrderLoggingService.log(
-                    order=order,
-                    action=OrderLog.Action.ORDER_STATUS_CHANGED,
-                    user=actor,
-                    details={'old': old_os, 'new': new_os},
-                )
-
-        # ── Loyalty points follow the canonical order status ──────────────────
-        # Earned exactly once when the order first reaches DONE (completed); removed
-        # if it later becomes CANCELED / RETURNED / EXCHANGED. This is the SINGLE
-        # place points are decided, so every path (POS, delivery, packaging,
-        # cancel, return) stays consistent. Both helpers are idempotent, so no
-        # double credit and no double removal.
-        if new_os != old_os:
-            OS = Order.OrderStatus
-            try:
-                if new_os == OS.DONE:
-                    cls.grant_loyalty_points(order, actor=actor)
-                elif new_os in (OS.CANCELED, OS.RETURNED, OS.EXCHANGED):
-                    cls.reverse_loyalty_points(order, actor=actor)
-            except Exception:  # pragma: no cover — points must never block a transition
-                pass
-
-        return order.order_status
-
-    # ── Transition matrix (validation gate for direct workflow changes) ──────
-
-    _TRANSITIONS: dict[str, set[str]] = {
-        'pending':          {'answered', 'not_answered', 'delayed', 'cancelled'},
-        'not_answered':     {'answered', 'delayed', 'cancelled'},
-        'delayed':          {'answered', 'not_answered', 'cancelled'},
-        'answered':         {'sent_to_delivery', 'cancelled'},
-        'sent_to_delivery': {'packaging', 'cancelled', 'retour'},
-        'packaging':        {'done', 'retour', 'cancelled', 'changed'},
-        'done':             {'retour', 'cancelled', 'changed'},
-        'retour':           {'changed'},
-        'changed':          {'done', 'retour', 'cancelled'},
-        'cancelled':        {'pending'},  # admin reopen only
-    }
+        return order.status
 
     @classmethod
-    def _assert_transition(cls, old: str, new: str, *, force: bool = False) -> None:
-        if old == new:
-            return
-        allowed = cls._TRANSITIONS.get(old, set())
-        if new in allowed:
-            return
-        if force:
-            return
-        raise LifecycleError(
-            f'Invalid workflow transition: {old} → {new}. '
-            f'Allowed: {sorted(allowed) or "(none)"}. Pass force=True to override.'
-        )
+    def refresh_derived_fields(cls, order: Order, *, actor=None) -> str:
+        """Back-compat alias — refreshes the informational fields only."""
+        return cls.refresh_aux_fields(order, actor=actor)
+
 
     # ── Loyalty points (Phase 2) ─────────────────────────────────────────────
 
@@ -530,26 +250,21 @@ class OrderLifecycleService:
         order = cls._lock(order)
         cls._ensure_active(order)
         cls._ensure_not_cancelled(order)
-        if order.outcome == Order.Outcome.CONFIRMED:
+        if order.status in (Order.Status.CONFIRMED, Order.Status.PACKAGING, Order.Status.DONE):
             raise LifecycleError('Confirmed orders cannot be marked as not answered.')
-        if order.delivery_reference or order.delivery_status in cls._IN_FLIGHT_DELIVERY:
-            raise LifecycleError('Order already entered fulfillment and cannot be marked not answered.')
 
-        old_status = order.contact_status
         now = timezone.now()
-        order.contact_status = Order.ContactStatus.NOT_ANSWERED
         order.not_answered_attempts = (order.not_answered_attempts or 0) + 1
         if not order.not_answered_at:
             order.not_answered_at = now
-        order.outcome = Order.Outcome.NONE
         order.delay_date = None
         order.delay_reason = ''
         order.outcome_note = note or ''
         order.outcome_changed_at = now
         order.outcome_changed_by = actor
         order.save(update_fields=[
-            'contact_status', 'not_answered_attempts', 'not_answered_at',
-            'outcome', 'delay_date', 'delay_reason', 'outcome_note',
+            'not_answered_attempts', 'not_answered_at',
+            'delay_date', 'delay_reason', 'outcome_note',
             'outcome_changed_at', 'outcome_changed_by', 'updated_at',
         ])
         OrderLoggingService.log(
@@ -557,13 +272,21 @@ class OrderLifecycleService:
             action=OrderLog.Action.CONTACT_STATUS_CHANGED,
             user=actor,
             details={
-                'old': old_status,
-                'new': Order.ContactStatus.NOT_ANSWERED,
                 'attempts': order.not_answered_attempts,
                 'note': note,
             },
         )
-        cls._recompute_workflow_status(order, actor=actor)
+        # The order leaves ``new``/``delayed`` only once the configured number
+        # of unanswered attempts is reached (each attempt is still audited).
+        from apps.orders.status_service import OrderStatusService
+        if (
+            order.status in (Order.Status.NEW, Order.Status.DELAYED)
+            and (order.not_answered_attempts or 0) >= cls._no_answer_threshold(order)
+        ):
+            OrderStatusService.transition(
+                order, Order.Status.NOT_ANSWERED, actor=actor,
+                note=f'{order.not_answered_attempts} unanswered attempts',
+            )
         return order
 
     @classmethod
@@ -572,18 +295,9 @@ class OrderLifecycleService:
         """Move a delayed order back to the first-call pending state."""
         order = cls._lock(order)
         cls._ensure_active(order)
-        if not (
-            order.outcome == Order.Outcome.DELAYED
-            or order.contact_status == Order.ContactStatus.DELAYED
-        ):
+        if order.status != Order.Status.DELAYED:
             raise LifecycleError('Only delayed orders can be restored to pending.')
-        if order.delivery_reference or order.delivery_status in cls._IN_FLIGHT_DELIVERY:
-            raise LifecycleError('Order already entered fulfillment and cannot be restored to pending.')
 
-        old_outcome = order.outcome
-        old_contact = order.contact_status
-        order.outcome = Order.Outcome.NONE
-        order.contact_status = Order.ContactStatus.NONE
         order.delay_date = None
         order.delay_reason = ''
         order.outcome_note = ''
@@ -593,24 +307,19 @@ class OrderLifecycleService:
         order.outcome_changed_at = timezone.now()
         order.outcome_changed_by = actor
         order.save(update_fields=[
-            'outcome', 'contact_status', 'delay_date', 'delay_reason',
+            'delay_date', 'delay_reason',
             'outcome_note', 'confirmed_at', 'not_answered_at',
             'not_answered_attempts', 'outcome_changed_at',
             'outcome_changed_by', 'updated_at',
         ])
-        OrderLoggingService.log(
-            order=order,
-            action=OrderLog.Action.CONTACT_STATUS_CHANGED,
-            user=actor,
-            details={
-                'event': 'restore_delayed',
-                'old_outcome': old_outcome,
-                'new_outcome': order.outcome,
-                'old_contact_status': old_contact,
-                'new_contact_status': order.contact_status,
-            },
+        # Undo semantics: putting a delayed order back in the first-call queue
+        # is an admin convenience outside the strict matrix, so it goes through
+        # the forced-but-audited path.
+        from apps.orders.status_service import OrderStatusService
+        OrderStatusService.transition(
+            order, Order.Status.NEW, actor=actor,
+            note='delay removed — restored to pending', force=True,
         )
-        cls._recompute_outcome(order, actor=actor)
         return order
 
     @classmethod
@@ -619,11 +328,10 @@ class OrderLifecycleService:
         order = cls._lock(order)
         cls._ensure_active(order)
         cls._ensure_not_cancelled(order)
-        if order.outcome == Order.Outcome.CONFIRMED:
+        if order.status in (Order.Status.CONFIRMED, Order.Status.PACKAGING, Order.Status.DONE):
             raise LifecycleError('Order is already confirmed.')
 
         now = timezone.now()
-        order.outcome = Order.Outcome.CONFIRMED
         order.confirmed_at = now
         order.outcome_note = note or ''
         order.outcome_changed_at = now
@@ -631,13 +339,12 @@ class OrderLifecycleService:
         order.delay_date = None
         order.delay_reason = ''
         order.cancellation_reason = ''
-        order.contact_status = Order.ContactStatus.ANSWERED
         order.not_answered_attempts = 0
         order.not_answered_at = None
         order.save(update_fields=[
-            'outcome', 'confirmed_at', 'outcome_note', 'outcome_changed_at',
+            'confirmed_at', 'outcome_note', 'outcome_changed_at',
             'outcome_changed_by', 'delay_date', 'delay_reason',
-            'cancellation_reason', 'contact_status', 'not_answered_attempts',
+            'cancellation_reason', 'not_answered_attempts',
             'not_answered_at', 'updated_at',
         ])
         OrderLoggingService.log(
@@ -646,13 +353,14 @@ class OrderLifecycleService:
             user=actor,
             details={'note': note},
         )
-        cls._recompute_outcome(order, actor=actor)
-        # Reserve stock now so the POS (and any other order) can no longer sell
-        # the units this confirmed order commits to. Raises (rolling back the
-        # whole confirm) with a clear shortfall message if the stock is already
-        # gone — e.g. the POS sold it before the online order was confirmed.
-        from apps.orders.stock_service import OrderStockReservationService
-        OrderStockReservationService.reserve(order, actor=actor)
+        # Canonical lifecycle: new / delayed / not_answered → confirmed
+        # (validated by the one transition matrix). Confirming is intentionally a
+        # SIMPLE status move — stock is reserved later, when the order is actually
+        # sent for fulfilment (delivery / POS), not here.
+        from apps.orders.status_service import OrderStatusService
+        OrderStatusService.transition(
+            order, Order.Status.CONFIRMED, actor=actor, note=note,
+        )
         return order
 
     @classmethod
@@ -663,27 +371,20 @@ class OrderLifecycleService:
         cls._ensure_not_cancelled(order)
         if not delay_date:
             raise LifecycleError('Delay date is required for delayed orders.')
-        if order.delivery_reference or order.delivery_status in (
-            Order.DeliveryStatus.SUBMITTED,
-            Order.DeliveryStatus.ACCEPTED,
-            Order.DeliveryStatus.IN_TRANSIT,
-            Order.DeliveryStatus.DELIVERED,
-        ):
+        if order.delivery_reference:
             raise LifecycleError('Order already entered delivery and cannot be delayed.')
 
         now = timezone.now()
-        order.outcome = Order.Outcome.DELAYED
         order.delay_date = delay_date
         order.delay_reason = delay_reason
-        order.contact_status = Order.ContactStatus.DELAYED
         order.outcome_note = note or ''
         order.outcome_changed_at = now
         order.outcome_changed_by = actor
         order.confirmed_at = None
         order.cancellation_reason = ''
         order.save(update_fields=[
-            'outcome', 'delay_date', 'delay_reason', 'outcome_note',
-            'contact_status', 'outcome_changed_at', 'outcome_changed_by', 'confirmed_at',
+            'delay_date', 'delay_reason', 'outcome_note',
+            'outcome_changed_at', 'outcome_changed_by', 'confirmed_at',
             'cancellation_reason', 'updated_at',
         ])
         OrderLoggingService.log(
@@ -692,6 +393,11 @@ class OrderLifecycleService:
             user=actor,
             details={'delay_date': delay_date, 'delay_reason': delay_reason, 'note': note},
         )
+        # Canonical lifecycle: new / not_answered / confirmed → delayed (validated).
+        from apps.orders.status_service import OrderStatusService
+        OrderStatusService.transition(
+            order, Order.Status.DELAYED, actor=actor, note=delay_reason,
+        )
         return order
 
     @classmethod
@@ -699,18 +405,10 @@ class OrderLifecycleService:
     def cancel(cls, order: Order, *, actor=None, reason: str, note: str = '') -> Order:
         order = cls._lock(order)
         cls._ensure_active(order)
-        if order.delivery_status in (
-            Order.DeliveryStatus.ACCEPTED,
-            Order.DeliveryStatus.IN_TRANSIT,
-            Order.DeliveryStatus.DELIVERED,
-        ):
-            raise LifecycleError('Order is already in delivery and cannot be cancelled here.')
-        if order.outcome == Order.Outcome.CANCELLED and order.status == Order.Status.CANCELLED:
+        if order.status == Order.Status.CANCELED:
             raise LifecycleError('Order is already cancelled.')
 
         now = timezone.now()
-        order.outcome = Order.Outcome.CANCELLED
-        order.status = Order.Status.CANCELLED
         order.cancellation_reason = reason
         order.outcome_note = note or ''
         order.outcome_changed_at = now
@@ -719,7 +417,7 @@ class OrderLifecycleService:
         order.delay_date = None
         order.delay_reason = ''
         order.save(update_fields=[
-            'outcome', 'status', 'cancellation_reason', 'outcome_note',
+            'cancellation_reason', 'outcome_note',
             'outcome_changed_at', 'outcome_changed_by', 'confirmed_at',
             'delay_date', 'delay_reason', 'updated_at',
         ])
@@ -729,7 +427,13 @@ class OrderLifecycleService:
             user=actor,
             details={'cancellation_reason': reason, 'note': note},
         )
-        cls._recompute_outcome(order, actor=actor)
+        # Canonical lifecycle: canceled is reachable from every non-terminal
+        # state; the matrix blocks it from done / returned. Loyalty reversal
+        # and the WooCommerce 'cancelled' push intent ride on the transition.
+        from apps.orders.status_service import OrderStatusService
+        OrderStatusService.transition(
+            order, Order.Status.CANCELED, actor=actor, note=reason,
+        )
         # The order never completed, so release any stock it reserved at confirm
         # back to available. Idempotent (no-op if it held no reservation).
         from apps.orders.stock_service import OrderStockReservationService
@@ -744,21 +448,19 @@ class OrderLifecycleService:
         cls._ensure_not_cancelled(order)
         if order.in_store_pickup:
             raise LifecycleError('Order is already marked as in-store pickup.')
-        if order.outcome != Order.Outcome.CONFIRMED:
+        if order.status != Order.Status.CONFIRMED:
             raise LifecycleError('Order must be confirmed before pickup/POS flow.')
 
         order.in_store_pickup = True
-        order.delivery_status = Order.DeliveryStatus.NONE
         if note:
             order.internal_note = f"{order.internal_note}\n[Pickup] {note}".strip()
-        order.save(update_fields=['in_store_pickup', 'delivery_status', 'internal_note', 'updated_at'])
+        order.save(update_fields=['in_store_pickup', 'internal_note', 'updated_at'])
         OrderLoggingService.log(
             order=order,
             action=OrderLog.Action.STATUS_CHANGED,
             user=actor,
             details={'in_store_pickup': True, 'note': note},
         )
-        cls._recompute_workflow_status(order, actor=actor)
         return order
 
     @classmethod
@@ -767,15 +469,9 @@ class OrderLifecycleService:
         order = cls._lock(order)
         cls._ensure_active(order)
         cls._ensure_not_cancelled(order)
-        if order.outcome != Order.Outcome.CONFIRMED:
+        if order.status != Order.Status.CONFIRMED:
             raise LifecycleError('Order must be confirmed before sending to POS.')
-        if order.delivery_reference or order.delivery_status in (
-            Order.DeliveryStatus.QUEUED,
-            Order.DeliveryStatus.SUBMITTED,
-            Order.DeliveryStatus.ACCEPTED,
-            Order.DeliveryStatus.IN_TRANSIT,
-            Order.DeliveryStatus.DELIVERED,
-        ):
+        if order.delivery_reference:
             raise LifecycleError('Order has already entered delivery and cannot be sent to POS.')
         if order.sent_to_pos_at:
             raise LifecycleError('Order has already been sent to POS.')
@@ -798,11 +494,10 @@ class OrderLifecycleService:
 
         order.in_store_pickup = True
         order.pos_sales_channel = pos_sales_channel
-        order.delivery_status = Order.DeliveryStatus.NONE
         order.sent_to_pos_at = timezone.now()
         order.sent_to_pos_by = actor
         order.save(update_fields=[
-            'in_store_pickup', 'pos_sales_channel', 'delivery_status',
+            'in_store_pickup', 'pos_sales_channel',
             'sent_to_pos_at', 'sent_to_pos_by', 'updated_at',
         ])
         OrderLoggingService.log(
@@ -814,7 +509,12 @@ class OrderLifecycleService:
                 'pos_sales_channel_name': pos_sales_channel.name,
             },
         )
-        cls._recompute_workflow_status(order, actor=actor)
+        # Canonical lifecycle: confirmed → packaging (the order entered fulfilment).
+        from apps.orders.status_service import OrderStatusService
+        OrderStatusService.transition(
+            order, Order.Status.PACKAGING, actor=actor,
+            note=f'sent to POS {pos_sales_channel.name}',
+        )
         return order
 
     @classmethod
@@ -838,16 +538,22 @@ class OrderLifecycleService:
 
         order.pos_validated_at = timezone.now()
         order.pos_validated_by = actor
-        order.status = Order.Status.COMPLETED
         if payment_method:
             order.payment_method = payment_method
         order.payment_status = Order.PaymentStatus.PAID
         if customer_note:
             order.customer_note = customer_note
         order.save(update_fields=[
-            'pos_validated_at', 'pos_validated_by', 'status',
+            'pos_validated_at', 'pos_validated_by',
             'payment_method', 'payment_status', 'customer_note', 'updated_at',
         ])
+        # Canonical lifecycle FIRST: the stock engine below keys the sale
+        # deduction on status == done.
+        from apps.orders.status_service import OrderStatusService
+        OrderStatusService.transition(
+            order, Order.Status.DONE, actor=actor,
+            note='POS validated', force=True,
+        )
 
         from apps.orders.service import OrderIngestionError, OrderIngestionService
 
@@ -889,9 +595,6 @@ class OrderLifecycleService:
                 'sales_channel_name': inventory_channel.name,
             },
         )
-        # order_status becomes DONE here → _recompute_order_status grants the
-        # loyalty points (single source of truth).
-        cls._recompute_outcome(order, actor=actor)
         return order
 
     # ── Packaging step ───────────────────────────────────────────────────────
@@ -1036,13 +739,9 @@ class OrderLifecycleService:
         order = cls._lock(order)
         cls._ensure_active(order)
         cls._ensure_not_cancelled(order)
-        if order.returned_at or order.delivery_status in (
-            Order.DeliveryStatus.RETURNED,
-            Order.DeliveryStatus.CANCELLED,
-            Order.DeliveryStatus.DELIVERED,
-        ):
+        if order.status == Order.Status.RETURNED or order.returned_at:
             raise LifecycleError(
-                'Packaging is blocked for returned, cancelled, or already delivered orders.'
+                'Packaging is blocked for returned orders.'
             )
 
         if not (order.delivery_code or order.delivery_reference or order.in_store_pickup):
@@ -1050,10 +749,8 @@ class OrderLifecycleService:
                 'Packaging requires a delivery code or in-store pickup flag. '
                 'Send the order to delivery (or POS) first.'
             )
-        if (
-            order.packaging_status == Order.PackagingStatus.PACKAGED
-            and not allow_update
-        ):
+        already_packaged = bool(order.packaged_at)
+        if already_packaged and not allow_update:
             raise LifecycleError(
                 'Order is already packaged. Pass allow_update=True to update packaging.'
             )
@@ -1118,19 +815,22 @@ class OrderLifecycleService:
         # Adjust packaging stock movements (idempotent delta).
         movements = cls._apply_packaging_stock(order, desired, actor=actor)
 
-        is_update = order.packaging_status == Order.PackagingStatus.PACKAGED
-        order.packaging_status = (
-            Order.PackagingStatus.UPDATED if is_update else Order.PackagingStatus.PACKAGED
-        )
+        is_update = already_packaged
         if not order.packaged_at:
             order.packaged_at = timezone.now()
         order.packaged_by = actor
-        order.status = Order.Status.COMPLETED
-        order.final_outcome = Order.FinalOutcome.SUCCESSFUL_SALE
         order.save(update_fields=[
-            'packaging_status', 'packaged_at', 'packaged_by',
-            'status', 'final_outcome', 'updated_at',
+            'packaged_at', 'packaged_by', 'updated_at',
         ])
+
+        # Canonical lifecycle FIRST: the stock engine below keys the customer-
+        # line sale deduction on status == done. Forced — an operator may
+        # package a confirmed pickup order directly (audited).
+        from apps.orders.status_service import OrderStatusService
+        OrderStatusService.transition(
+            order, Order.Status.DONE, actor=actor,
+            note='packaging completed', force=True,
+        )
 
         OrderLoggingService.log(
             order=order,
@@ -1163,16 +863,15 @@ class OrderLifecycleService:
             except OrderIngestionError as exc:
                 raise LifecycleError(exc.message) from exc
 
-        cls._recompute_workflow_status(order, actor=actor)
         return order
 
     @classmethod
     @transaction.atomic
     def unpackage_order(cls, order: Order, *, actor=None) -> Order:
-        """Reverse all packaging deductions and reset packaging_status."""
+        """Reverse all packaging deductions and step the lifecycle back."""
         order = cls._lock(order)
         cls._ensure_active(order)
-        if order.packaging_status == Order.PackagingStatus.NOT_PACKAGED:
+        if not order.packaged_at:
             raise LifecycleError('Order has no packaging to reverse.')
 
         # Reverse stock by passing desired={} → every previously-moved product
@@ -1185,16 +884,10 @@ class OrderLifecycleService:
             product__product_type=Product.ProductType.PACKAGING_ITEM,
         ).update(is_deleted=True)
 
-        order.packaging_status = Order.PackagingStatus.NOT_PACKAGED
         order.packaged_at = None
         order.packaged_by = None
-        if order.final_outcome == Order.FinalOutcome.SUCCESSFUL_SALE and order.delivery_status != Order.DeliveryStatus.DELIVERED:
-            order.final_outcome = Order.FinalOutcome.NONE
-        if order.status == Order.Status.COMPLETED and order.source != Order.Source.POS:
-            order.status = Order.Status.PROCESSING
         order.save(update_fields=[
-            'packaging_status', 'packaged_at', 'packaged_by',
-            'final_outcome', 'status', 'updated_at',
+            'packaged_at', 'packaged_by', 'updated_at',
         ])
 
         OrderLoggingService.log(
@@ -1203,44 +896,53 @@ class OrderLifecycleService:
             user=actor,
             details={'movements': movements},
         )
-        cls._recompute_workflow_status(order, actor=actor)
+        # Canonical lifecycle: undo — step back from done. Falls to packaging
+        # when the order is still routed to fulfilment, else to confirmed.
+        from apps.orders.status_service import OrderStatusService
+        if order.status == Order.Status.DONE:
+            in_fulfilment = bool(order.sent_to_pos_at or order.delivery_reference)
+            OrderStatusService.transition(
+                order,
+                Order.Status.PACKAGING if in_fulfilment else Order.Status.CONFIRMED,
+                actor=actor, note='packaging reversed', force=True,
+            )
         return order
 
     @classmethod
-    def submit_delivery(cls, order: Order, *, actor=None) -> dict:
+    def submit_delivery(cls, order: Order, *, actor=None, force: bool = False) -> dict:
         with transaction.atomic():
             locked = cls._lock(order)
             cls._ensure_active(locked)
             cls._ensure_not_cancelled(locked)
             if locked.in_store_pickup:
                 raise LifecycleError('In-store pickup orders must go through POS, not delivery.')
-            if locked.outcome != Order.Outcome.CONFIRMED:
+            if locked.status != Order.Status.CONFIRMED:
                 raise LifecycleError('Order must be confirmed before delivery submission.')
             if locked.delivery_reference:
                 raise LifecycleError('Order has already been sent to delivery.')
-            if not locked.can_submit_delivery:
-                raise LifecycleError(
-                    f'Order is not eligible for delivery submission '
-                    f'(status={locked.status}, delivery_status={locked.delivery_status}).'
-                )
 
-            # Stock gate: refuse to hand the order to the delivery API unless the
-            # fulfilling (order) channel holds enough of every linked product.
-            cls._assert_stock_available(
-                locked,
-                sales_channel_id=locked.sales_channel_id,
-                context='delivery',
-                channel_label=(
-                    locked.sales_channel.name
-                    if locked.sales_channel_id else 'the order channel'
-                ),
-            )
+            # Reserve stock at the point the order enters fulfilment (delivery).
+            # Without force, an insufficient channel raises a shortfall message
+            # (the UI shows the missing-stock warning first); with force the
+            # operator acknowledged it, so we reserve best-effort (backorder).
+            from apps.orders.stock_service import OrderStockReservationService
+            OrderStockReservationService.reserve(locked, actor=actor, force=force)
 
         service = DeliverySubmissionService()
         result = service.submit(order, actor=actor)
         Order.all_objects.filter(pk=order.pk, delivery_submitted_by__isnull=True).update(
             delivery_submitted_by=actor,
         )
+        # Canonical lifecycle: confirmed → packaging once the parcel is
+        # actually handed to the delivery provider.
+        from apps.orders.status_service import OrderStatusService
+        order.refresh_from_db()
+        if order.status == Order.Status.CONFIRMED:
+            with transaction.atomic():
+                OrderStatusService.transition(
+                    cls._lock(order), Order.Status.PACKAGING,
+                    actor=actor, note='submitted to delivery',
+                )
         return result
 
     @classmethod
@@ -1267,35 +969,22 @@ class OrderLifecycleService:
         """
         order = cls._lock(order)
         cls._ensure_active(order)
-        if order.returned_at:
+        if order.returned_at or order.status == Order.Status.RETURNED:
             raise LifecycleError('Order return has already been processed.')
-        if order.delivery_status not in (
-            Order.DeliveryStatus.DELIVERED,
-            Order.DeliveryStatus.RETURNED,
-            Order.DeliveryStatus.SUBMITTED,
-            Order.DeliveryStatus.ACCEPTED,
-            Order.DeliveryStatus.IN_TRANSIT,
-        ) and not order.pos_validated_at:
-            raise LifecycleError('Only delivered/POS-validated orders can be returned.')
+        if order.status not in (Order.Status.DONE, Order.Status.PACKAGING):
+            raise LifecycleError('Only completed (or in-fulfilment) orders can be returned.')
 
         resolved_return_type = (return_type or Order.ReturnType.RETURNED) or Order.ReturnType.RETURNED
         if resolved_return_type not in dict(Order.ReturnType.choices):
             raise LifecycleError(f'Invalid return_type: {return_type}')
 
-        order.delivery_status = Order.DeliveryStatus.RETURNED
-        order.status = Order.Status.REFUNDED
         order.returned_at = timezone.now()
         order.returned_by = actor
         order.return_reason = reason or ''
         order.return_type = resolved_return_type
-        order.return_exchange_status = (
-            Order.ReturnExchangeStatus.EXCHANGED
-            if resolved_return_type == Order.ReturnType.EXCHANGED
-            else Order.ReturnExchangeStatus.RETURNED
-        )
         order.save(update_fields=[
-            'delivery_status', 'status', 'returned_at', 'returned_by',
-            'return_reason', 'return_type', 'return_exchange_status', 'updated_at',
+            'returned_at', 'returned_by',
+            'return_reason', 'return_type', 'updated_at',
         ])
         if order.client_id and order.source == Order.Source.WOOCOMMERCE:
             order.client.number_of_returns = (order.client.number_of_returns or 0) + 1
@@ -1334,17 +1023,180 @@ class OrderLifecycleService:
             else:
                 cls._restore_stock_locked(order, actor=actor)
 
-        # order_status becomes RETURNED/EXCHANGED here → _recompute_order_status
-        # reverses any loyalty points that were granted (single source of truth).
-        cls._recompute_outcome(order, actor=actor)
+        # Canonical lifecycle: done → returned (matrix). Forced only when the
+        # courier returned the parcel before completion (packaging → returned).
+        # Loyalty reversal + the WooCommerce 'refunded' push intent ride on the
+        # transition.
+        from apps.orders.status_service import OrderStatusService
+        OrderStatusService.transition(
+            order, Order.Status.RETURNED, actor=actor,
+            note=reason or resolved_return_type,
+            force=(order.status != Order.Status.DONE),
+        )
         return order
+
+    @staticmethod
+    def _pack_component_ids(product: Product | None) -> set[int]:
+        """Return valid immediate component IDs for a pack product."""
+        if not product or not product.is_pack or not product.pack_items:
+            return set()
+        component_ids: set[int] = set()
+        for item in product.pack_items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                component_ids.add(int(item.get('product_id')))
+            except (TypeError, ValueError):
+                continue
+        return component_ids
+
+    @classmethod
+    def _stock_items_for_product(
+        cls,
+        product: Product,
+        quantity: int,
+        products: dict[int, Product],
+    ) -> list[dict]:
+        """Expand a sellable product into the inventory items it represents."""
+        if not product.is_pack:
+            return [{
+                'product': product,
+                'quantity': quantity,
+                'source_pack': None,
+            }]
+        if not product.pack_items:
+            raise LifecycleError(f'Pack "{product.name}" has no configured components.')
+
+        stock_items: list[dict] = []
+        errors: list[str] = []
+        for item in product.pack_items:
+            if not isinstance(item, dict):
+                errors.append('invalid component row')
+                continue
+            try:
+                component_id = int(item.get('product_id'))
+                per_pack_quantity = int(item.get('quantity'))
+            except (TypeError, ValueError):
+                errors.append('invalid component identifier or quantity')
+                continue
+            if per_pack_quantity <= 0:
+                errors.append(f'component {component_id} has a non-positive quantity')
+                continue
+            component = products.get(component_id)
+            if not component:
+                errors.append(f'component {component_id} is missing')
+                continue
+            stock_items.append({
+                'product': component,
+                'quantity': per_pack_quantity * quantity,
+                'source_pack': product,
+            })
+
+        if errors:
+            raise LifecycleError(
+                f'Pack "{product.name}" cannot be returned: {"; ".join(errors)}.'
+            )
+        return stock_items
+
+    @classmethod
+    def _pack_sources_by_component(cls, order: Order) -> dict[int, set[str]]:
+        """Map component IDs to pack names for legacy whole-order return notes."""
+        sources: dict[int, set[str]] = {}
+        for line in order.lines.filter(is_deleted=False).select_related('product'):
+            product = line.product
+            if not product or not product.is_pack:
+                continue
+            for component_id in cls._pack_component_ids(product):
+                sources.setdefault(component_id, set()).add(product.name)
+        return sources
+
+    @staticmethod
+    def _conditioned_stock_items(
+        line,
+        stock_items: list[dict],
+        component_conditions: list[dict],
+    ) -> list[dict]:
+        """Split stock items by per-unit condition and validate the totals.
+
+        Works for both packs (one entry per component product) and normal lines
+        (a single product split into good/damaged quantities). The caller-built
+        ``stock_items`` already carry the correct ``source_pack`` (the pack for
+        pack components, ``None`` for a plain line), which we preserve so notes
+        and movements stay accurate.
+        """
+        expected = {
+            stock_item['product'].id: stock_item['quantity']
+            for stock_item in stock_items
+        }
+        products = {
+            stock_item['product'].id: stock_item['product']
+            for stock_item in stock_items
+        }
+        source_pack_by_product = {
+            stock_item['product'].id: stock_item['source_pack']
+            for stock_item in stock_items
+        }
+        line_label = line.product.name if line.product else f'line {line.id}'
+        allowed = {
+            line.ReturnCondition.GOOD,
+            line.ReturnCondition.DAMAGED,
+            line.ReturnCondition.MISSING,
+        }
+        classified_totals: dict[int, int] = {}
+        conditioned: list[dict] = []
+
+        for component_condition in component_conditions:
+            try:
+                product_id = int(component_condition.get('product_id'))
+                quantity = int(component_condition.get('quantity'))
+            except (TypeError, ValueError):
+                raise LifecycleError(
+                    f'Invalid unit classification for "{line_label}".'
+                )
+            condition = component_condition.get('condition')
+            if product_id not in expected:
+                raise LifecycleError(
+                    f'Product id={product_id} is not part of "{line_label}".'
+                )
+            if quantity <= 0 or condition not in allowed:
+                raise LifecycleError(
+                    f'Invalid return quantity or condition for '
+                    f'"{products[product_id].name}".'
+                )
+            classified_totals[product_id] = (
+                classified_totals.get(product_id, 0) + quantity
+            )
+            conditioned.append({
+                'product': products[product_id],
+                'quantity': quantity,
+                'source_pack': source_pack_by_product.get(product_id),
+                'condition': condition,
+            })
+
+        mismatches = []
+        for product_id, expected_quantity in expected.items():
+            actual_quantity = classified_totals.get(product_id, 0)
+            if actual_quantity != expected_quantity:
+                mismatches.append(
+                    f'{products[product_id].name}: expected {expected_quantity}, '
+                    f'classified {actual_quantity}'
+                )
+        unexpected_ids = set(classified_totals) - set(expected)
+        if unexpected_ids:
+            mismatches.extend(f'unexpected product id={pid}' for pid in unexpected_ids)
+        if mismatches:
+            raise LifecycleError(
+                f'Incomplete return for "{line_label}": '
+                f'{"; ".join(mismatches)}.'
+            )
+        return conditioned
 
     @classmethod
     def _apply_structured_return_conditions(
         cls, order: Order, line_conditions: list[dict], *, actor,
     ) -> None:
         """Apply the per-line stock-movement matrix for a structured return.
-        Each entry: {line_id, condition, replacement_product_id?}.
+        Pack entries may also include component_conditions with quantity splits.
         """
         sales_channel = (
             order.pos_sales_channel
@@ -1366,8 +1218,20 @@ class OrderLifecycleService:
         for item in line_conditions:
             line = line_map.get(int(item.get('line_id', 0)))
             if line and line.product_id:
-                inv_product_ids.add(line.product_id)
-        inv_product_ids |= replacement_ids
+                if line.product and line.product.is_pack:
+                    inv_product_ids |= cls._pack_component_ids(line.product)
+                else:
+                    inv_product_ids.add(line.product_id)
+        for replacement in replacement_products.values():
+            if replacement.is_pack:
+                inv_product_ids |= cls._pack_component_ids(replacement)
+            else:
+                inv_product_ids.add(replacement.id)
+
+        stock_products = {
+            product.id: product
+            for product in Product.all_objects.filter(id__in=inv_product_ids)
+        }
         inventories = {
             inv.product_id: inv
             for inv in (
@@ -1385,59 +1249,121 @@ class OrderLifecycleService:
                 continue
             if condition not in dict(line.ReturnCondition.choices):
                 raise LifecycleError(f'Invalid line condition: {condition}')
-            line.return_condition = condition
+
+            qty = line.quantity
+            stock_items = cls._stock_items_for_product(line.product, qty, stock_products)
+            component_conditions = item.get('component_conditions') or []
+            if component_conditions:
+                # Per-unit split — valid for packs (per component product) AND
+                # plain lines (one product, good/damaged quantity split).
+                stock_items = cls._conditioned_stock_items(
+                    line,
+                    stock_items,
+                    component_conditions,
+                )
+                component_outcomes = {
+                    stock_item['condition'] for stock_item in stock_items
+                }
+                # The line-level enum has no MIXED state. DAMAGED indicates that
+                # at least one pack unit was not returned in good condition; the
+                # exact split remains in movements and the STOCK_RESTORED log.
+                line.return_condition = (
+                    line.ReturnCondition.GOOD
+                    if component_outcomes == {line.ReturnCondition.GOOD}
+                    else line.ReturnCondition.DAMAGED
+                )
+            else:
+                line.return_condition = condition
             update_fields = ['return_condition']
 
-            inventory = inventories.get(line.product_id)
-            qty = line.quantity
-
-            if condition == line.ReturnCondition.GOOD:
-                if inventory:
-                    before = inventory.quantity
-                    after = before + qty
-                    InventoryMovement.objects.create(
-                        sales_channel=sales_channel,
-                        product=line.product,
-                        movement_type=InventoryMovement.MovementType.RETURN_IN,
-                        status=InventoryMovement.MovementStatus.COMPLETED,
-                        quantity=qty,
-                        quantity_before=before,
-                        quantity_after=after,
-                        external_reference=order.order_number,
-                        notes=f"Return GOOD for order {order.order_number}",
-                        created_by=actor,
-                        completed_at=timezone.now(),
+            if component_conditions or condition in (
+                line.ReturnCondition.GOOD,
+                line.ReturnCondition.DAMAGED,
+                line.ReturnCondition.MISSING,
+            ):
+                damaged_items: list[dict] = []
+                for stock_item in stock_items:
+                    product = stock_item['product']
+                    item_qty = stock_item['quantity']
+                    source_pack = stock_item['source_pack']
+                    item_condition = stock_item.get('condition', condition)
+                    inventory = inventories.get(product.id)
+                    before = inventory.quantity if inventory else 0
+                    pack_note = f" (pack: {source_pack.name})" if source_pack else ''
+                    if item_condition == line.ReturnCondition.GOOD:
+                        after = before + item_qty
+                        InventoryMovement.objects.create(
+                            sales_channel=sales_channel,
+                            product=product,
+                            movement_type=InventoryMovement.MovementType.RETURN_IN,
+                            status=InventoryMovement.MovementStatus.COMPLETED,
+                            quantity=item_qty,
+                            quantity_before=before,
+                            quantity_after=after,
+                            external_reference=order.order_number,
+                            notes=f"Return GOOD for order {order.order_number}{pack_note}",
+                            created_by=actor,
+                            completed_at=timezone.now(),
+                        )
+                        if inventory:
+                            inventory.quantity = after
+                        else:
+                            inventories[product.id] = (
+                                SalesChannelInventory.objects
+                                .select_for_update()
+                                .get(sales_channel=sales_channel, product=product)
+                            )
+                        restored.append({
+                            'line_id': line.id,
+                            'product_id': product.id,
+                            'source_pack_id': source_pack.id if source_pack else None,
+                            'source_pack_name': source_pack.name if source_pack else '',
+                            'action': 'return_in',
+                            'quantity': item_qty,
+                        })
+                    elif item_condition == line.ReturnCondition.DAMAGED:
+                        InventoryMovement.objects.create(
+                            sales_channel=sales_channel,
+                            product=product,
+                            movement_type=InventoryMovement.MovementType.DAMAGE,
+                            status=InventoryMovement.MovementStatus.COMPLETED,
+                            quantity=item_qty,
+                            quantity_before=before,
+                            quantity_after=before,
+                            external_reference=order.order_number,
+                            notes=(
+                                f"Return DAMAGED for order "
+                                f"{order.order_number}{pack_note}"
+                            ),
+                            created_by=actor,
+                            completed_at=timezone.now(),
+                        )
+                        damaged_item = {
+                            'line_id': line.id,
+                            'product_id': product.id,
+                            'source_pack_id': source_pack.id if source_pack else None,
+                            'source_pack_name': source_pack.name if source_pack else '',
+                            'action': 'damage',
+                            'quantity': item_qty,
+                        }
+                        damaged_items.append(damaged_item)
+                        restored.append(damaged_item)
+                    elif item_condition == line.ReturnCondition.MISSING:
+                        restored.append({
+                            'line_id': line.id,
+                            'product_id': product.id,
+                            'source_pack_id': source_pack.id if source_pack else None,
+                            'source_pack_name': source_pack.name if source_pack else '',
+                            'action': 'missing_no_movement',
+                            'quantity': item_qty,
+                        })
+                if damaged_items:
+                    OrderLoggingService.log(
+                        order=order,
+                        action=OrderLog.Action.DAMAGED_STOCK_RECORDED,
+                        user=actor,
+                        details={'line_id': line.id, 'items': damaged_items},
                     )
-                    inventory.quantity = after
-                restored.append({'line_id': line.id, 'action': 'return_in', 'quantity': qty})
-
-            elif condition == line.ReturnCondition.DAMAGED:
-                # Record a DAMAGE movement (audit trail) without restoring to available stock.
-                if inventory:
-                    InventoryMovement.objects.create(
-                        sales_channel=sales_channel,
-                        product=line.product,
-                        movement_type=InventoryMovement.MovementType.DAMAGE,
-                        status=InventoryMovement.MovementStatus.COMPLETED,
-                        quantity=qty,
-                        quantity_before=inventory.quantity,
-                        quantity_after=inventory.quantity,
-                        external_reference=order.order_number,
-                        notes=f"Return DAMAGED for order {order.order_number}",
-                        created_by=actor,
-                        completed_at=timezone.now(),
-                    )
-                OrderLoggingService.log(
-                    order=order,
-                    action=OrderLog.Action.DAMAGED_STOCK_RECORDED,
-                    user=actor,
-                    details={'line_id': line.id, 'product_id': line.product_id, 'quantity': qty},
-                )
-                restored.append({'line_id': line.id, 'action': 'damage', 'quantity': qty})
-
-            elif condition == line.ReturnCondition.MISSING:
-                # No stock movement, but log it explicitly so the audit shows the loss.
-                restored.append({'line_id': line.id, 'action': 'missing_no_movement', 'quantity': qty})
 
             elif condition == line.ReturnCondition.EXCHANGED:
                 rep_id = item.get('replacement_product_id')
@@ -1451,48 +1377,98 @@ class OrderLifecycleService:
                 line.replacement_product = rep
                 update_fields.append('replacement_product')
 
-                # 1) RETURN_IN for the original product
-                if inventory:
-                    before = inventory.quantity
-                    after = before + qty
+                # Return every original inventory item, expanding pack lines.
+                for stock_item in stock_items:
+                    product = stock_item['product']
+                    item_qty = stock_item['quantity']
+                    source_pack = stock_item['source_pack']
+                    inventory = inventories.get(product.id)
+                    before = inventory.quantity if inventory else 0
+                    after = before + item_qty
+                    pack_note = f" (pack: {source_pack.name})" if source_pack else ''
                     InventoryMovement.objects.create(
                         sales_channel=sales_channel,
-                        product=line.product,
+                        product=product,
                         movement_type=InventoryMovement.MovementType.RETURN_IN,
                         status=InventoryMovement.MovementStatus.COMPLETED,
-                        quantity=qty,
+                        quantity=item_qty,
                         quantity_before=before,
                         quantity_after=after,
                         external_reference=order.order_number,
-                        notes=f"Exchange return-in for order {order.order_number}",
+                        notes=f"Exchange return-in for order {order.order_number}{pack_note}",
                         created_by=actor,
                         completed_at=timezone.now(),
                     )
-                    inventory.quantity = after
-                # 2) SALE for the replacement product
-                rep_inv = inventories.get(rep.id)
-                if not rep_inv or rep_inv.available_quantity < qty:
-                    available = rep_inv.available_quantity if rep_inv else 0
-                    raise LifecycleError(
-                        f'Insufficient stock for replacement "{rep.name}". '
-                        f'Required: {qty}, available: {available}.'
+                    if inventory:
+                        inventory.quantity = after
+                    else:
+                        inventories[product.id] = (
+                            SalesChannelInventory.objects
+                            .select_for_update()
+                            .get(sales_channel=sales_channel, product=product)
+                        )
+                    restored.append({
+                        'line_id': line.id,
+                        'product_id': product.id,
+                        'source_pack_id': source_pack.id if source_pack else None,
+                        'source_pack_name': source_pack.name if source_pack else '',
+                        'action': 'exchange_return_in',
+                        'quantity': item_qty,
+                    })
+
+                # Deduct replacement inventory, also expanding a replacement pack.
+                replacement_items = cls._stock_items_for_product(rep, qty, stock_products)
+                for replacement_item in replacement_items:
+                    replacement_product = replacement_item['product']
+                    replacement_qty = replacement_item['quantity']
+                    replacement_inventory = inventories.get(replacement_product.id)
+                    available = (
+                        replacement_inventory.available_quantity
+                        if replacement_inventory else 0
                     )
-                before_rep = rep_inv.quantity
-                after_rep = before_rep - qty
-                InventoryMovement.objects.create(
-                    sales_channel=sales_channel,
-                    product=rep,
-                    movement_type=InventoryMovement.MovementType.SALE,
-                    status=InventoryMovement.MovementStatus.COMPLETED,
-                    quantity=qty,
-                    quantity_before=before_rep,
-                    quantity_after=after_rep,
-                    external_reference=order.order_number,
-                    notes=f"Exchange replacement-out for order {order.order_number}",
-                    created_by=actor,
-                    completed_at=timezone.now(),
-                )
-                rep_inv.quantity = after_rep
+                    if available < replacement_qty:
+                        raise LifecycleError(
+                            f'Insufficient stock for replacement "{replacement_product.name}". '
+                            f'Required: {replacement_qty}, available: {available}.'
+                        )
+                replacement_log: list[dict] = []
+                for replacement_item in replacement_items:
+                    replacement_product = replacement_item['product']
+                    replacement_qty = replacement_item['quantity']
+                    source_pack = replacement_item['source_pack']
+                    replacement_inventory = inventories[replacement_product.id]
+                    before_rep = replacement_inventory.quantity
+                    after_rep = before_rep - replacement_qty
+                    pack_note = f" (pack: {source_pack.name})" if source_pack else ''
+                    InventoryMovement.objects.create(
+                        sales_channel=sales_channel,
+                        product=replacement_product,
+                        movement_type=InventoryMovement.MovementType.SALE,
+                        status=InventoryMovement.MovementStatus.COMPLETED,
+                        quantity=replacement_qty,
+                        quantity_before=before_rep,
+                        quantity_after=after_rep,
+                        external_reference=order.order_number,
+                        notes=(
+                            f"Exchange replacement-out for order "
+                            f"{order.order_number}{pack_note}"
+                        ),
+                        created_by=actor,
+                        completed_at=timezone.now(),
+                    )
+                    replacement_inventory.quantity = after_rep
+                    replacement_entry = {
+                        'product_id': replacement_product.id,
+                        'source_pack_id': source_pack.id if source_pack else None,
+                        'source_pack_name': source_pack.name if source_pack else '',
+                        'quantity': replacement_qty,
+                    }
+                    replacement_log.append(replacement_entry)
+                    restored.append({
+                        'line_id': line.id,
+                        **replacement_entry,
+                        'action': 'exchange_replacement_out',
+                    })
                 OrderLoggingService.log(
                     order=order,
                     action=OrderLog.Action.REPLACEMENT_DEDUCTED,
@@ -1500,15 +1476,9 @@ class OrderLifecycleService:
                     details={
                         'line_id': line.id,
                         'replacement_product_id': rep.id,
-                        'quantity': qty,
+                        'items': replacement_log,
                     },
                 )
-                restored.append({
-                    'line_id': line.id,
-                    'action': 'exchange',
-                    'quantity': qty,
-                    'replacement_product_id': rep.id,
-                })
 
             line.save(update_fields=update_fields)
 
@@ -1526,19 +1496,30 @@ class OrderLifecycleService:
     def mark_exchanged(cls, order: Order, *, actor=None, reason: str = '') -> Order:
         order = cls._lock(order)
         cls._ensure_active(order)
-        if order.return_exchange_status == Order.ReturnExchangeStatus.EXCHANGED:
+        if order.return_type == Order.ReturnType.EXCHANGED:
             raise LifecycleError('Order is already marked as exchanged.')
-        order.return_exchange_status = Order.ReturnExchangeStatus.EXCHANGED
+        order.return_type = Order.ReturnType.EXCHANGED
+        if not order.returned_at:
+            order.returned_at = timezone.now()
+            order.returned_by = actor
         if reason:
             order.return_reason = reason
-        order.save(update_fields=['return_exchange_status', 'return_reason', 'updated_at'])
+        order.save(update_fields=[
+            'return_type', 'returned_at', 'returned_by', 'return_reason', 'updated_at',
+        ])
         OrderLoggingService.log(
             order=order,
             action=OrderLog.Action.RETURN_EXCHANGE_CHANGED,
             user=actor,
-            details={'old': Order.ReturnExchangeStatus.NONE, 'new': Order.ReturnExchangeStatus.EXCHANGED, 'reason': reason},
+            details={'return_type': Order.ReturnType.EXCHANGED, 'reason': reason},
         )
-        cls._recompute_outcome(order, actor=actor)
+        # Canonical lifecycle: the goods came back — done -> returned.
+        from apps.orders.status_service import OrderStatusService
+        OrderStatusService.transition(
+            order, Order.Status.RETURNED, actor=actor,
+            note=reason or 'exchanged',
+            force=(order.status != Order.Status.DONE),
+        )
         return order
 
     @classmethod
@@ -1546,10 +1527,9 @@ class OrderLifecycleService:
     def restore_stock_from_return(cls, order: Order, *, actor=None) -> Order:
         order = cls._lock(order)
         cls._ensure_active(order)
-        if not order.returned_at and order.delivery_status != Order.DeliveryStatus.RETURNED:
+        if not order.returned_at and order.status != Order.Status.RETURNED:
             raise LifecycleError('Order must be marked as returned before stock restoration.')
         cls._restore_stock_locked(order, actor=actor)
-        cls._recompute_outcome(order, actor=actor)
         return order
 
     @classmethod
@@ -1591,7 +1571,8 @@ class OrderLifecycleService:
                 .filter(sales_channel=stock_channel, product_id__in=restore_ids)
             )
         }
-        products = {p.id: p for p in Product.objects.filter(id__in=restore_ids)}
+        products = {p.id: p for p in Product.all_objects.filter(id__in=restore_ids)}
+        pack_sources = cls._pack_sources_by_component(order)
 
         restored = []
         for product_id in restore_ids:
@@ -1601,6 +1582,11 @@ class OrderLifecycleService:
                 continue
             inventory = inventories.get(product_id)
             before = inventory.quantity if inventory else 0
+            source_packs = sorted(pack_sources.get(product_id, set()))
+            pack_note = (
+                f" (pack component: {', '.join(source_packs)})"
+                if source_packs else ''
+            )
             InventoryMovement.objects.create(
                 sales_channel=stock_channel,
                 product=product,
@@ -1610,11 +1596,18 @@ class OrderLifecycleService:
                 quantity_before=before,
                 quantity_after=before + qty,
                 external_reference=order.order_number,
-                notes=f"Stock restored from returned order {order.order_number}",
+                notes=(
+                    f"Stock restored from returned order "
+                    f"{order.order_number}{pack_note}"
+                ),
                 created_by=actor,
                 completed_at=timezone.now(),
             )
-            restored.append({'product_id': product_id, 'quantity': qty})
+            restored.append({
+                'product_id': product_id,
+                'quantity': qty,
+                'source_packs': source_packs,
+            })
 
         order.stock_restored_at = timezone.now()
         order.stock_restored_by = actor
@@ -1626,25 +1619,21 @@ class OrderLifecycleService:
             details={'items': restored},
         )
 
-    # ── Manual backward transitions / rollback (Phase C, STATUS_MAP.md 6.3) ──
-    # Admin/manager-only, reason-required, fully audited overrides that move an
-    # order BACK to an earlier valid step. order_status is persisted-but-derived,
-    # so each handler mutates the underlying mechanism fields such that the
-    # derivation lands on the requested target; the recompute then makes every
-    # clean field consistent. Side-effects reuse the existing engines.
+    # ── Manual backward transitions / reopen (admin override) ────────────────
+    # Admin/manager-only, reason-required, fully audited overrides. Each move
+    # unwinds the matching side effects (packaging stock, routing, holds,
+    # return bookkeeping), then the status itself moves through
+    # OrderStatusService.transition(force=True) — the same audited write path
+    # as every other change.
 
     ALLOWED_MANUAL_TRANSITIONS: dict[str, set[str]] = {
-        Order.OrderStatus.DONE:          {Order.OrderStatus.PREPARING},
-        Order.OrderStatus.PREPARING:     {Order.OrderStatus.CONFIRMED},
-        Order.OrderStatus.CONFIRMED:     {Order.OrderStatus.AWAITING_CONFIRMATION},
-        Order.OrderStatus.DELAYED:       {Order.OrderStatus.AWAITING_CONFIRMATION},
-        Order.OrderStatus.NOT_ANSWERED:  {Order.OrderStatus.AWAITING_CONFIRMATION},
-        Order.OrderStatus.CANCELED:      {
-            Order.OrderStatus.AWAITING_CONFIRMATION,
-            Order.OrderStatus.CONFIRMED,
-        },
-        Order.OrderStatus.RETURNED:      {Order.OrderStatus.DONE},
-        Order.OrderStatus.EXCHANGED:     {Order.OrderStatus.DONE},
+        Order.Status.DONE:         {Order.Status.PACKAGING},
+        Order.Status.PACKAGING:    {Order.Status.CONFIRMED},
+        Order.Status.CONFIRMED:    {Order.Status.NEW},
+        Order.Status.DELAYED:      {Order.Status.NEW},
+        Order.Status.NOT_ANSWERED: {Order.Status.NEW},
+        Order.Status.RETURNED:     {Order.Status.DONE},
+        Order.Status.CANCELED:     {Order.Status.NEW, Order.Status.CONFIRMED},
     }
 
     @staticmethod
@@ -1652,8 +1641,8 @@ class OrderLifecycleService:
         """Gate on the ``manual_status_override`` permission (admin/manager).
 
         Checked via PermissionService so nothing is hardcoded: superusers pass,
-        and the codename is granted to the admin/manager roles by the rbac layer.
-        Denies by default (including ``actor is None``).
+        and the codename is granted to the admin/manager roles by the rbac
+        layer. Denies by default (including ``actor is None``).
         """
         from apps.rbac.services import PermissionService
         if actor is not None and PermissionService.has_permission(actor, 'manual_status_override'):
@@ -1666,15 +1655,7 @@ class OrderLifecycleService:
     @classmethod
     @transaction.atomic
     def manual_transition(cls, order: Order, *, target: str, actor=None, reason: str) -> Order:
-        """Move an order backward to an earlier valid status (audited override).
-
-        Validates: non-empty reason, actor permission, and that ``target`` is an
-        allowed backward move from the current derived status. Applies the
-        documented side-effects, recomputes every clean field, and writes both a
-        MANUAL_STATUS_OVERRIDE log (with the reason) and the usual
-        ORDER_STATUS_CHANGED log. Raises (rolling back) if the move cannot reach
-        the requested target, so the order is never left inconsistent.
-        """
+        """Move an order backward (or reopen a terminal one) — audited override."""
         if not reason or not str(reason).strip():
             raise LifecycleError('A reason is required for a manual status change.')
         cls._assert_can_manual_override(actor)
@@ -1682,7 +1663,10 @@ class OrderLifecycleService:
         order = cls._lock(order)
         cls._ensure_active(order)
 
-        current = cls._derive_order_status(order)
+        from apps.orders.status_service import OrderStatusService
+
+        current = order.status
+        S = Order.Status
         if target == current:
             raise LifecycleError(f'Order is already "{current}".')
         allowed = cls.ALLOWED_MANUAL_TRANSITIONS.get(current, set())
@@ -1693,99 +1677,73 @@ class OrderLifecycleService:
             )
 
         notes: dict = {}
-        OS = Order.OrderStatus
-        if current == OS.RETURNED and target == OS.DONE:
+        if current == S.DONE and target == S.PACKAGING:
+            cls._mt_done_to_packaging(order, actor=actor, notes=notes)
+        elif current == S.PACKAGING and target == S.CONFIRMED:
+            cls._mt_packaging_to_confirmed(order, actor=actor, notes=notes)
+        elif current == S.RETURNED and target == S.DONE:
             cls._mt_returned_to_done(order, actor=actor, notes=notes)
-        elif current == OS.EXCHANGED and target == OS.DONE:
-            cls._mt_exchanged_to_done(order, actor=actor, notes=notes)
-        elif current == OS.DONE and target == OS.PREPARING:
-            cls._mt_done_to_preparing(order, actor=actor, notes=notes)
-        elif current == OS.PREPARING and target == OS.CONFIRMED:
-            cls._mt_preparing_to_confirmed(order, actor=actor, notes=notes)
-        elif current == OS.CONFIRMED and target == OS.AWAITING_CONFIRMATION:
-            cls._mt_to_awaiting(order, actor=actor, notes=notes)
-        elif current == OS.DELAYED and target == OS.AWAITING_CONFIRMATION:
-            cls._mt_clear_holds_to_awaiting(order, actor=actor, notes=notes)
-        elif current == OS.NOT_ANSWERED and target == OS.AWAITING_CONFIRMATION:
-            cls._mt_clear_holds_to_awaiting(order, actor=actor, notes=notes)
-        elif current == OS.CANCELED and target == OS.CONFIRMED:
-            cls._mt_canceled_reopen(order, actor=actor, confirm=True, notes=notes)
-        elif current == OS.CANCELED and target == OS.AWAITING_CONFIRMATION:
-            cls._mt_canceled_reopen(order, actor=actor, confirm=False, notes=notes)
-        else:  # pragma: no cover - guarded by ALLOWED_MANUAL_TRANSITIONS
-            raise LifecycleError(f'No handler for "{current}" → "{target}".')
+        elif current == S.CANCELED:
+            cls._mt_canceled_reopen(order, actor=actor, confirm=(target == S.CONFIRMED), notes=notes)
+        else:  # confirmed / delayed / not_answered → new
+            cls._mt_clear_holds_to_pending(order, actor=actor, notes=notes)
 
-        # Cascade derivation across final_outcome -> workflow_status -> clean
-        # top-layer fields (this also marks pending_sync for WC orders).
-        cls._recompute_outcome(order, actor=actor)
-        new_status = order.order_status
+        OrderStatusService.transition(
+            order, target, actor=actor,
+            note=f'manual override: {reason}', force=True,
+        )
+
+        # returned → done: re-apply the sale through the idempotent delta
+        # engine AFTER the status landed on done (the engine keys on it).
+        if current == S.RETURNED and target == S.DONE:
+            from apps.orders.service import OrderIngestionError, OrderIngestionService
+            channel = (
+                order.pos_sales_channel
+                if order.pos_validated_at and order.pos_sales_channel_id
+                else order.sales_channel
+            )
+            lines = list(order.lines.filter(is_deleted=False).select_related('product'))
+            try:
+                OrderIngestionService._sync_inventory_movements(order, lines, channel, actor)
+            except OrderIngestionError as exc:
+                raise LifecycleError(exc.message) from exc
+            if order.client_id and not order.loyalty_points_granted:
+                try:
+                    cls.grant_loyalty_points(order, actor=actor)
+                except Exception:  # noqa: BLE001 - points are non-fatal
+                    pass
+            notes['stock'] = 're_deducted_delta'
+            notes['points'] = 're_granted'
 
         OrderLoggingService.log(
             order=order,
             action=OrderLog.Action.MANUAL_STATUS_OVERRIDE,
             user=actor,
             details={
-                'old': current,
-                'new': new_status,
-                'target': target,
+                'from': current,
+                'to': order.status,
                 'reason': reason,
                 **({'side_effects': notes} if notes else {}),
             },
         )
-
-        if new_status != target:
-            raise LifecycleError(
-                f'Manual transition could not reach "{target}" (derived "{new_status}"). '
-                'No change was saved.'
-            )
         return order
 
     # ── Per-transition side-effect handlers ──────────────────────────────────
 
     @classmethod
     def _mt_returned_to_done(cls, order: Order, *, actor, notes: dict) -> None:
-        """Re-apply the sale: clear the return, re-deduct stock, re-grant points."""
-        if order.delivery_status == Order.DeliveryStatus.RETURNED:
-            order.delivery_status = Order.DeliveryStatus.DELIVERED
-        order.status = Order.Status.COMPLETED
+        """Clear the return bookkeeping so the sale can be re-applied."""
         order.returned_at = None
         order.returned_by = None
         order.return_reason = ''
         order.return_type = Order.ReturnType.NONE
-        order.return_exchange_status = Order.ReturnExchangeStatus.NONE
-        order.final_outcome = Order.FinalOutcome.SUCCESSFUL_SALE
         # Allow a future genuine return to restore stock again.
         order.stock_restored_at = None
         order.stock_restored_by = None
         order.save(update_fields=[
-            'delivery_status', 'status', 'returned_at', 'returned_by',
-            'return_reason', 'return_type', 'return_exchange_status',
-            'final_outcome', 'stock_restored_at', 'stock_restored_by', 'updated_at',
+            'returned_at', 'returned_by', 'return_reason', 'return_type',
+            'stock_restored_at', 'stock_restored_by', 'updated_at',
         ])
-
-        # Re-deduct stock via the idempotent, delta-based engine. status is now
-        # COMPLETED so it computes a desired set; a GOOD return left net 0 (so it
-        # re-deducts), a DAMAGED/MISSING return left net negative (so it is a
-        # no-op and does not double-deduct the wasted units).
-        from apps.orders.service import OrderIngestionError, OrderIngestionService
-        channel = (
-            order.pos_sales_channel
-            if order.pos_validated_at and order.pos_sales_channel_id
-            else order.sales_channel
-        )
-        lines = list(order.lines.filter(is_deleted=False).select_related('product'))
-        try:
-            OrderIngestionService._sync_inventory_movements(order, lines, channel, actor)
-        except OrderIngestionError as exc:
-            raise LifecycleError(exc.message) from exc
-
-        # Re-grant loyalty points (idempotent on loyalty_points_granted).
-        if order.client_id and not order.loyalty_points_granted:
-            try:
-                cls.grant_loyalty_points(order, actor=actor)
-            except Exception:  # noqa: BLE001 - points are non-fatal
-                pass
-
         # Undo the return's customer-stat bump (mirrors process_return's guard).
         if order.client_id and order.source == Order.Source.WOOCOMMERCE:
             from apps.clients.models import Client
@@ -1793,168 +1751,85 @@ class OrderLifecycleService:
             if (client.number_of_returns or 0) > 0:
                 client.number_of_returns -= 1
                 client.save(update_fields=['number_of_returns', 'is_blocked', 'updated_at'])
-        notes['stock'] = 're_deducted_delta'
-        notes['points'] = 're_granted'
+        notes['return'] = 'cleared'
 
     @classmethod
-    def _mt_exchanged_to_done(cls, order: Order, *, actor, notes: dict) -> None:
-        """Clear the exchange flag and restore the successful-sale state.
-
-        Physical stock for a *structured* exchange (replacement SALE + original
-        RETURN_IN) is NOT auto-reversed here — it is flagged for manual review so
-        we never fabricate movements for a different replacement product.
-        """
-        had_structured_exchange = (
-            order.return_type == Order.ReturnType.EXCHANGED or bool(order.returned_at)
-        )
-        order.return_exchange_status = Order.ReturnExchangeStatus.NONE
-        order.return_type = Order.ReturnType.NONE
-        order.returned_at = None
-        order.returned_by = None
-        if order.delivery_status == Order.DeliveryStatus.RETURNED:
-            order.delivery_status = Order.DeliveryStatus.DELIVERED
-        order.status = Order.Status.COMPLETED
-        order.final_outcome = Order.FinalOutcome.SUCCESSFUL_SALE
-        order.save(update_fields=[
-            'return_exchange_status', 'return_type', 'returned_at', 'returned_by',
-            'delivery_status', 'status', 'final_outcome', 'updated_at',
-        ])
-        if order.client_id and not order.loyalty_points_granted:
-            try:
-                cls.grant_loyalty_points(order, actor=actor)
-            except Exception:  # noqa: BLE001
-                pass
-        notes['exchange'] = 'flag_cleared'
-        if had_structured_exchange:
-            notes['stock_review'] = 'structured_exchange_movements_not_auto_reversed'
-
-    @classmethod
-    def _mt_done_to_preparing(cls, order: Order, *, actor, notes: dict) -> None:
-        """Unwind the done push. Reverses packaging only; the customer-line sale
-        stays deducted (the order is still selling) and re-validation/packaging
-        is idempotent, so no double-counting occurs."""
-        if order.packaging_status in (
-            Order.PackagingStatus.PACKAGED, Order.PackagingStatus.UPDATED,
-        ):
+    def _mt_done_to_packaging(cls, order: Order, *, actor, notes: dict) -> None:
+        """Unwind the done push: reverse packaging only; the customer-line sale
+        stays deducted (the order is still selling) and re-validation /
+        re-packaging is idempotent, so no double-counting occurs."""
+        if order.packaged_at:
             cls._apply_packaging_stock(order, desired={}, actor=actor)
             order.lines.filter(
                 is_deleted=False,
                 product__product_type=Product.ProductType.PACKAGING_ITEM,
             ).update(is_deleted=True)
-            order.packaging_status = Order.PackagingStatus.NOT_PACKAGED
             order.packaged_at = None
             order.packaged_by = None
             notes['packaging'] = 'reversed'
-
-        order.final_outcome = Order.FinalOutcome.NONE
-        if order.outcome != Order.Outcome.CONFIRMED:
-            order.outcome = Order.Outcome.CONFIRMED
-            if not order.confirmed_at:
-                order.confirmed_at = timezone.now()
-        if order.delivery_status == Order.DeliveryStatus.DELIVERED:
-            order.delivery_status = Order.DeliveryStatus.ACCEPTED
         order.pos_validated_at = None
         order.pos_validated_by = None
-        if order.status == Order.Status.COMPLETED:
-            order.status = Order.Status.PROCESSING
         order.save(update_fields=[
-            'packaging_status', 'packaged_at', 'packaged_by', 'final_outcome',
-            'outcome', 'confirmed_at', 'delivery_status', 'pos_validated_at',
-            'pos_validated_by', 'status', 'updated_at',
+            'packaged_at', 'packaged_by',
+            'pos_validated_at', 'pos_validated_by', 'updated_at',
         ])
-        # Guarantee a "preparing" signal so derivation does not fall back to
-        # "confirmed" for an order that had no delivery reference.
-        if not (
-            order.sent_to_pos_at
-            or order.delivery_reference
-            or order.delivery_status in cls._IN_FLIGHT_DELIVERY
-        ):
+        # Guarantee a fulfilment-routing signal so "packaging" makes sense for
+        # an order that had no delivery reference.
+        if not (order.sent_to_pos_at or order.delivery_reference):
             order.sent_to_pos_at = timezone.now()
             order.sent_to_pos_by = actor
             order.save(update_fields=['sent_to_pos_at', 'sent_to_pos_by', 'updated_at'])
 
     @classmethod
-    def _mt_preparing_to_confirmed(cls, order: Order, *, actor, notes: dict) -> None:
+    def _mt_packaging_to_confirmed(cls, order: Order, *, actor, notes: dict) -> None:
         """Release fulfilment routing; keep the order confirmed."""
         order.sent_to_pos_at = None
         order.sent_to_pos_by = None
         order.pos_sales_channel = None
         order.delivery_reference = ''
-        if order.delivery_status in cls._IN_FLIGHT_DELIVERY:
-            order.delivery_status = Order.DeliveryStatus.NONE
         order.in_store_pickup = False
-        if order.outcome != Order.Outcome.CONFIRMED:
-            order.outcome = Order.Outcome.CONFIRMED
-            if not order.confirmed_at:
-                order.confirmed_at = timezone.now()
+        if not order.confirmed_at:
+            order.confirmed_at = timezone.now()
         order.save(update_fields=[
             'sent_to_pos_at', 'sent_to_pos_by', 'pos_sales_channel',
-            'delivery_reference', 'delivery_status', 'in_store_pickup',
-            'outcome', 'confirmed_at', 'updated_at',
+            'delivery_reference', 'in_store_pickup',
+            'confirmed_at', 'updated_at',
         ])
         notes['fulfilment'] = 'routing_released'
 
     @classmethod
-    def _mt_to_awaiting(cls, order: Order, *, actor, notes: dict) -> None:
-        """confirmed -> awaiting_confirmation: reopen confirmation."""
-        order.outcome = Order.Outcome.NONE
-        order.confirmed_at = None
-        order.contact_status = Order.ContactStatus.ANSWERED
-        if not order.confirmation_started_at:
-            order.confirmation_started_at = timezone.now()
-        order.outcome_changed_at = timezone.now()
-        order.outcome_changed_by = actor
-        order.save(update_fields=[
-            'outcome', 'confirmed_at', 'contact_status', 'confirmation_started_at',
-            'outcome_changed_at', 'outcome_changed_by', 'updated_at',
-        ])
-
-    @classmethod
-    def _mt_clear_holds_to_awaiting(cls, order: Order, *, actor, notes: dict) -> None:
-        """delayed / not_answered -> awaiting_confirmation: clear holds."""
-        order.outcome = Order.Outcome.NONE
-        order.contact_status = Order.ContactStatus.ANSWERED
+    def _mt_clear_holds_to_pending(cls, order: Order, *, actor, notes: dict) -> None:
+        """confirmed / delayed / not_answered → new: clear holds."""
         order.delay_date = None
         order.delay_reason = ''
         order.delay_until = None
         order.delay_note = ''
         order.not_answered_attempts = 0
         order.not_answered_at = None
-        if not order.confirmation_started_at:
-            order.confirmation_started_at = timezone.now()
+        order.confirmed_at = None
         order.outcome_changed_at = timezone.now()
         order.outcome_changed_by = actor
         order.save(update_fields=[
-            'outcome', 'contact_status', 'delay_date', 'delay_reason',
-            'delay_until', 'delay_note', 'not_answered_attempts', 'not_answered_at',
-            'confirmation_started_at', 'outcome_changed_at', 'outcome_changed_by',
-            'updated_at',
+            'delay_date', 'delay_reason', 'delay_until', 'delay_note',
+            'not_answered_attempts', 'not_answered_at', 'confirmed_at',
+            'outcome_changed_at', 'outcome_changed_by', 'updated_at',
         ])
         notes['holds'] = 'cleared'
 
     @classmethod
     def _mt_canceled_reopen(cls, order: Order, *, actor, confirm: bool, notes: dict) -> None:
-        """canceled -> confirmed | awaiting_confirmation: admin reopen.
+        """canceled → confirmed | new: admin reopen.
 
-        Cancellation never moved stock, so there is nothing to restore; the
-        recompute re-checks stock_status and re-marks pending_sync for WC."""
-        order.status = Order.Status.PROCESSING
+        Cancellation never moved stock, so there is nothing to restore."""
         order.cancellation_reason = ''
         order.outcome_changed_at = timezone.now()
         order.outcome_changed_by = actor
-        if confirm:
-            order.outcome = Order.Outcome.CONFIRMED
-            order.contact_status = Order.ContactStatus.ANSWERED
-            if not order.confirmed_at:
-                order.confirmed_at = timezone.now()
-        else:
-            order.outcome = Order.Outcome.NONE
-            order.contact_status = Order.ContactStatus.ANSWERED
-            if not order.confirmation_started_at:
-                order.confirmation_started_at = timezone.now()
+        if confirm and not order.confirmed_at:
+            order.confirmed_at = timezone.now()
+        if not confirm:
+            order.confirmed_at = None
         order.save(update_fields=[
-            'status', 'cancellation_reason', 'outcome', 'contact_status',
-            'confirmed_at', 'confirmation_started_at', 'outcome_changed_at',
-            'outcome_changed_by', 'updated_at',
+            'cancellation_reason', 'confirmed_at',
+            'outcome_changed_at', 'outcome_changed_by', 'updated_at',
         ])
-        notes['reopen'] = 'confirmed' if confirm else 'awaiting_confirmation'
+        notes['reopen'] = 'confirmed' if confirm else 'new'

@@ -456,7 +456,7 @@ export function POSProductGrid({
                   const isSelected = selectedHistoryOrderId === order.id;
                   const customerName = order.client_name || 'Walk-in customer';
                   const ticket = order.ticket_id || order.order_number;
-                  const isReturned = Boolean(order.returned_at) || order.return_exchange_status === 'RETURNED' || order.status === 'REFUNDED';
+                  const isReturned = Boolean(order.returned_at) || order.status === 'returned';
                   const createdAt = order.created_at
                     ? new Intl.DateTimeFormat('fr-TN', {
                         day: '2-digit',

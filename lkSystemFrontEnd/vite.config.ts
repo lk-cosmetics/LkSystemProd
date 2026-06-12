@@ -2,10 +2,81 @@ import path from 'path';
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
+import { VitePWA } from 'vite-plugin-pwa';
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    // ── Progressive Web App / offline ──────────────────────────────────────
+    // Precaches the app shell + every hashed build asset so the POS keeps
+    // working through a network drop AND across a full reload / cold start
+    // (the cashier can close and reopen the tab offline). `autoUpdate` +
+    // `cleanupOutdatedCaches` make a new deploy install cleanly and reload
+    // once — the same hashed-chunk staleness that used to crash the app is now
+    // served from the precache until the new worker takes over (the
+    // lazyWithRetry / vite:preloadError reload remains a belt-and-suspenders).
+    VitePWA({
+      registerType: 'autoUpdate',
+      injectRegister: null, // registered explicitly in main.tsx for control
+      includeAssets: ['favicon.svg', 'logo.svg'],
+      manifest: {
+        name: 'LK System',
+        short_name: 'LK System',
+        description: 'LK Cosmetics — point of sale, orders & inventory',
+        theme_color: '#ffffff',
+        background_color: '#ffffff',
+        display: 'standalone',
+        orientation: 'portrait-primary',
+        start_url: '/dashboard/pos',
+        scope: '/',
+        icons: [
+          { src: '/logo.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+          { src: '/logo.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'maskable' },
+        ],
+      },
+      workbox: {
+        // Precache the shell + all build assets → offline cold start works.
+        globPatterns: ['**/*.{js,css,html,svg,woff,woff2,ico,png}'],
+        // SPA: serve the cached index.html for navigations when offline, but
+        // never shadow the API / admin / media / websocket / image-proxy paths.
+        navigateFallback: '/index.html',
+        navigateFallbackDenylist: [
+          /^\/api\//,
+          /^\/admin\//,
+          /^\/media\//,
+          /^\/static\//,
+          /^\/ws\//,
+          /^\/wp-proxy\//,
+        ],
+        cleanupOutdatedCaches: true,
+        clientsClaim: true,
+        skipWaiting: true,
+        maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
+        runtimeCaching: [
+          {
+            // Caisse reads: keep the last-synced stats / history / expenses /
+            // cash-deposits available offline (NetworkFirst → fresh when online,
+            // cached fallback when not). Writes are queued client-side, see
+            // services/offlineCaisse.service.ts.
+            urlPattern: ({ url, request }) =>
+              request.method === 'GET' &&
+              (url.pathname.includes('/sales-channels/expenses') ||
+                url.pathname.includes('/sales-channels/cash-deposits')),
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'lk-caisse-api',
+              networkTimeoutSeconds: 5,
+              expiration: { maxEntries: 80, maxAgeSeconds: 7 * 24 * 60 * 60 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+        ],
+      },
+      devOptions: { enabled: false },
+    }),
+  ],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

@@ -1,0 +1,556 @@
+.lk-invoice {
+  --ink: #111;
+  --muted: #5f6368;
+  --line: #d4d4d4;
+  --accent: #000;
+
+  display: flex;
+  width: 190mm;
+  min-height: 270mm;
+  max-width: 100%;
+  margin: 0 auto;
+  flex-direction: column;
+  background: #fff;
+  color: var(--ink);
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 10pt;
+  line-height: 1.4;
+}
+
+.lk-invoice * { box-sizing: border-box; }
+.lk-invoice p { margin: 0; }
+
+.lk-invoice__brand {
+  display: flex;
+  min-height: 34mm;
+  align-items: center;
+  justify-content: center;
+}
+
+.lk-invoice__logo {
+  width: 46mm;
+  max-height: 34mm;
+  object-fit: contain;
+}
+
+.lk-invoice__title {
+  margin: 10mm 0 7mm;
+  font-size: 22pt;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.lk-invoice__identity {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(74mm, 0.75fr);
+  gap: 14mm;
+  margin-bottom: 10mm;
+}
+
+.lk-invoice__client {
+  display: flex;
+  flex-direction: column;
+  font-size: 10.5pt;
+}
+
+.lk-invoice__client strong { margin-bottom: 1mm; }
+
+.lk-invoice__meta {
+  margin: 0;
+}
+
+.lk-invoice__meta > div {
+  display: grid;
+  grid-template-columns: 35mm minmax(0, 1fr);
+  gap: 3mm;
+  margin-bottom: 1.2mm;
+}
+
+.lk-invoice__meta dt,
+.lk-invoice__meta dd {
+  margin: 0;
+}
+
+.lk-invoice__meta dd {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.lk-invoice__table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.lk-invoice__table thead th {
+  padding: 3mm 2.5mm;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9pt;
+  font-weight: 700;
+  text-align: left;
+}
+
+.lk-invoice__table tbody td {
+  padding: 2.8mm 2.5mm;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.lk-invoice__name {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.lk-invoice__bc {
+  color: var(--muted);
+  font-size: 8pt;
+}
+
+.lk-invoice__num {
+  text-align: right !important;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lk-invoice__c-qty {
+  width: 20mm;
+  text-align: center !important;
+}
+
+.lk-invoice__c-promo {
+  width: 25mm;
+  text-align: center !important;
+}
+
+.lk-invoice__c-pu,
+.lk-invoice__c-tot {
+  width: 30mm;
+}
+
+.lk-invoice__summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 76mm;
+  gap: 14mm;
+  margin-top: 2mm;
+}
+
+.lk-invoice__words {
+  display: flex;
+  align-self: end;
+  flex-direction: column;
+  gap: 1.5mm;
+  padding-bottom: 2mm;
+}
+
+.lk-invoice__words p {
+  margin-top: 2mm;
+  color: var(--muted);
+  font-size: 9pt;
+}
+
+.lk-invoice__totals > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 5mm;
+  padding: 2.5mm 1mm;
+  border-bottom: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+
+.lk-invoice__totals span {
+  white-space: nowrap;
+}
+
+.lk-invoice__discount {
+  color: #991b1b;
+}
+
+.lk-invoice__grand {
+  font-size: 11pt;
+  font-weight: 800;
+}
+
+.lk-invoice__direction {
+  margin: 20mm 22mm 8mm auto;
+  font-size: 13pt;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.lk-invoice__footer {
+  display: flex;
+  margin-top: auto;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 5mm;
+  text-align: center;
+  font-size: 8.5pt;
+  line-height: 1.35;
+  white-space: pre-line;
+}
+
+.lk-invoice__footer > strong {
+  margin-bottom: 1mm;
+  font-size: 10pt;
+  text-transform: uppercase;
+}
+
+.lk-invoice--preview {
+  min-height: 255mm;
+  padding: 10mm;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 1px 3px rgb(15 23 42 / 8%);
+}
+
+/* Progressive print densities are applied only to the body-level print clone.
+   Most invoices stay at the normal size; larger baskets first reclaim spacing
+   before the final measured scale is calculated. */
+.lk-invoice--print-compact {
+  min-height: 250mm;
+  font-size: 9pt;
+  line-height: 1.28;
+}
+
+.lk-invoice--print-compact .lk-invoice__brand {
+  min-height: 24mm;
+}
+
+.lk-invoice--print-compact .lk-invoice__logo {
+  width: 38mm;
+  max-height: 24mm;
+}
+
+.lk-invoice--print-compact .lk-invoice__title {
+  margin: 5mm 0 4mm;
+  font-size: 18pt;
+}
+
+.lk-invoice--print-compact .lk-invoice__identity {
+  gap: 8mm;
+  margin-bottom: 5mm;
+}
+
+.lk-invoice--print-compact .lk-invoice__client {
+  font-size: 9pt;
+}
+
+.lk-invoice--print-compact .lk-invoice__meta > div {
+  grid-template-columns: 31mm minmax(0, 1fr);
+  gap: 2mm;
+  margin-bottom: 0.7mm;
+}
+
+.lk-invoice--print-compact .lk-invoice__table thead th {
+  padding: 2mm;
+  font-size: 8pt;
+}
+
+.lk-invoice--print-compact .lk-invoice__table tbody td {
+  padding: 1.7mm 2mm;
+}
+
+.lk-invoice--print-compact .lk-invoice__summary {
+  gap: 8mm;
+}
+
+.lk-invoice--print-compact .lk-invoice__totals > div {
+  padding: 1.6mm 1mm;
+}
+
+.lk-invoice--print-compact .lk-invoice__direction {
+  margin: 8mm 16mm 4mm auto;
+  font-size: 11pt;
+}
+
+.lk-invoice--print-compact .lk-invoice__footer {
+  padding-top: 3mm;
+  font-size: 7.8pt;
+}
+
+.lk-invoice--print-dense {
+  min-height: 0;
+  font-size: 8pt;
+  line-height: 1.2;
+}
+
+.lk-invoice--print-dense .lk-invoice__brand {
+  min-height: 16mm;
+}
+
+.lk-invoice--print-dense .lk-invoice__logo {
+  width: 30mm;
+  max-height: 16mm;
+}
+
+.lk-invoice--print-dense .lk-invoice__title {
+  margin: 3mm 0 2mm;
+  font-size: 14pt;
+}
+
+.lk-invoice--print-dense .lk-invoice__identity {
+  grid-template-columns: minmax(0, 1fr) minmax(65mm, 0.75fr);
+  gap: 5mm;
+  margin-bottom: 3mm;
+}
+
+.lk-invoice--print-dense .lk-invoice__client {
+  font-size: 8pt;
+}
+
+.lk-invoice--print-dense .lk-invoice__meta > div {
+  grid-template-columns: 28mm minmax(0, 1fr);
+  gap: 1mm;
+  margin-bottom: 0.3mm;
+}
+
+.lk-invoice--print-dense .lk-invoice__table thead th {
+  padding: 1.2mm 1.4mm;
+  font-size: 7pt;
+}
+
+.lk-invoice--print-dense .lk-invoice__table tbody td {
+  padding: 0.9mm 1.4mm;
+}
+
+.lk-invoice--print-dense .lk-invoice__bc {
+  font-size: 6.5pt;
+}
+
+.lk-invoice--print-dense .lk-invoice__summary {
+  grid-template-columns: minmax(0, 1fr) 65mm;
+  gap: 5mm;
+  margin-top: 1mm;
+}
+
+.lk-invoice--print-dense .lk-invoice__words {
+  gap: 0.5mm;
+  padding-bottom: 1mm;
+}
+
+.lk-invoice--print-dense .lk-invoice__words p {
+  margin-top: 0.5mm;
+  font-size: 7pt;
+}
+
+.lk-invoice--print-dense .lk-invoice__totals > div {
+  gap: 3mm;
+  padding: 0.8mm 0.5mm;
+}
+
+.lk-invoice--print-dense .lk-invoice__grand {
+  font-size: 9pt;
+}
+
+.lk-invoice--print-dense .lk-invoice__direction {
+  margin: 3mm 10mm 2mm auto;
+  font-size: 9pt;
+}
+
+.lk-invoice--print-dense .lk-invoice__footer {
+  padding-top: 1mm;
+  font-size: 6.8pt;
+  line-height: 1.15;
+}
+
+.lk-invoice--print-dense .lk-invoice__footer > strong {
+  margin-bottom: 0.5mm;
+  font-size: 8pt;
+}
+
+.lk-invoice--print-ultra {
+  min-height: 0;
+  font-size: 6.8pt;
+  line-height: 1.1;
+}
+
+.lk-invoice--print-ultra .lk-invoice__brand {
+  min-height: 10mm;
+}
+
+.lk-invoice--print-ultra .lk-invoice__logo {
+  width: 24mm;
+  max-height: 10mm;
+}
+
+.lk-invoice--print-ultra .lk-invoice__title {
+  margin: 1.5mm 0 1mm;
+  font-size: 11pt;
+}
+
+.lk-invoice--print-ultra .lk-invoice__identity {
+  grid-template-columns: minmax(0, 1fr) minmax(58mm, 0.75fr);
+  gap: 3mm;
+  margin-bottom: 1.5mm;
+}
+
+.lk-invoice--print-ultra .lk-invoice__client {
+  font-size: 6.8pt;
+}
+
+.lk-invoice--print-ultra .lk-invoice__meta > div {
+  grid-template-columns: 24mm minmax(0, 1fr);
+  gap: 0.7mm;
+  margin-bottom: 0.15mm;
+}
+
+.lk-invoice--print-ultra .lk-invoice__table thead th {
+  padding: 0.7mm 1mm;
+  font-size: 6.2pt;
+}
+
+.lk-invoice--print-ultra .lk-invoice__table tbody td {
+  padding: 0.45mm 1mm;
+}
+
+.lk-invoice--print-ultra .lk-invoice__bc {
+  display: none;
+}
+
+.lk-invoice--print-ultra .lk-invoice__summary {
+  grid-template-columns: minmax(0, 1fr) 58mm;
+  gap: 3mm;
+  margin-top: 0.5mm;
+}
+
+.lk-invoice--print-ultra .lk-invoice__words {
+  gap: 0.25mm;
+  padding-bottom: 0.5mm;
+}
+
+.lk-invoice--print-ultra .lk-invoice__words p {
+  margin-top: 0.25mm;
+  font-size: 6pt;
+}
+
+.lk-invoice--print-ultra .lk-invoice__totals > div {
+  gap: 2mm;
+  padding: 0.45mm;
+}
+
+.lk-invoice--print-ultra .lk-invoice__grand {
+  font-size: 7.5pt;
+}
+
+.lk-invoice--print-ultra .lk-invoice__direction {
+  margin: 1mm 8mm 0.5mm auto;
+  font-size: 7pt;
+}
+
+.lk-invoice--print-ultra .lk-invoice__footer {
+  padding-top: 0.5mm;
+  font-size: 5.8pt;
+  line-height: 1.05;
+}
+
+.lk-invoice--print-ultra .lk-invoice__footer > strong {
+  margin-bottom: 0.2mm;
+  font-size: 6.5pt;
+}
+
+/* Give every printable clone the full usable A4 height. The invoice is a flex
+   column, so the footer's margin-top:auto now anchors it to the bottom for
+   short invoices. Long invoices naturally grow past this height and are
+   reduced by the measured one-page scale. */
+.lk-invoice--print-sheet {
+  min-height: 276mm;
+  padding-bottom: 1mm;
+}
+
+.lk-invoice-print-host {
+  --lk-invoice-print-scale: 1;
+
+  position: fixed;
+  top: 0;
+  left: -10000px;
+  display: block;
+  width: 190mm;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+@media print {
+  html,
+  body.lk-print-invoice {
+    width: auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+
+  body.lk-print-invoice > *:not(.lk-invoice-print-host) {
+    display: none !important;
+  }
+
+  body.lk-print-invoice > .lk-invoice-print-host {
+    position: relative !important;
+    left: auto !important;
+    display: flex !important;
+    width: 190mm !important;
+    height: 276mm !important;
+    min-height: 276mm !important;
+    max-height: 276mm !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    align-items: flex-start !important;
+    justify-content: center !important;
+    overflow: hidden !important;
+    visibility: visible !important;
+    break-inside: avoid !important;
+    break-after: avoid !important;
+    page-break-inside: avoid !important;
+    page-break-after: avoid !important;
+  }
+
+  body.lk-print-invoice .lk-invoice-print-host .lk-invoice {
+    position: relative !important;
+    flex: 0 0 190mm !important;
+    width: 190mm !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    transform: scale(var(--lk-invoice-print-scale)) !important;
+    transform-origin: top center !important;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  body.lk-print-invoice .lk-invoice-print-host .lk-invoice * {
+    box-shadow: none !important;
+  }
+
+  body.lk-print-invoice .lk-invoice__brand,
+  body.lk-print-invoice .lk-invoice__identity,
+  body.lk-print-invoice .lk-invoice__summary,
+  body.lk-print-invoice .lk-invoice__direction,
+  body.lk-print-invoice .lk-invoice__footer {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  body.lk-print-invoice .lk-invoice__table {
+    break-inside: auto;
+    page-break-inside: auto;
+  }
+
+  body.lk-print-invoice .lk-invoice__table thead {
+    display: table-header-group;
+  }
+
+  body.lk-print-invoice .lk-invoice__table tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}
+
+@page {
+  size: A4;
+  margin: 10mm;
+}

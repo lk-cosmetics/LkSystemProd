@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
@@ -32,7 +33,7 @@ class OrderAPITests(TestCase):
             brand=self.brand,
             sales_channel=self.channel,
             order_number='ORD-API-001',
-            status=Order.Status.PENDING,
+            status=Order.Status.NEW,
             source=Order.Source.WOOCOMMERCE,
             total='100.00',
         )
@@ -66,32 +67,165 @@ class OrderAPITests(TestCase):
         self.assertEqual(response.data['id'], self.order.id)
         self.assertEqual(response.data['lifecycle_priority'], 1)
 
-    def test_status_update_keeps_default_queue_ordering_annotation(self):
-        response = self.client.patch(
-            f'/api/v1/orders/{self.order.id}/status/',
-            {'status': Order.Status.PROCESSING},
+    def test_transition_endpoint_moves_the_canonical_status(self):
+        response = self.client.post(
+            f'/api/v1/orders/{self.order.id}/transition/',
+            {'status': Order.Status.CONFIRMED, 'note': 'phone ok'},
             format='json',
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['status'], Order.Status.PROCESSING)
+        self.assertEqual(response.data['status'], Order.Status.CONFIRMED)
 
-    def test_search_matches_order_id_client_name_and_phone(self):
-        for query in (str(self.order.id), 'Amina', '22123456'):
+    def test_search_matches_order_refs_and_delivery_contact(self):
+        # Staff search the order's DELIVERY snapshot: the shipping (recipient)
+        # block plus the billing fallback — never the linked Client record,
+        # because the customer may name a different recipient per order.
+        self.order.billing_first_name = 'Amina'
+        self.order.billing_last_name = 'Trabelsi'
+        self.order.shipping_first_name = 'Yassine'
+        self.order.shipping_last_name = 'Mansouri'
+        self.order.shipping_phone = '+216 98 765 432'
+        self.order.shipping_address_1 = 'Rue de la Liberte 12'
+        self.order.shipping_city = 'La Marsa'
+        self.order.save(update_fields=[
+            'billing_first_name', 'billing_last_name',
+            'shipping_first_name', 'shipping_last_name', 'shipping_phone',
+            'shipping_address_1', 'shipping_city', 'updated_at',
+        ])
+
+        matching_queries = (
+            str(self.order.id),   # internal pk
+            'Amina',              # billing (recipient fallback) name
+            '22123456',           # billing phone
+            'Yassine',            # delivery recipient first name
+            'Yassine Mansouri',   # delivery recipient full name
+            '98 765 432',         # delivery phone as stored
+            '+21698765432',       # delivery phone, digits-only with country code
+            '98-765-432',         # delivery phone with other separators
+            'Liberte',            # delivery street
+            'La Marsa',           # delivery city
+        )
+        for query in matching_queries:
             response = self.client.get('/api/v1/orders/', {'search': query})
 
             self.assertEqual(response.status_code, status.HTTP_200_OK)
-            self.assertEqual(response.data['count'], 1)
+            self.assertEqual(response.data['count'], 1, query)
             self.assertEqual(response.data['results'][0]['id'], self.order.id)
 
-    def test_flow_filter_and_summary_counts_use_same_bucket(self):
-        response = self.client.get('/api/v1/orders/', {'flow': 'needs_confirmation'})
+    def test_search_ignores_client_record_only_data(self):
+        # Values living only on the Client record (not on the order snapshot)
+        # must NOT match — the recipient for this order may be someone else.
+        self.client_record.first_name = 'Salima'
+        self.client_record.phone = '+21655555555'
+        self.client_record.save(update_fields=['first_name', 'phone'])
+
+        for query in ('Salima', '55555555'):
+            response = self.client.get('/api/v1/orders/', {'search': query})
+
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(response.data['count'], 0, query)
+
+    def test_edit_uses_order_customer_snapshot_and_recomputes_priority(self):
+        product = Product.objects.create(
+            brand=self.brand,
+            name='Editable Product',
+            barcode='EDIT-001',
+            product_type=Product.ProductType.RESELL_PRODUCT,
+            sales_price='400.00',
+        )
+        SalesChannelInventory.objects.create(
+            sales_channel=self.channel,
+            product=product,
+            quantity=10,
+        )
+        line = OrderLine.objects.create(
+            order=self.order,
+            product=product,
+            product_name=product.name,
+            barcode=product.barcode,
+            quantity=1,
+            unit_price=Decimal('100.00'),
+            subtotal=Decimal('100.00'),
+            total=Decimal('100.00'),
+        )
+
+        response = self.client.patch(
+            f'/api/v1/orders/{self.order.id}/edit/',
+            {
+                'lines': [{
+                    'id': line.id,
+                    'product': product.id,
+                    'product_name': product.name,
+                    'barcode': product.barcode,
+                    'quantity': 1,
+                    'unit_price': '400.00',
+                }],
+                'billing_first_name': 'Noura',
+                'billing_last_name': 'Ben Salem',
+                'billing_email': 'noura@example.com',
+                'billing_phone': '+21699111222',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data['client_name'], 'Noura Ben Salem')
+        self.assertEqual(response.data['client_phone'], '+21699111222')
+        self.assertEqual(response.data['client_email'], 'noura@example.com')
+        self.assertEqual(response.data['stock_status'], Order.StockStatus.IN_STOCK)
+        self.assertEqual(response.data['priority_level'], Order.PriorityLevel.HIGH)
+
+        list_response = self.client.get('/api/v1/orders/', {'search': '99111222'})
+        priority_response = self.client.get(
+            '/api/v1/orders/',
+            {'priority_level': Order.PriorityLevel.HIGH},
+        )
+        self.assertEqual(list_response.data['results'][0]['client_name'], 'Noura Ben Salem')
+        self.assertIn(
+            self.order.id,
+            [row['id'] for row in priority_response.data['results']],
+        )
+
+        # Editing an order snapshot must not silently rewrite the shared client.
+        self.client_record.refresh_from_db()
+        self.assertEqual(self.client_record.full_name, 'Amina Trabelsi')
+        self.assertEqual(self.client_record.phone, '+21622123456')
+
+    def test_default_queue_uses_business_priority_before_recency(self):
+        Order.objects.filter(pk=self.order.pk).update(
+            priority_level=Order.PriorityLevel.LOW,
+            created_at=timezone.now(),
+        )
+        high_priority = Order.objects.create(
+            company=self.company,
+            brand=self.brand,
+            sales_channel=self.channel,
+            order_number='ORD-OLDER-HIGH',
+            status=Order.Status.NEW,
+            source=Order.Source.WOOCOMMERCE,
+            priority_level=Order.PriorityLevel.HIGH,
+            total='500.00',
+        )
+        Order.objects.filter(pk=high_priority.pk).update(
+            created_at=timezone.now() - timedelta(days=1),
+        )
+
+        response = self.client.get('/api/v1/orders/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [row['id'] for row in response.data['results']]
+        self.assertLess(ids.index(high_priority.id), ids.index(self.order.id))
+
+    def test_status_filter_and_summary_counts_use_same_bucket(self):
+        response = self.client.get('/api/v1/orders/', {'status': 'new'})
         summary = self.client.get('/api/v1/orders/summary/')
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 1)
         self.assertEqual(summary.status_code, status.HTTP_200_OK)
-        self.assertEqual(summary.data['flow_counts']['needs_confirmation'], 1)
+        self.assertEqual(summary.data['by_status']['new'], 1)
+        self.assertEqual(summary.data['new'], 1)
 
     def test_pos_completed_orders_are_done_not_client_call_priority(self):
         pos_channel = SalesChannel.objects.create(
@@ -105,13 +239,13 @@ class OrderAPITests(TestCase):
             brand=self.brand,
             sales_channel=pos_channel,
             order_number='POS-API-001',
-            status=Order.Status.COMPLETED,
+            status=Order.Status.DONE,
             source=Order.Source.POS,
             total='25.00',
         )
 
-        needs_call = self.client.get('/api/v1/orders/', {'flow': 'needs_confirmation'})
-        done = self.client.get('/api/v1/orders/', {'flow': 'done'})
+        needs_call = self.client.get('/api/v1/orders/', {'status': 'new'})
+        done = self.client.get('/api/v1/orders/', {'status': 'done'})
         detail = self.client.get(f'/api/v1/orders/{pos_order.id}/')
         summary = self.client.get('/api/v1/orders/summary/')
 
@@ -121,8 +255,8 @@ class OrderAPITests(TestCase):
         self.assertIn(pos_order.id, [row['id'] for row in done.data['results']])
         self.assertEqual(detail.status_code, status.HTTP_200_OK)
         self.assertEqual(detail.data['lifecycle_priority'], 10)
-        self.assertEqual(summary.data['flow_counts']['needs_confirmation'], 1)
-        self.assertEqual(summary.data['flow_counts']['done'], 1)
+        self.assertEqual(summary.data['by_status']['new'], 1)
+        self.assertEqual(summary.data['by_status']['done'], 1)
 
     def test_pos_checkout_creation_marks_order_done(self):
         pos_channel = SalesChannel.objects.create(
@@ -170,8 +304,8 @@ class OrderAPITests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         order = Order.objects.get(pk=response.data['id'])
         self.assertEqual(order.source, Order.Source.POS)
-        self.assertEqual(order.status, Order.Status.COMPLETED)
-        self.assertEqual(order.outcome, Order.Outcome.CONFIRMED)
+        self.assertEqual(order.status, Order.Status.DONE)
+        self.assertIsNotNone(order.confirmed_at)
         self.assertEqual(order.payment_status, Order.PaymentStatus.PAID)
         self.assertIsNotNone(order.pos_validated_at)
         self.assertEqual(order.pos_validated_by, self.user)
@@ -197,7 +331,7 @@ class OrderAPITests(TestCase):
         )
         return channel, product
 
-    def test_manual_order_defaults_to_processing_without_pos_forcing(self):
+    def test_manual_order_defaults_to_new_without_pos_forcing(self):
         channel, product = self._manual_channel_and_product('WEB-MAN1')
 
         response = self.client.post(
@@ -222,9 +356,9 @@ class OrderAPITests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         order = Order.objects.get(pk=response.data['id'])
         self.assertEqual(order.source, Order.Source.MANUAL)
-        self.assertEqual(order.status, Order.Status.PROCESSING)
+        self.assertEqual(order.status, Order.Status.NEW)
         # POS-only forcing must NOT happen for a back-office order.
-        self.assertEqual(order.outcome, Order.Outcome.NONE)
+        self.assertIsNone(order.confirmed_at)
         self.assertIsNone(order.pos_validated_at)
         self.assertIsNone(order.pos_sales_channel_id)
 

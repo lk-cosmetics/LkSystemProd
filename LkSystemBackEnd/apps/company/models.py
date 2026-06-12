@@ -138,7 +138,17 @@ class Company(models.Model):
         default='',
         verbose_name='Email Address'
     )
-    
+
+    # Free-text footer printed at the bottom of every invoice (legal mentions,
+    # payment terms, thank-you note…). Editable by company admins; falls back to
+    # a default line in the invoice when empty.
+    invoice_footer = models.TextField(
+        blank=True,
+        default='',
+        verbose_name='Invoice Footer',
+        help_text='Custom text shown at the bottom of invoices (terms, legal mentions…)',
+    )
+
     # Status
     is_active = models.BooleanField(
         default=True,

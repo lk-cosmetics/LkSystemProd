@@ -3,7 +3,7 @@
 Security & correctness model
 -----------------------------
 * **Signal, not data.** A broadcast carries only a tiny envelope — order id,
-  current ``order_status``, ``source`` and a deleted flag — never order detail.
+  current ``status``, ``source`` and a deleted flag — never order detail.
   The client treats it as "something changed, refetch now" and pulls the
   authoritative list through the normal REST endpoint, which is already scoped
   by ``OrderViewSet._scope_queryset``. A mis-scoped group therefore can never
@@ -139,7 +139,7 @@ def broadcast_order_event(order, *, event: str = 'updated') -> None:
             'type': 'order',
             'event': event,  # 'created' | 'updated' | 'deleted'
             'order_id': getattr(order, 'id', None),
-            'order_status': getattr(order, 'order_status', None),
+            'status': getattr(order, 'status', None),
             'source': getattr(order, 'source', None),
             'is_deleted': bool(getattr(order, 'is_deleted', False)),
         }

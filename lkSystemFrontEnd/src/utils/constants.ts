@@ -7,7 +7,10 @@ export const API_CONFIG = {
   BASE_URL:
     (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
     '', // Empty string = use relative URLs (http://localhost/api/...) in Docker
-  TIMEOUT: 10000,
+  // 30s: list/summary endpoints can legitimately take a while when gunicorn
+  // workers are busy with outbound WooCommerce/delivery calls; 10s produced
+  // spurious "timeout of 10000ms exceeded" failures on the orders dashboard.
+  TIMEOUT: 30000,
   RETRY_ATTEMPTS: 3,
 } as const;
 

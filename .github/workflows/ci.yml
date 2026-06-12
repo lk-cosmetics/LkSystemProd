@@ -98,6 +98,20 @@ jobs:
       - name: Apply migrations against the CI database
         run: python manage.py migrate --no-input
 
+      - name: Run unit + integration tests
+        # Auto-discovers every ``test_*.py`` module — new test files are picked
+        # up without touching this workflow — plus the three apps that use a
+        # flat ``tests.py``. The legacy ``test_workspace*`` tests are excluded:
+        # they predate tests-in-CI and assert an outdated workspace-switch
+        # permission rule (tracked for a follow-up fix), so they would red-flag
+        # the gate without reflecting a real regression.
+        run: |
+          modules=$(find apps -name 'test_*.py' -not -path '*test_workspace*' \
+            | sed -E 's#/#.#g; s#\.py$##')
+          python manage.py test $modules \
+            apps.clients.tests apps.company.tests apps.notifications.tests \
+            --verbosity=2
+
   # ─── Frontend ─────────────────────────────────────────────────────────────
   frontend:
     name: Vite build
@@ -118,6 +132,11 @@ jobs:
 
       - name: Install dependencies (clean)
         run: npm ci --no-audit --no-fund
+
+      - name: Unit tests (Vitest)
+        # Pure-logic unit tests (invoice data builders, chunk-error detection,
+        # …) under jsdom. Fails fast before the heavier build step.
+        run: npm run test
 
       - name: Type-check & build
         # The ``build`` script is ``tsc -b && vite build`` — a type error
