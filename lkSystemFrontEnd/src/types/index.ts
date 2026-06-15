@@ -1275,6 +1275,21 @@ export type OrderStatus =
 
 export type OrderSource = 'WOOCOMMERCE' | 'POS' | 'MANUAL';
 
+/** How an order's assigned employee was set. '' = never assigned. */
+export type AssignmentType = 'auto' | 'manual' | '';
+
+/** An employee that can receive orders, plus auto-assignment eligibility and
+ *  current open workload — drives the settings modal and the assign dropdown. */
+export interface AssignableEmployee {
+  id: number;
+  name: string;
+  matricule: string;
+  email: string;
+  role: string | null;
+  enabled: boolean;
+  open_orders: number;
+}
+
 /**
  * Social channel a manual / back-office order originated from. Distinct from
  * `OrderSource` (which records the *system* the order entered through).
@@ -1447,6 +1462,14 @@ export interface OrderListItem {
   edit_lock_heartbeat_at: string | null;
   edit_lock_expires_at: string | null;
   edit_lock_token: string;
+  // Assignment — who is responsible for processing the order.
+  assigned_agent: number | null;
+  assigned_agent_name: string | null;
+  assigned_by: number | null;
+  assigned_by_name: string | null;
+  assigned_at: string | null;
+  assignment_type: AssignmentType;
+  assignment_type_display: string;
   // Derived informational fields (never lifecycle)
   delivery_method: CleanDeliveryMethod;
   delivery_method_display: string;

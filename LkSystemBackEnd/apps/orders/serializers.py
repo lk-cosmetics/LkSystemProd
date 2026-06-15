@@ -164,6 +164,16 @@ class OrderListSerializer(serializers.ModelSerializer):
     packaged_by_name = serializers.CharField(
         source='packaged_by.get_full_name', read_only=True, default=None,
     )
+    # Assignment (auto on import + manual (re)assignment by a manager).
+    assigned_agent_name = serializers.CharField(
+        source='assigned_agent.get_full_name', read_only=True, default=None,
+    )
+    assigned_by_name = serializers.CharField(
+        source='assigned_by.get_full_name', read_only=True, default=None,
+    )
+    assignment_type_display = serializers.CharField(
+        source='get_assignment_type_display', read_only=True,
+    )
     # THE canonical lifecycle status (read-only — written only through
     # OrderStatusService.transition()).
     status_display = serializers.CharField(
@@ -232,6 +242,10 @@ class OrderListSerializer(serializers.ModelSerializer):
             'delete_reason', 'lifecycle_priority',
             'edit_locked_by', 'edit_locked_by_name', 'edit_locked_at',
             'edit_lock_heartbeat_at', 'edit_lock_expires_at', 'edit_lock_token',
+            # Assignment
+            'assigned_agent', 'assigned_agent_name',
+            'assigned_by', 'assigned_by_name',
+            'assigned_at', 'assignment_type', 'assignment_type_display',
             # Sync
             'synced_at',
             # Derived informational fields (never lifecycle)
@@ -767,3 +781,32 @@ class OrderLogSerializer(serializers.ModelSerializer):
     class Meta:
         model  = OrderLog
         fields = ['id', 'action', 'action_display', 'user', 'user_name', 'details', 'created_at']
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Assignment
+# ═════════════════════════════════════════════════════════════════════════════
+
+class OrderAssignSerializer(serializers.Serializer):
+    """Manual (re)assignment input. ``employee_id`` null/omitted clears it."""
+    employee_id = serializers.IntegerField(required=False, allow_null=True)
+
+
+class AssignableEmployeeSerializer(serializers.Serializer):
+    """An employee that can receive orders, with auto-assignment eligibility
+    and current open workload — drives the settings modal + assign dropdown."""
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+    matricule = serializers.CharField()
+    email = serializers.EmailField(required=False, allow_blank=True)
+    role = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    enabled = serializers.BooleanField()
+    open_orders = serializers.IntegerField()
+
+
+class AutoAssignmentSettingsUpdateSerializer(serializers.Serializer):
+    """PUT body — the COMPLETE set of employee ids eligible for auto-assignment.
+    Employees omitted from the list are disabled."""
+    employee_ids = serializers.ListField(
+        child=serializers.IntegerField(), allow_empty=True,
+    )

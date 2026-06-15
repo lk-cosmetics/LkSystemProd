@@ -36,6 +36,7 @@ const ManufacturingPage = lazyWithRetry(() => import('@/pages/ManufacturingPage'
 const CategoriesPage = lazyWithRetry(() => import('@/pages/CategoriesPage'));
 const PromotionsPage = lazyWithRetry(() => import('@/pages/PromotionsPage'));
 const OrdersPage = lazyWithRetry(() => import('@/pages/OrdersPage'));
+const MyOrdersPage = lazyWithRetry(() => import('@/pages/MyOrdersPage'));
 const InvoicesPage = lazyWithRetry(() => import('@/pages/InvoicesPage'));
 const ClientsPage = lazyWithRetry(() => import('@/pages/ClientsPage'));
 const POSPage = lazyWithRetry(() => import('@/pages/POSPage'));
@@ -198,6 +199,14 @@ export function AppRouter() {
               element={
                 <RoleGuard requiredPermission="view_orders">
                   <OrdersPage />
+                </RoleGuard>
+              }
+            />
+            <Route
+              path="my-orders"
+              element={
+                <RoleGuard requiredPermission="view_orders">
+                  <MyOrdersPage />
                 </RoleGuard>
               }
             />

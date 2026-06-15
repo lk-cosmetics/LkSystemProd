@@ -31,6 +31,15 @@ export interface OrderListParams {
   page?: number;
   page_size?: number;
   include_deleted?: boolean;
+  // Assignment filters
+  assigned_to?: number;
+  assigned_to_me?: boolean;
+  unassigned?: boolean;
+  assignment_type?: 'auto' | 'manual';
+}
+
+export interface AssignmentSettingsResponse {
+  employees: import('@/types').AssignableEmployee[];
 }
 
 export interface InvoiceListParams {
@@ -202,7 +211,9 @@ export interface ProcessReturnOptions {
 }
 
 /** Bulk lifecycle actions runnable over a selection of orders. */
-export type BulkOrderAction = 'send_to_pos' | 'submit_delivery' | 'cancel' | 'delete';
+export type BulkOrderAction =
+  | 'send_to_pos' | 'submit_delivery' | 'cancel' | 'delete'
+  | 'assign' | 'auto_assign' | 'unassign';
 
 export interface BulkOrderResultItem {
   id: number;
@@ -298,6 +309,35 @@ export const orderService = {
     const { data } = await apiClient.post<OrderDetail>(
       `/api/v1/orders/${id}/transition/`,
       { status, ...options }
+    );
+    return data;
+  },
+
+  /**
+   * Manually (re)assign an order to an employee. Pass `null` to clear the
+   * assignment. Requires the `assign_orders` permission (enforced server-side).
+   */
+  async assign(id: number, employeeId: number | null) {
+    const { data } = await apiClient.post<OrderDetail>(
+      `/api/v1/orders/${id}/assign/`,
+      { employee_id: employeeId }
+    );
+    return data;
+  },
+
+  /** Auto-assignment pool: every company employee + eligibility + open load. */
+  async getAssignmentSettings() {
+    const { data } = await apiClient.get<AssignmentSettingsResponse>(
+      '/api/v1/orders/assignment-settings/'
+    );
+    return data;
+  },
+
+  /** Replace the complete set of employees eligible for auto-assignment. */
+  async updateAssignmentSettings(employeeIds: number[]) {
+    const { data } = await apiClient.put<AssignmentSettingsResponse>(
+      '/api/v1/orders/assignment-settings/',
+      { employee_ids: employeeIds }
     );
     return data;
   },
@@ -549,7 +589,7 @@ export const orderService = {
   async bulkAction(
     action: BulkOrderAction,
     ids: number[],
-    options?: { pos_sales_channel?: number; reason?: string }
+    options?: { pos_sales_channel?: number; reason?: string; employee_id?: number }
   ): Promise<BulkOrderResponse> {
     const { data } = await apiClient.post<BulkOrderResponse>(
       '/api/v1/orders/bulk/',

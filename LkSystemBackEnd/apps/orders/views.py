@@ -38,7 +38,7 @@ from apps.rbac.services import PermissionService
 from apps.rbac.models import UserRole
 from apps.sales_channels.models import SalesChannel
 from apps.clients.models import Client
-from .models import Order, OrderLog, OrderSyncEvent
+from .models import Order, OrderLog, OrderSyncEvent, OrderAutoAssignmentSetting
 from .serializers import (
     OrderListSerializer,
     OrderDetailSerializer,
@@ -62,6 +62,9 @@ from .serializers import (
     OrderSyncEventSerializer,
     InvoiceListSerializer,
     InvoiceMutationSerializer,
+    OrderAssignSerializer,
+    AssignableEmployeeSerializer,
+    AutoAssignmentSettingsUpdateSerializer,
 )
 from .filters import OrderFilterSet
 from .order_management_service import OrderManagementService
@@ -71,6 +74,7 @@ from .woocommerce_sync_service import WooCommerceSyncService
 from .kpi_service import OrderKPIService
 from .delivery_service import DeliveryError
 from .logging_service import OrderLoggingService
+from .assignment_service import OrderAssignmentService, OPEN_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -380,6 +384,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         qs = base_qs.select_related(
             'company', 'brand', 'sales_channel', 'pos_sales_channel', 'client',
             'created_by', 'deleted_by', 'packaged_by', 'edit_locked_by',
+            'assigned_agent', 'assigned_by',
         )
         qs = self._with_queue_annotations(qs)
 
@@ -876,6 +881,124 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response(OrderDetailSerializer(order).data, status=status.HTTP_201_CREATED)
 
+    # ── Assignment (manual (re)assignment + auto-assignment pool) ─────────
+
+    @staticmethod
+    def _assignable_employees_payload(company):
+        """Active employees of ``company`` with auto-assignment eligibility and
+        current open workload — powers the settings modal and assign dropdown."""
+        open_filter = Q(
+            assigned_orders__company=company,
+            assigned_orders__is_deleted=False,
+            assigned_orders__status__in=OPEN_STATUSES,
+        )
+        employees = (
+            company.employees
+            .filter(is_active=True)
+            .annotate(open_orders=Count('assigned_orders', filter=open_filter, distinct=True))
+            .order_by('first_name', 'last_name', 'matricule')
+        )
+        enabled_ids = set(
+            OrderAutoAssignmentSetting.objects
+            .filter(company=company, enabled=True)
+            .values_list('employee_id', flat=True)
+        )
+        rows = []
+        for emp in employees:
+            roles = PermissionService.get_user_role_names(emp)
+            rows.append({
+                'id': emp.id,
+                'name': emp.get_full_name() or emp.matricule,
+                'matricule': emp.matricule,
+                'email': emp.email,
+                'role': roles[0] if roles else None,
+                'enabled': emp.id in enabled_ids,
+                'open_orders': emp.open_orders,
+            })
+        return rows
+
+    @action(detail=True, methods=['post'], url_path='assign')
+    def assign(self, request, pk=None):
+        """POST /orders/{id}/assign/ — body: {"employee_id": <id|null>}.
+
+        Manager-only manual (re)assignment. ``employee_id`` null/omitted clears
+        the assignment. Every (re)assignment is audited by the service.
+        """
+        order = self.get_object()
+        self._require_permission(request.user, 'assign_orders', order)
+
+        serializer = OrderAssignSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        employee_id = serializer.validated_data.get('employee_id')
+
+        if employee_id is None:
+            OrderAssignmentService.unassign(order, actor=request.user)
+            return Response(OrderDetailSerializer(order).data)
+
+        employee = order.company.employees.filter(id=employee_id, is_active=True).first()
+        if employee is None:
+            return Response(
+                {'employee_id': ['No active employee with this id in this company.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        OrderAssignmentService.manual_assign(order, employee, actor=request.user)
+        return Response(OrderDetailSerializer(order).data)
+
+    @action(detail=False, methods=['get', 'put'], url_path='assignment-settings')
+    def assignment_settings(self, request):
+        """GET/PUT /orders/assignment-settings/ — the auto-assignment pool.
+
+        GET  → every active company employee with their auto-assignment
+               eligibility and current open workload.
+        PUT  → body {"employee_ids": [...]} sets the COMPLETE eligible set
+               (employees omitted are disabled).
+        Both require the ``assign_orders`` permission.
+        """
+        self._require_permission(request.user, 'assign_orders')
+        company = getattr(request.user, 'current_company', None)
+        if company is None:
+            return Response(
+                {'detail': 'No active company. Select a company first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if request.method == 'PUT':
+            serializer = AutoAssignmentSettingsUpdateSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            desired = set(serializer.validated_data['employee_ids'])
+            valid_ids = set(
+                company.employees
+                .filter(id__in=desired, is_active=True)
+                .values_list('id', flat=True)
+            )
+            invalid = desired - valid_ids
+            if invalid:
+                return Response(
+                    {'employee_ids': [f'Not active employees of this company: {sorted(invalid)}.']},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            with transaction.atomic():
+                for emp_id in valid_ids:
+                    obj, created = OrderAutoAssignmentSetting.objects.get_or_create(
+                        company=company, employee_id=emp_id,
+                        defaults={
+                            'enabled': True,
+                            'created_by': request.user,
+                            'updated_by': request.user,
+                        },
+                    )
+                    if not created and not obj.enabled:
+                        obj.enabled = True
+                        obj.updated_by = request.user
+                        obj.save(update_fields=['enabled', 'updated_by', 'updated_at'])
+                # Disable everyone no longer in the eligible set.
+                OrderAutoAssignmentSetting.objects.filter(company=company).exclude(
+                    employee_id__in=valid_ids,
+                ).update(enabled=False, updated_by=request.user)
+
+        payload = self._assignable_employees_payload(company)
+        return Response({'employees': AssignableEmployeeSerializer(payload, many=True).data})
+
     # ── Canonical lifecycle transition ───────────────────────────────────
 
     @action(detail=True, methods=['post'], url_path='transition')
@@ -1082,6 +1205,9 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             'submit_delivery': 'send_to_delivery_orders',
             'cancel': 'cancel_orders_lifecycle',
             'delete': 'soft_delete_orders',
+            'assign': 'assign_orders',
+            'auto_assign': 'assign_orders',
+            'unassign': 'assign_orders',
         }
         if action_name not in perm_by_action:
             return Response(
@@ -1098,6 +1224,30 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             if pos_channel is None:
                 return Response(
                     {'detail': 'pos_sales_channel is required to send orders to POS.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Resolve / validate the assignment target up front (mirrors pos_channel).
+        assign_employee = None
+        if action_name in ('assign', 'auto_assign'):
+            company = getattr(request.user, 'current_company', None)
+            if company is None:
+                return Response(
+                    {'detail': 'No active company. Select a company first.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if action_name == 'assign':
+                assign_employee = company.employees.filter(
+                    id=request.data.get('employee_id') or 0, is_active=True,
+                ).first()
+                if assign_employee is None:
+                    return Response(
+                        {'detail': 'employee_id is required and must be an active employee of this company.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            elif not OrderAssignmentService.eligible_employee_ids(company):
+                return Response(
+                    {'detail': 'No employees are in the auto-assignment pool. Configure it first.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -1124,6 +1274,12 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                     OrderLifecycleService.cancel(
                         order, actor=request.user, reason=reason or 'Bulk cancellation',
                     )
+                elif action_name == 'assign':
+                    OrderAssignmentService.manual_assign(order, assign_employee, actor=request.user)
+                elif action_name == 'auto_assign':
+                    OrderAssignmentService.auto_assign_now(order, actor=request.user)
+                elif action_name == 'unassign':
+                    OrderAssignmentService.unassign(order, actor=request.user)
                 else:  # delete
                     OrderManagementService.soft_delete_order(
                         order=order, actor=request.user, reason=reason or 'Bulk delete',

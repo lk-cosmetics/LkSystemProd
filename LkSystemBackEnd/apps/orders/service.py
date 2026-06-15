@@ -345,6 +345,21 @@ class OrderIngestionService:
                 client.id, client.number_of_orders
             )
 
+        # 9. auto-assign brand-new WooCommerce/API imports to a pool employee.
+        # Best-effort, savepoint-isolated: a failure here must never roll back
+        # or block the import. POS/manual orders are handled by the person who
+        # created them, so they are intentionally out of scope.
+        if is_new and source == Order.Source.WOOCOMMERCE:
+            try:
+                with transaction.atomic():
+                    from apps.orders.assignment_service import OrderAssignmentService
+                    OrderAssignmentService.auto_assign(order)
+            except Exception:
+                logger.exception(
+                    "Auto-assignment failed for order %s; left unassigned",
+                    order.order_number,
+                )
+
         action = 'created' if is_new else 'updated'
         logger.info(
             "Order %s %s (%s) via %s [company=%s]",
