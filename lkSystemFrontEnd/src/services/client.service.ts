@@ -66,7 +66,9 @@ export const clientService = {
    * @returns Created client object with auto-assigned brand and metadata
    */
   async createFromPOS(payload: CreateClientFromPOSRequest) {
-    const { data } = await apiClient.post<Client>(
+    // `existing: true` means the customer was already on file and the backend
+    // returned the matched client instead of creating a duplicate.
+    const { data } = await apiClient.post<Client & { existing?: boolean }>(
       '/api/v1/clients/create-from-pos/',
       payload
     );

@@ -515,6 +515,13 @@ class OrderLifecycleService:
             order, Order.Status.PACKAGING, actor=actor,
             note=f'sent to POS {pos_sales_channel.name}',
         )
+        # Tell the till's cashier(s) an order is waiting (best-effort; the
+        # notification itself fans out after commit and never raises).
+        try:
+            from apps.notifications.services import NotificationService
+            NotificationService.order_sent_to_pos(order, actor=actor)
+        except Exception:  # pragma: no cover - notifications must never block routing
+            pass
         return order
 
     @classmethod

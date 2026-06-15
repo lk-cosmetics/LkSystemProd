@@ -6,6 +6,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Q, Sum
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
@@ -181,17 +182,56 @@ class ClientViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             context={'request': request}
         )
         serializer.is_valid(raise_exception=True)
-        
-        # ✨ Only pass created_by for audit trail
-        # ✨ Company is auto-extracted from sales_channel.brand.company
-        client = serializer.save(
-            created_by=request.user
-        )
-        
+
+        # The serializer already selects an existing client (matched by phone or
+        # email within the channel's company) instead of failing. Wrap the save
+        # so any remaining unique collision (e.g. an email already in use) also
+        # resolves to "select the existing client" rather than a raw 400 — POS
+        # must never dead-end when the customer is already on file.
+        try:
+            with transaction.atomic():
+                client = serializer.save(created_by=request.user)
+        except IntegrityError:
+            existing = self._find_existing_pos_client(request)
+            if existing is not None:
+                return Response(
+                    {**ClientCreateFromPOSSerializer(existing).data, 'existing': True},
+                    status=status.HTTP_200_OK,
+                )
+            return Response(
+                {'detail': 'A client with this email or phone number already exists.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        was_existing = bool(getattr(client, '_was_existing', False))
         return Response(
-            ClientCreateFromPOSSerializer(client).data,
-            status=status.HTTP_201_CREATED
+            {**ClientCreateFromPOSSerializer(client).data, 'existing': was_existing},
+            status=status.HTTP_200_OK if was_existing else status.HTTP_201_CREATED,
         )
+
+    @staticmethod
+    def _find_existing_pos_client(request):
+        """Best-effort lookup of the client a POS create collided with, scoped to
+        the sales-channel's company (phone first, then email)."""
+        from apps.sales_channels.models import SalesChannel
+        from .utils import normalize_tunisian_phone
+        sc = (
+            SalesChannel.objects.select_related('brand__company')
+            .filter(id=request.data.get('sales_channel') or 0)
+            .first()
+        )
+        if sc is None or sc.brand is None:
+            return None
+        company = sc.brand.company
+        phone = (request.data.get('phone') or '').strip()
+        email = (request.data.get('email') or '').strip().lower()
+        normalized = normalize_tunisian_phone(phone) if phone else None
+        client = None
+        if normalized:
+            client = Client.objects.filter(company=company, phone_normalized=normalized).first()
+        if client is None and email:
+            client = Client.objects.filter(company=company, email=email).first()
+        return client
 
     @action(detail=True, methods=['patch'], url_path='block')
     def block(self, request, pk=None):

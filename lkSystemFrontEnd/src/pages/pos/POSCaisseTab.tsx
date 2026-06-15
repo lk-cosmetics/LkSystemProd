@@ -46,7 +46,7 @@ import {
   type CashDeposit,
   type CashDepositKind,
   type CaisseStats,
-  type CaisseHistoryRow,
+  type CaisseMovement,
   type ExpenseCategory,
 } from '@/services/expense.service';
 
@@ -54,6 +54,14 @@ const fmtTND = (raw: string | number): string => {
   const n = typeof raw === 'string' ? Number(raw) : raw;
   if (Number.isNaN(n)) return '0.000';
   return n.toLocaleString('fr-FR', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+};
+
+// Per-type badge colour for the caisse journal (Historique de caisse).
+const MOVEMENT_BADGE: Record<string, string> = {
+  sale: 'border-emerald-200 text-emerald-700',
+  return: 'border-red-200 text-red-700',
+  expense: 'border-amber-200 text-amber-700',
+  deposit: 'border-blue-200 text-blue-700',
 };
 
 // A failed request with no HTTP response is a connectivity problem (offline /
@@ -152,7 +160,7 @@ export function CaisseStatsBanner({ stats, loading }: { stats: CaisseStats | nul
 export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0, onAfterChange }: Props) {
   const [stats, setStats] = useState<CaisseStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
-  const [historyRows, setHistoryRows] = useState<CaisseHistoryRow[]>([]);
+  const [journal, setJournal] = useState<CaisseMovement[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [deposits, setDeposits] = useState<CashDeposit[]>([]);
@@ -200,7 +208,7 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
   const refresh = useCallback(async () => {
     if (!channelId) {
       setStats(null);
-      setHistoryRows([]);
+      setJournal([]);
       setExpenses([]);
       setDeposits([]);
       setPending([]);
@@ -210,9 +218,9 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
     setListLoading(true);
     setHistoryLoading(true);
     try {
-      const [s, history, expList, depList, pendingOps] = await Promise.all([
+      const [s, journalRes, expList, depList, pendingOps] = await Promise.all([
         expenseService.caisseStats(channelId).catch(() => null),
-        expenseService.caisseHistory(channelId).catch(() => [] as CaisseHistoryRow[]),
+        expenseService.caisseJournal(channelId).catch(() => null),
         expenseService.list({ sales_channel: channelId, date_from: todayISO, date_to: todayISO })
           .catch(() => [] as Expense[]),
         cashDepositService.list({ sales_channel: channelId, date_from: todayISO, date_to: todayISO })
@@ -220,7 +228,7 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
         offlineCaisseService.listPending(channelId).catch(() => [] as PendingCaisseOp[]),
       ]);
       setStats(s);
-      setHistoryRows(history);
+      setJournal(journalRes?.movements ?? []);
       setExpenses(expList);
       setDeposits(depList);
       setPending(pendingOps);
@@ -600,7 +608,7 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
         <div className="mb-3 flex items-center justify-between gap-2">
           <div>
             <p className="text-sm font-medium">Historique de caisse</p>
-            <p className="text-xs text-muted-foreground">Ventes, alimentations, dépenses et solde espèces par jour.</p>
+            <p className="text-xs text-muted-foreground">Ventes, retours, dépenses et alimentations — par transaction.</p>
           </div>
           <Badge variant="secondary" className="text-[11px]">14 jours</Badge>
         </div>
@@ -609,37 +617,47 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
           <div className="py-6 text-center text-xs text-muted-foreground">
             <Loader2 className="mr-1.5 inline size-4 animate-spin" /> Chargement…
           </div>
-        ) : historyRows.length === 0 ? (
-          <p className="py-6 text-center text-xs text-muted-foreground">Aucun historique de caisse.</p>
+        ) : journal.length === 0 ? (
+          <p className="py-6 text-center text-xs text-muted-foreground">Aucun mouvement de caisse.</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[640px] text-sm">
+            <table className="w-full min-w-[560px] text-sm">
               <thead>
                 <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-                  <th className="py-2 font-medium">Date</th>
-                  <th className="py-2 text-right font-medium">Tickets</th>
-                  <th className="py-2 text-right font-medium">Ventes</th>
-                  <th className="py-2 text-right font-medium">Alimentation</th>
-                  <th className="py-2 text-right font-medium">Dépenses</th>
-                  <th className="py-2 text-right font-medium">Solde caisse</th>
+                  <th className="py-2 font-medium">Date &amp; heure</th>
+                  <th className="py-2 font-medium">Type</th>
+                  <th className="py-2 font-medium">Détail</th>
+                  <th className="py-2 text-right font-medium">Montant</th>
                 </tr>
               </thead>
               <tbody>
-                {historyRows.map(row => {
-                  const bal = Number(row.cash_balance);
-                  const balColor = bal >= 0 ? 'text-emerald-700' : 'text-red-700';
+                {journal.map(m => {
+                  const isIn = m.direction === 'in';
                   return (
-                    <tr key={row.date} className="border-b last:border-0">
-                      <td className="py-2 font-medium">
-                        {new Date(`${row.date}T00:00:00`).toLocaleDateString('fr-FR', {
+                    <tr key={m.id} className="border-b last:border-0">
+                      <td className="py-2 whitespace-nowrap text-xs text-muted-foreground">
+                        {new Date(m.occurred_at).toLocaleString('fr-FR', {
                           day: '2-digit', month: '2-digit', year: 'numeric',
+                          hour: '2-digit', minute: '2-digit',
                         })}
                       </td>
-                      <td className="py-2 text-right tabular-nums">{row.revenue_count}</td>
-                      <td className="py-2 text-right tabular-nums">{fmtTND(row.revenue)}</td>
-                      <td className="py-2 text-right tabular-nums text-emerald-700">+ {fmtTND(row.funding_total)}</td>
-                      <td className="py-2 text-right tabular-nums text-red-700">− {fmtTND(row.expenses)}</td>
-                      <td className={`py-2 text-right font-semibold tabular-nums ${balColor}`}>{fmtTND(row.cash_balance)}</td>
+                      <td className="py-2">
+                        <Badge variant="outline" className={`text-[10px] ${MOVEMENT_BADGE[m.type] ?? ''}`}>
+                          {m.type_display}
+                        </Badge>
+                      </td>
+                      <td className="py-2">
+                        <span className="break-words">{m.detail}</span>
+                        {m.type === 'sale' && m.payment_method && (
+                          <span className="ml-1.5 text-[11px] text-muted-foreground">· {m.payment_method}</span>
+                        )}
+                        {m.created_by_name && (
+                          <span className="ml-1.5 text-[11px] text-muted-foreground">· {m.created_by_name}</span>
+                        )}
+                      </td>
+                      <td className={`py-2 text-right font-semibold tabular-nums ${isIn ? 'text-emerald-700' : 'text-red-700'}`}>
+                        {isIn ? '+' : '−'} {fmtTND(m.amount)}
+                      </td>
                     </tr>
                   );
                 })}

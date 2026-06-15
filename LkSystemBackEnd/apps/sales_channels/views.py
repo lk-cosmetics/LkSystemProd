@@ -397,7 +397,10 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             pos_validated_at__gte=start,
             pos_validated_at__lte=end,
         ).exclude(
-            status__in=[Order.Status.CANCELLED, Order.Status.REFUNDED],
+            # Canonical lifecycle values are CANCELED / RETURNED (the old
+            # CANCELLED / REFUNDED members no longer exist — referencing them
+            # raised AttributeError and 500'd every caisse-stats call).
+            status__in=[Order.Status.CANCELED, Order.Status.RETURNED],
         ).exclude(
             returned_at__isnull=False,
         )
@@ -562,6 +565,108 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             })
             day -= timedelta(days=1)
         return Response(rows)
+
+    @action(detail=False, methods=['get'], url_path='caisse-journal')
+    def caisse_journal(self, request):
+        """Per-transaction caisse journal: every cash movement (sales, returns,
+        expenses, alimentations) as its OWN row with a full timestamp, newest
+        first. Powers the POS 'Historique de caisse' journal view. A sale shows
+        on its validation date as money IN; a later return shows on its return
+        date as money OUT — so a refunded order appears as both events."""
+        from apps.orders.models import Order
+
+        sc_id = request.query_params.get('sales_channel')
+        if not sc_id:
+            return Response(
+                {'detail': 'sales_channel query parameter is required.'},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+        channel, response = self._get_pos_channel_or_response(sc_id)
+        if response is not None:
+            return response
+
+        today = timezone.localdate()
+        date_to_arg = request.query_params.get('date_to')
+        date_from_arg = request.query_params.get('date_from')
+        try:
+            date_to = datetime.fromisoformat(date_to_arg).date() if date_to_arg else today
+            date_from = (
+                datetime.fromisoformat(date_from_arg).date()
+                if date_from_arg else date_to - timedelta(days=13)
+            )
+        except ValueError:
+            return Response({'detail': 'Invalid date range.'}, status=http_status.HTTP_400_BAD_REQUEST)
+        if date_from > date_to:
+            return Response({'detail': 'date_from cannot be after date_to.'}, status=http_status.HTTP_400_BAD_REQUEST)
+        if (date_to - date_from).days > 60:
+            return Response({'detail': 'Date range cannot exceed 60 days.'}, status=http_status.HTTP_400_BAD_REQUEST)
+
+        start = _day_bounds(date_from)[0]
+        end = _day_bounds(date_to)[1]
+        channel_q = Q(pos_sales_channel=channel) | Q(source=Order.Source.POS, sales_channel=channel)
+        movements = []
+
+        def _name(obj):
+            return (obj.created_by.get_full_name() if getattr(obj, 'created_by_id', None) else '') or None
+
+        # Sales — money IN (the sale event, on its validation date).
+        for o in (
+            Order.objects.filter(channel_q, pos_validated_at__gte=start, pos_validated_at__lte=end)
+            .exclude(status=Order.Status.CANCELED).select_related('created_by')
+        ):
+            method = (o.payment_method or '').strip()
+            movements.append({
+                'id': f'sale-{o.id}', 'type': 'sale', 'type_display': 'Vente',
+                'occurred_at': o.pos_validated_at.isoformat(),
+                'amount': str(o.total), 'direction': 'in',
+                'detail': o.order_number, 'payment_method': method or 'cash',
+                'is_cash': method.lower() in ('', 'cash', 'espèces', 'especes'),
+                'created_by_name': _name(o),
+            })
+
+        # Returns — money OUT (refund), on the return date.
+        for o in (
+            Order.objects.filter(channel_q, returned_at__gte=start, returned_at__lte=end)
+            .select_related('created_by')
+        ):
+            movements.append({
+                'id': f'return-{o.id}', 'type': 'return', 'type_display': 'Retour',
+                'occurred_at': o.returned_at.isoformat(),
+                'amount': str(o.total), 'direction': 'out',
+                'detail': o.order_number, 'created_by_name': _name(o),
+            })
+
+        # Expenses (incl. refunds recorded as expenses) — money OUT.
+        for e in Expense.objects.filter(
+            sales_channel=channel, occurred_at__gte=start, occurred_at__lte=end,
+        ).select_related('created_by'):
+            movements.append({
+                'id': f'expense-{e.id}', 'type': 'expense', 'type_display': e.get_category_display(),
+                'occurred_at': e.occurred_at.isoformat(),
+                'amount': str(e.amount), 'direction': 'out',
+                'detail': e.note or e.get_category_display(), 'created_by_name': _name(e),
+            })
+
+        # Alimentations / deposits — money IN.
+        for d in CashDeposit.objects.filter(
+            sales_channel=channel, occurred_at__gte=start, occurred_at__lte=end,
+        ).select_related('created_by'):
+            movements.append({
+                'id': f'deposit-{d.id}', 'type': 'deposit', 'type_display': d.get_kind_display(),
+                'occurred_at': d.occurred_at.isoformat(),
+                'amount': str(d.amount), 'direction': 'in',
+                'detail': d.note or d.get_kind_display(), 'created_by_name': _name(d),
+            })
+
+        movements.sort(key=lambda m: m['occurred_at'], reverse=True)
+        return Response({
+            'sales_channel': channel.id,
+            'sales_channel_name': channel.name,
+            'currency': 'TND',
+            'date_from': date_from.isoformat(),
+            'date_to': date_to.isoformat(),
+            'movements': movements[:500],
+        })
 
 
 class CashDepositViewSet(viewsets.ModelViewSet):

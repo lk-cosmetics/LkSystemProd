@@ -74,6 +74,31 @@ export interface CaisseHistoryRow {
   cash_balance: string;
 }
 
+/** One row in the per-transaction caisse journal (Historique de caisse). */
+export type CaisseMovementType = 'sale' | 'return' | 'expense' | 'deposit';
+
+export interface CaisseMovement {
+  id: string;
+  type: CaisseMovementType;
+  type_display: string;
+  occurred_at: string;        // full ISO datetime
+  amount: string;
+  direction: 'in' | 'out';
+  detail: string;
+  payment_method?: string;
+  is_cash?: boolean;
+  created_by_name?: string | null;
+}
+
+export interface CaisseJournal {
+  sales_channel: number;
+  sales_channel_name: string;
+  currency: string;
+  date_from: string;
+  date_to: string;
+  movements: CaisseMovement[];
+}
+
 const BASE = '/api/v1/sales-channels/expenses/';
 
 export const EXPENSE_CATEGORY_OPTIONS: { value: ExpenseCategory; label: string }[] = [
@@ -118,6 +143,18 @@ export const expenseService = {
     params: { date_from?: string; date_to?: string } = {},
   ): Promise<CaisseHistoryRow[]> {
     const { data } = await apiClient.get(`${BASE}caisse-history/`, {
+      params: { sales_channel: salesChannel, ...params },
+    });
+    return data;
+  },
+
+  /** Per-transaction caisse journal — sales, returns, expenses, alimentations,
+   *  each with a full timestamp, newest first. */
+  async caisseJournal(
+    salesChannel: number,
+    params: { date_from?: string; date_to?: string } = {},
+  ): Promise<CaisseJournal> {
+    const { data } = await apiClient.get(`${BASE}caisse-journal/`, {
       params: { sales_channel: salesChannel, ...params },
     });
     return data;
