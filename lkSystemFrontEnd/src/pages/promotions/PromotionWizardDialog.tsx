@@ -50,6 +50,7 @@ import {
   useUpdatePromotionGroup,
 } from '@/hooks/queries/usePromotions';
 import { salesChannelService } from '@/services/salesChannel.service';
+import { isoToTunisLocal, nowTunisLocal, tunisLocalToIso } from '@/lib/tunisTime';
 import type {
   PromotionGroupDetail,
   PromotionStatus,
@@ -115,30 +116,12 @@ const INITIAL_DETAILS: DetailsState = {
   max_usage: '',
 };
 
-/** Convert an <input type="datetime-local"> value to an ISO string. */
-function toIso(local: string): string {
-  return local ? new Date(local).toISOString() : '';
-}
-
-/** Default the start-date input to "now" rounded to the minute. */
-function nowLocalInput(): string {
-  const d = new Date();
-  d.setSeconds(0, 0);
-  // YYYY-MM-DDTHH:MM
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60_000)
-    .toISOString()
-    .slice(0, 16);
-}
-
-/** Convert an ISO string back to a `<input type="datetime-local">` value. */
-function isoToLocalInput(iso: string | null | undefined): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60_000)
-    .toISOString()
-    .slice(0, 16);
-}
+// Schedule inputs are Tunisia wall-clock (`Africa/Tunis`) — converted to/from
+// UTC instants explicitly so the window is correct on any machine timezone.
+// See `@/lib/tunisTime`.
+const toIso = tunisLocalToIso;
+const nowLocalInput = nowTunisLocal;
+const isoToLocalInput = isoToTunisLocal;
 
 export function PromotionWizardDialog({
   open,
@@ -508,7 +491,12 @@ export function PromotionWizardDialog({
               </div>
 
               <div className="space-y-1.5">
-                <Label htmlFor="promo-start">Starts</Label>
+                <Label htmlFor="promo-start" className="flex items-center gap-2">
+                  <span>Starts</span>
+                  <span className="text-[11px] font-normal text-muted-foreground">
+                    Tunisia time (GMT+1)
+                  </span>
+                </Label>
                 <Input
                   id="promo-start"
                   type="datetime-local"

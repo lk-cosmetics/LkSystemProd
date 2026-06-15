@@ -83,6 +83,7 @@ import {
   usePromotionGroups,
 } from '@/hooks/queries/usePromotions';
 import { useQueryClient } from '@tanstack/react-query';
+import { TUNIS_TZ } from '@/lib/tunisTime';
 import { PromotionWizardDialog } from '@/pages/promotions/PromotionWizardDialog';
 import { PromotionGroupDetailsDialog } from '@/pages/promotions/PromotionGroupDetailsDialog';
 
@@ -110,7 +111,10 @@ function formatDate(iso: string | null | undefined) {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
+  // Promotion windows are Tunisia time — render in `Africa/Tunis` regardless
+  // of the viewer's machine timezone.
   return d.toLocaleDateString(undefined, {
+    timeZone: TUNIS_TZ,
     month: 'short',
     day: 'numeric',
     year: 'numeric',

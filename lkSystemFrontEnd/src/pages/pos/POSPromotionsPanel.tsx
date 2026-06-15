@@ -13,6 +13,7 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { promotionService } from '@/services/promotion.service';
 import { isPromotionLive } from '@/services/offlinePOS.service';
+import { TUNIS_TZ } from '@/lib/tunisTime';
 import type { PromotionListItem, SalesChannel } from '@/types';
 import { fmtTND } from './types';
 
@@ -29,6 +30,7 @@ function formatDiscount(promo: PromotionListItem): string {
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('fr-TN', {
+    timeZone: TUNIS_TZ,
     day: '2-digit',
     month: 'short',
     year: 'numeric',
