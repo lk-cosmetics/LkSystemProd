@@ -372,6 +372,9 @@ SYSTEM_ROLES: dict[str, dict] = {
             'view_dashboard',
             'view_products',
             'view_orders',
+            # Employees can pull/sync WooCommerce orders themselves (the
+            # "Sync WC" action on Order Management).
+            'import_orders',
             'update_unconfirmed_orders', 'update_confirmed_orders',
             'confirm_orders', 'delay_orders', 'cancel_orders_lifecycle',
             'send_to_pos_orders', 'send_to_delivery_orders',
@@ -411,3 +414,135 @@ LEGACY_ROLE_REMAP: dict[str, str] = {
     'Sales Rep': 'Employee',
 }
 LEGACY_ROLE_DEMOTE: list[str] = ['Viewer']
+
+
+# ── Page access registry ─────────────────────────────────────────────────
+# Maps each navigable application page to the permission that GATES it (the
+# sidebar item and the route guard both key off ``view_codename``) and to the
+# full set of codenames that belong to the page.
+#
+# This is the single source of truth for *page access* — exposed to the
+# frontend at ``GET /api/v1/rbac/pages/`` and used by the Roles → Page Access
+# manager. It introduces NO new permissions: a page is just a friendly grouping
+# of codenames the system already enforces.
+#
+#   • Turning a page ON for a role grants its ``view_codename`` — read access,
+#     so the page shows in the navigation and opens. Finer create/edit/delete
+#     grants stay in the granular permission editor.
+#   • Turning a page OFF strips EVERY codename in the page's bundle, so the
+#     backend (which already enforces these codenames on every endpoint via
+#     ``require_permission`` / ``ActionPermissionMixin``) denies the page's
+#     whole API surface — not merely its list view.
+#
+# ``category`` pulls in every SEED_PERMISSIONS codename of that category so the
+# bundle stays in sync automatically; ``codenames`` pins an explicit bundle
+# (used where one category backs two pages, e.g. the dashboard category holds
+# both ``view_dashboard`` and ``view_bi_dashboard``).
+
+_PERMISSIONS_BY_CATEGORY: dict[str, list[str]] = {}
+for _codename, _name, _category, _desc in SEED_PERMISSIONS:
+    _PERMISSIONS_BY_CATEGORY.setdefault(_category, []).append(_codename)
+
+_ALL_CODENAMES: frozenset[str] = frozenset(c for c, _, _, _ in SEED_PERMISSIONS)
+
+SEED_PAGES: list[dict] = [
+    {'key': 'dashboard', 'label': 'Dashboard', 'group': 'Overview',
+     'icon': 'dashboard', 'view_codename': 'view_bi_dashboard',
+     'codenames': ['view_bi_dashboard'],
+     'description': 'Executive dashboard and business-intelligence charts.'},
+    {'key': 'orders', 'label': 'Orders', 'group': 'Operations',
+     'icon': 'orders', 'view_codename': 'view_orders', 'category': 'orders',
+     'description': 'Order management, fulfilment workflow and the personal order queue.'},
+    {'key': 'pos', 'label': 'Point of Sale', 'group': 'Operations',
+     'icon': 'pos', 'view_codename': 'use_pos', 'category': 'pos',
+     'description': 'In-store point of sale and cash register.'},
+    {'key': 'clients', 'label': 'Clients', 'group': 'Operations',
+     'icon': 'clients', 'view_codename': 'view_clients', 'category': 'clients',
+     'description': 'Customer directory and loyalty.'},
+    {'key': 'invoices', 'label': 'Invoices', 'group': 'Operations',
+     'icon': 'invoices', 'view_codename': 'view_invoices', 'category': 'invoices',
+     'description': 'Generated invoice registry and invoice numbering.'},
+    {'key': 'products', 'label': 'Products', 'group': 'Catalogue',
+     'icon': 'products', 'view_codename': 'view_products', 'category': 'products',
+     'description': 'Product catalogue.'},
+    {'key': 'categories', 'label': 'Categories', 'group': 'Catalogue',
+     'icon': 'categories', 'view_codename': 'view_categories', 'category': 'categories',
+     'description': 'Product categories and hierarchy.'},
+    {'key': 'inventory', 'label': 'Inventory', 'group': 'Catalogue',
+     'icon': 'inventory', 'view_codename': 'view_inventory', 'category': 'inventory',
+     'description': 'Stock levels and inventory movements.'},
+    {'key': 'manufacturing', 'label': 'Manufacturing', 'group': 'Catalogue',
+     'icon': 'manufacturing', 'view_codename': 'view_manufacturing', 'category': 'manufacturing',
+     'description': 'Bills of materials and production batches.'},
+    {'key': 'promotions', 'label': 'Promotions', 'group': 'Catalogue',
+     'icon': 'promotions', 'view_codename': 'view_promotions', 'category': 'promotions',
+     'description': 'Promotions and discounts.'},
+    {'key': 'sales_channels', 'label': 'Sales Channels', 'group': 'Administration',
+     'icon': 'sales_channels', 'view_codename': 'view_sales_channels', 'category': 'sales_channels',
+     'description': 'Sales channels and store configuration.'},
+    {'key': 'brands', 'label': 'Brands', 'group': 'Administration',
+     'icon': 'brands', 'view_codename': 'view_brands', 'category': 'brands',
+     'description': 'Brand management and brand switching.'},
+    {'key': 'companies', 'label': 'Companies', 'group': 'Administration',
+     'icon': 'company', 'view_codename': 'view_company', 'category': 'company',
+     'description': 'Company profile and tenant settings.'},
+    {'key': 'users', 'label': 'Users', 'group': 'Administration',
+     'icon': 'users', 'view_codename': 'view_users', 'category': 'users',
+     'description': 'User accounts and invitations.'},
+    {'key': 'roles', 'label': 'Roles & Permissions', 'group': 'Administration',
+     'icon': 'roles', 'view_codename': 'view_roles', 'category': 'roles',
+     'description': 'Roles, permissions and page access.'},
+    {'key': 'settings', 'label': 'Settings', 'group': 'Administration',
+     'icon': 'settings', 'view_codename': 'view_settings', 'category': 'settings',
+     'description': 'Application settings and configuration.'},
+]
+
+
+def get_page_definitions() -> list[dict]:
+    """Resolve ``SEED_PAGES`` into full page dicts with their codename bundles.
+
+    A ``category`` page inherits every codename in that SEED_PERMISSIONS
+    category; a ``codenames`` page uses its explicit list. The page's
+    ``view_codename`` is always included in the bundle (first), so a freshly
+    enabled page always carries read access.
+    """
+    pages: list[dict] = []
+    for page in SEED_PAGES:
+        if 'codenames' in page:
+            codenames = list(page['codenames'])
+        else:
+            category = page.get('category', '')
+            # Fail loud on a typo'd / missing category rather than silently
+            # handing the page an empty bundle (which would make "disable page"
+            # a no-op and leave the API reachable).
+            if category not in _PERMISSIONS_BY_CATEGORY:
+                raise ValueError(
+                    f"SEED_PAGES entry '{page['key']}' references unknown permission "
+                    f"category '{category}'. Fix the category or pin explicit 'codenames'."
+                )
+            codenames = list(_PERMISSIONS_BY_CATEGORY[category])
+        view = page['view_codename']
+        if view not in _ALL_CODENAMES:
+            raise ValueError(
+                f"SEED_PAGES entry '{page['key']}' has unknown view_codename '{view}'."
+            )
+        # Every codename in a page bundle must be a real, seeded permission.
+        unknown = [c for c in codenames if c not in _ALL_CODENAMES]
+        if unknown:
+            raise ValueError(
+                f"SEED_PAGES entry '{page['key']}' references unknown codenames: {unknown}."
+            )
+        if view in codenames:
+            codenames = [view, *[c for c in codenames if c != view]]
+        else:
+            codenames = [view, *codenames]
+        pages.append({
+            'key': page['key'],
+            'label': page['label'],
+            'group': page['group'],
+            'icon': page.get('icon', page['key']),
+            'description': page.get('description', ''),
+            'view_codename': view,
+            'codenames': codenames,
+        })
+    return pages

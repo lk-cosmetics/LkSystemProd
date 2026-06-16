@@ -124,6 +124,7 @@ class LkSystemTokenObtainPairSerializer(TokenObtainPairSerializer):
             ),
             'current_brand_id': user.current_brand_id,
             'allowed_brand_ids': user.get_allowed_brand_ids(),
+            'hidden_pages': PermissionService.hidden_page_keys(user),
         }
 
         return data

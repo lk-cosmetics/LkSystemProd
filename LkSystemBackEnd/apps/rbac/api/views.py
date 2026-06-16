@@ -63,6 +63,32 @@ class PermissionViewSet(viewsets.ViewSet):
         return Response(result)
 
 
+# ── Pages endpoint ──────────────────────────────────────────────────────
+
+class PageViewSet(viewsets.ViewSet):
+    """
+    Read-only catalogue of navigable application pages and the permission
+    codenames that gate each one.
+
+    Powers the Roles → Page Access manager: enabling a page for a role grants
+    its ``view_codename`` (the page shows in the nav and opens); disabling it
+    strips the page's whole codename bundle. Page access is enforced by the
+    existing per-endpoint permission checks — this endpoint only describes the
+    pages, it does not grant anything.
+
+    Gated on ``view_roles`` (same as the role catalogue): the page-to-permission
+    map is part of the security model, so it's exposed only to role managers,
+    not to every authenticated user.
+    """
+
+    def get_permissions(self):
+        return [require_permission('view_roles')()]
+
+    def list(self, request):
+        from ..constants import get_page_definitions
+        return Response(get_page_definitions())
+
+
 # ── Role CRUD ───────────────────────────────────────────────────────────
 
 class RoleViewSet(viewsets.ModelViewSet):
@@ -176,6 +202,65 @@ class RoleViewSet(viewsets.ModelViewSet):
         from apps.rbac.provisioning import assert_within_ceiling
         assert_within_ceiling(self.request.user, requested)
 
+    def _guard_self_lockout(self, serializer, instance):
+        """Stop an actor from revoking their own role-management capability.
+
+        Removing ``edit_roles`` from a role the actor is assigned to — directly,
+        or via the Page Access "Disable all" / disabling the Roles page — would
+        lock them out of Role Management with no in-app recovery. A platform
+        admin / superuser is exempt (they can always recover). Only fires when
+        the edit actually changes the permission set AND the actor would be left
+        with no ``edit_roles`` anywhere.
+        """
+        if 'permissions' not in serializer.validated_data:
+            return  # permissions unchanged (e.g. a description-only PATCH)
+        user = self.request.user
+        if PermissionService.is_platform_admin(user):
+            return
+        if not UserRole.objects.filter(user=user, role=instance).exists():
+            return  # not the actor's own role — can't lock themselves out
+        new_codes = {
+            p.codename for p in serializer.validated_data.get('permissions', [])
+        }
+        if 'edit_roles' in new_codes:
+            return  # they keep role management through this very role
+        # Do they still hold ``edit_roles`` via any OTHER assigned role?
+        other_role_ids = (
+            UserRole.objects.filter(user=user)
+            .exclude(role=instance)
+            .values_list('role_id', flat=True)
+        )
+        keeps = AppPermission.objects.filter(
+            codename='edit_roles', roles__id__in=other_role_ids,
+        ).exists()
+        if not keeps:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied(
+                "You can't remove the 'Edit Roles' capability from a role you're "
+                "assigned to — it would lock you out of Role Management. Ask a "
+                "platform administrator if you need this changed."
+            )
+
+    def _guard_self_page_lockout(self, serializer, instance):
+        """Don't let an actor hide the Roles page from a role they're assigned
+        to — they'd keep ``edit_roles`` but lose the UI to reach it. Platform
+        admins are exempt; only fires when ``hidden_pages`` actually changes.
+        """
+        if 'hidden_pages' not in serializer.validated_data:
+            return
+        user = self.request.user
+        if PermissionService.is_platform_admin(user):
+            return
+        new_hidden = set(serializer.validated_data.get('hidden_pages') or [])
+        if 'roles' not in new_hidden:
+            return
+        if UserRole.objects.filter(user=user, role=instance).exists():
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied(
+                "You can't hide the Roles page from a role you're assigned to — "
+                "you'd lose access to Role Management."
+            )
+
     def _scope_platform_admin_role(self, serializer):
         """
         When a Super Admin creates a role while focused on a company
@@ -247,11 +332,15 @@ class RoleViewSet(viewsets.ModelViewSet):
             vd['scope_type'] = instance.scope_type
             vd['is_system'] = True
             self._enforce_permission_ceiling(serializer)
+            self._guard_self_lockout(serializer, instance)
+            self._guard_self_page_lockout(serializer, instance)
             serializer.save()
             return
 
         self._force_company_for_non_platform(serializer)
         self._enforce_permission_ceiling(serializer)
+        self._guard_self_lockout(serializer, instance)
+        self._guard_self_page_lockout(serializer, instance)
         serializer.save()
 
     def perform_destroy(self, instance):
