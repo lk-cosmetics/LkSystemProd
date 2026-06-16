@@ -183,117 +183,117 @@ class SalesChannel(models.Model):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# CAISSE EXPENSES
+# CAISSE — CASH MOVEMENTS (unified expenses + alimentations)
 # ─────────────────────────────────────────────────────────────────────────
 
 from decimal import Decimal
 from django.conf import settings
 
 
-class Expense(models.Model):
-    """Outgoing cash from a POS register (\"dépense\") — petty cash,
-    operating costs, supplies, taxi runs, etc. Each row decreases the
-    caisse net balance for the day it was booked.
+# Sub-categories, scoped by movement type. ``OTHER`` is shared. The model keeps
+# ``category`` as a plain CharField (valid values depend on ``movement_type``),
+# so validation + display labels live in code rather than a single DB enum.
+EXPENSE_CATEGORIES: dict[str, str] = {
+    "SUPPLIES":    "Supplies / Fournitures",
+    "UTILITY":     "Utility / Facture",
+    "TRANSPORT":   "Transport / Livraison",
+    "SALARY":      "Salary / Salaire",
+    "MAINTENANCE": "Maintenance / Réparation",
+    "REFUND":      "Refund / Remboursement client",
+    "OTHER":       "Other / Autre",
+}
+DEPOSIT_CATEGORIES: dict[str, str] = {
+    "OPENING": "Opening float / Fond de caisse",
+    "TOP_UP":  "Cash added / Alimentation",
+    "OTHER":   "Other / Autre",
+}
+CATEGORY_LABELS: dict[str, str] = {**EXPENSE_CATEGORIES, **DEPOSIT_CATEGORIES}
+
+
+class CashMovement(models.Model):
+    """A single cash movement at a POS register — one unified model for both
+    sides of the till:
+
+    * ``DEPOSIT`` (alimentation de caisse) — cash IN: the opening float or a
+      top-up. Increases the balance.
+    * ``EXPENSE`` (dépense) — cash OUT: petty cash, supplies, refunds, etc.
+      Decreases the balance.
+
+    ``amount`` is always stored positive; the direction is derived from
+    ``movement_type``. ``category`` holds the sub-type (see EXPENSE_CATEGORIES /
+    DEPOSIT_CATEGORIES). Removing a movement is a soft delete so the caisse
+    history can show both the original entry and its reversal.
     """
 
-    class Category(models.TextChoices):
-        SUPPLIES   = "SUPPLIES",   "Supplies / Fournitures"
-        UTILITY    = "UTILITY",    "Utility / Facture"
-        TRANSPORT  = "TRANSPORT",  "Transport / Livraison"
-        SALARY     = "SALARY",     "Salary / Salaire"
-        MAINTENANCE = "MAINTENANCE", "Maintenance / Réparation"
-        REFUND     = "REFUND",     "Refund / Remboursement client"
-        OTHER      = "OTHER",      "Other / Autre"
+    class Type(models.TextChoices):
+        EXPENSE = "expense", "Dépense"
+        DEPOSIT = "deposit", "Alimentation"
 
     company = models.ForeignKey(
         "company.Company", on_delete=models.CASCADE,
-        related_name="expenses",
+        related_name="cash_movements",
     )
     sales_channel = models.ForeignKey(
         "sales_channels.SalesChannel",
         on_delete=models.CASCADE,
-        related_name="expenses",
-        help_text="POS register the dépense was paid from.",
+        related_name="cash_movements",
+        help_text="POS register the cash moved through.",
+    )
+    movement_type = models.CharField(
+        max_length=10, choices=Type.choices, db_index=True,
+        help_text="expense = cash out, deposit = cash in.",
     )
     amount = models.DecimalField(max_digits=14, decimal_places=3, default=Decimal("0.000"))
-    category = models.CharField(max_length=24, choices=Category.choices, default=Category.OTHER)
+    category = models.CharField(
+        max_length=24, default="OTHER",
+        help_text="Sub-type; valid values depend on movement_type.",
+    )
     note = models.TextField(blank=True, default="")
-    occurred_at = models.DateTimeField(db_index=True, help_text="When the cash left the till.")
+    occurred_at = models.DateTimeField(db_index=True, help_text="When the cash moved.")
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL, null=True, blank=True,
-        related_name="expenses_created",
+        related_name="cash_movements_created",
+    )
+    # Soft delete: a removed movement is kept so the caisse history can show
+    # both the original entry and its later reversal. It no longer counts
+    # toward the till balance once deleted.
+    is_deleted = models.BooleanField(default=False, db_index=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="cash_movements_deleted",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         app_label = "sales_channels"
-        db_table = "pos_expense"
+        db_table = "pos_cash_movement"
         ordering = ["-occurred_at", "-id"]
         indexes = [
-            models.Index(fields=["sales_channel", "occurred_at"]),
+            models.Index(fields=["sales_channel", "movement_type", "occurred_at"]),
             models.Index(fields=["company", "occurred_at"]),
         ]
         constraints = [
             models.CheckConstraint(
                 check=models.Q(amount__gt=Decimal("0")),
-                name="expense_amount_gt_zero",
+                name="cash_movement_amount_gt_zero",
             ),
         ]
 
     def __str__(self):
-        return f"Dépense {self.amount} {self.get_category_display()} ({self.occurred_at.strftime('%Y-%m-%d')})"
+        return f"{self.get_movement_type_display()} {self.amount} {self.category_display} ({self.occurred_at.strftime('%Y-%m-%d')})"
 
+    @property
+    def is_deposit(self) -> bool:
+        return self.movement_type == self.Type.DEPOSIT
 
-class CashDeposit(models.Model):
-    """Incoming cash into a POS register ("alimentation de caisse") — the opening
-    float put in before work, or a top-up added during the day. Each row
-    increases the caisse balance for the day it was booked. Mirrors ``Expense``
-    (which is the cash-OUT side).
-    """
+    @property
+    def is_expense(self) -> bool:
+        return self.movement_type == self.Type.EXPENSE
 
-    class Kind(models.TextChoices):
-        OPENING = "OPENING", "Opening float / Fond de caisse"
-        TOP_UP  = "TOP_UP",  "Cash added / Alimentation"
-        OTHER   = "OTHER",   "Other / Autre"
-
-    company = models.ForeignKey(
-        "company.Company", on_delete=models.CASCADE,
-        related_name="cash_deposits",
-    )
-    sales_channel = models.ForeignKey(
-        "sales_channels.SalesChannel",
-        on_delete=models.CASCADE,
-        related_name="cash_deposits",
-        help_text="POS register the cash was added to.",
-    )
-    amount = models.DecimalField(max_digits=14, decimal_places=3, default=Decimal("0.000"))
-    kind = models.CharField(max_length=24, choices=Kind.choices, default=Kind.TOP_UP)
-    note = models.TextField(blank=True, default="")
-    occurred_at = models.DateTimeField(db_index=True, help_text="When the cash went into the till.")
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL, null=True, blank=True,
-        related_name="cash_deposits_created",
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        app_label = "sales_channels"
-        db_table = "pos_cash_deposit"
-        ordering = ["-occurred_at", "-id"]
-        indexes = [
-            models.Index(fields=["sales_channel", "occurred_at"]),
-            models.Index(fields=["company", "occurred_at"]),
-        ]
-        constraints = [
-            models.CheckConstraint(
-                check=models.Q(amount__gt=Decimal("0")),
-                name="cash_deposit_amount_gt_zero",
-            ),
-        ]
-
-    def __str__(self):
-        return f"Alimentation {self.amount} {self.get_kind_display()} ({self.occurred_at.strftime('%Y-%m-%d')})"
+    @property
+    def category_display(self) -> str:
+        return CATEGORY_LABELS.get(self.category, self.category)

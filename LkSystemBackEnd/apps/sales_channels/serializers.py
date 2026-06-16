@@ -209,62 +209,67 @@ class WebhookTokenSerializer(serializers.Serializer):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# CAISSE EXPENSES
+# CAISSE — CASH MOVEMENTS (unified expenses + alimentations)
 # ──────────────────────────────────────────────────────────────────────
 
-from .models import CashDeposit, Expense  # noqa: E402
+from .models import (  # noqa: E402
+    CashMovement, EXPENSE_CATEGORIES, DEPOSIT_CATEGORIES, CATEGORY_LABELS,
+)
 
 
-class ExpenseSerializer(serializers.ModelSerializer):
-    category_display = serializers.CharField(source='get_category_display', read_only=True)
+class CashMovementSerializer(serializers.ModelSerializer):
+    """One serializer for both sides of the till — expenses (cash out) and
+    alimentations / deposits (cash in), discriminated by ``movement_type``."""
+    movement_type_display = serializers.CharField(source='get_movement_type_display', read_only=True)
+    category_display = serializers.SerializerMethodField()
     sales_channel_name = serializers.CharField(source='sales_channel.name', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, default=None)
+    # Optional on the wire — defaults to "now" so a caller may omit it.
+    occurred_at = serializers.DateTimeField(required=False)
 
     class Meta:
-        model = Expense
+        model = CashMovement
         fields = [
             'id', 'company', 'sales_channel', 'sales_channel_name',
-            'amount', 'category', 'category_display',
-            'note', 'occurred_at',
+            'movement_type', 'movement_type_display',
+            'category', 'category_display',
+            'amount', 'note', 'occurred_at',
             'created_by', 'created_by_name',
+            'is_deleted', 'deleted_at',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['company', 'created_by', 'created_at', 'updated_at']
-
-    def validate(self, attrs):
-        sc = attrs.get('sales_channel')
-        if sc is None:
-            raise serializers.ValidationError({'sales_channel': 'Required.'})
-        # Caisse/expenses are available on every sales channel (POS and
-        # WooCommerce alike) — the POS page operates on any channel.
-        amount = attrs.get('amount')
-        if amount is None or amount <= 0:
-            raise serializers.ValidationError({'amount': 'Amount must be greater than zero.'})
-        return attrs
-
-
-class CashDepositSerializer(serializers.ModelSerializer):
-    """Caisse funding (alimentation) — cash IN. Mirror of ``ExpenseSerializer``."""
-    kind_display = serializers.CharField(source='get_kind_display', read_only=True)
-    sales_channel_name = serializers.CharField(source='sales_channel.name', read_only=True)
-    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, default=None)
-
-    class Meta:
-        model = CashDeposit
-        fields = [
-            'id', 'company', 'sales_channel', 'sales_channel_name',
-            'amount', 'kind', 'kind_display',
-            'note', 'occurred_at',
-            'created_by', 'created_by_name',
+        read_only_fields = [
+            'company', 'created_by', 'is_deleted', 'deleted_at',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['company', 'created_by', 'created_at', 'updated_at']
+
+    def get_category_display(self, obj) -> str:
+        return CATEGORY_LABELS.get(obj.category, obj.category)
 
     def validate(self, attrs):
-        sc = attrs.get('sales_channel')
+        from django.utils import timezone
+        if not attrs.get('occurred_at') and getattr(self.instance, 'occurred_at', None) is None:
+            attrs['occurred_at'] = timezone.now()
+        sc = attrs.get('sales_channel', getattr(self.instance, 'sales_channel', None))
         if sc is None:
             raise serializers.ValidationError({'sales_channel': 'Required.'})
-        amount = attrs.get('amount')
+        amount = attrs.get('amount', getattr(self.instance, 'amount', None))
         if amount is None or amount <= 0:
             raise serializers.ValidationError({'amount': 'Amount must be greater than zero.'})
+
+        movement_type = attrs.get(
+            'movement_type', getattr(self.instance, 'movement_type', None),
+        )
+        if movement_type not in (CashMovement.Type.EXPENSE, CashMovement.Type.DEPOSIT):
+            raise serializers.ValidationError(
+                {'movement_type': 'Must be "expense" or "deposit".'}
+            )
+        # Category must belong to the chosen side of the till.
+        valid = EXPENSE_CATEGORIES if movement_type == CashMovement.Type.EXPENSE else DEPOSIT_CATEGORIES
+        category = attrs.get('category', getattr(self.instance, 'category', None) or 'OTHER')
+        if category not in valid:
+            raise serializers.ValidationError(
+                {'category': f'Invalid category for a {movement_type}. Allowed: {", ".join(valid)}.'}
+            )
+        attrs['category'] = category
         return attrs
