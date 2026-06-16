@@ -108,6 +108,13 @@ export interface User {
   allowed_brand_ids?: number[];
   /** RBAC permission codenames (e.g. 'view_products', 'create_orders', 'use_pos'). */
   permissions: string[];
+  /**
+   * Page keys this user may NOT navigate to (denied per-role via Roles → Page
+   * Access). Navigation-only: it never reflects capability permissions, so a
+   * page can be hidden while the underlying permissions (e.g. create_orders for
+   * POS) remain intact.
+   */
+  hidden_pages?: string[];
   /** True only for the Django superuser (platform owner). Single root bypass. */
   is_superuser?: boolean;
   // Computed properties for backwards compatibility

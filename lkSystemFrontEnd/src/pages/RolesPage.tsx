@@ -27,6 +27,9 @@ import {
   CheckCircle2,
   Info,
   Copy,
+  Layers,
+  LayoutGrid,
+  Ban,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -34,6 +37,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -99,6 +103,7 @@ import {
   rbacService,
   type RBACRole,
   type PermissionGroup,
+  type PageDefinition,
   type UserRoleAssignment,
   type RoleCreateRequest,
 } from '@/services/rbac.service';
@@ -164,6 +169,29 @@ const CATEGORY_ICONS: Record<string, string> = {
   reports: '📈',
   settings: '⚙️',
 };
+
+// Emoji per page (keyed by the page's ``icon`` field from the backend catalogue).
+const PAGE_ICONS: Record<string, string> = {
+  dashboard: '📊',
+  orders: '🛒',
+  pos: '💳',
+  clients: '👥',
+  invoices: '🧾',
+  products: '📦',
+  categories: '📂',
+  inventory: '📋',
+  manufacturing: '🏭',
+  promotions: '🎯',
+  sales_channels: '📡',
+  brands: '🏷️',
+  company: '🏢',
+  users: '👤',
+  roles: '🔐',
+  settings: '⚙️',
+};
+
+// Stable display order for the page-access groups.
+const PAGE_GROUP_ORDER = ['Overview', 'Operations', 'Catalogue', 'Administration'];
 
 /* ═══════════════════════════════════════════════════════════════════════
    STAT CARD
@@ -554,6 +582,196 @@ function PermissionPicker({
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
+   PAGE ACCESS PICKER (high-level: which pages this role can open)
+   ═══════════════════════════════════════════════════════════════════════ */
+
+function PageAccessPicker({
+  pages,
+  selected,
+  hiddenPages,
+  grantableCodes,
+  onTogglePage,
+  onEnableAll,
+  onDisableAll,
+}: {
+  pages: PageDefinition[];
+  /** The role's current permission codenames being edited. */
+  selected: Set<string>;
+  /** Page keys explicitly denied to the role (navigation only). */
+  hiddenPages: Set<string>;
+  /** Codenames the actor may grant (null = no ceiling / platform admin). */
+  grantableCodes: Set<string> | null;
+  onTogglePage: (page: PageDefinition, enabled: boolean) => void;
+  onEnableAll: () => void;
+  onDisableAll: () => void;
+}) {
+  const [confirmDisableAll, setConfirmDisableAll] = useState(false);
+
+  // A page is accessible when the role holds its capability AND it isn't on
+  // the page denylist. Denying a page only adds it to ``hiddenPages`` — it
+  // never removes a permission.
+  const isEnabled = (p: PageDefinition) =>
+    selected.has(p.view_codename) && !hiddenPages.has(p.key);
+
+  const groups = useMemo(() => {
+    const m = new Map<string, PageDefinition[]>();
+    pages.forEach(p => {
+      const arr = m.get(p.group) ?? [];
+      arr.push(p);
+      m.set(p.group, arr);
+    });
+    return Array.from(m.entries())
+      .sort(
+        (a, b) =>
+          (PAGE_GROUP_ORDER.indexOf(a[0]) + 1 || 99) -
+          (PAGE_GROUP_ORDER.indexOf(b[0]) + 1 || 99),
+      )
+      .map(([group, items]) => ({ group, items }));
+  }, [pages]);
+
+  const enabledCount = pages.filter(isEnabled).length;
+
+  return (
+    <div className="flex flex-col gap-3 h-full">
+      {/* Toolbar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 px-2.5 py-1 bg-primary/10 rounded-lg self-start">
+          <Layers className="size-3.5 text-primary" />
+          <span className="text-sm font-semibold text-primary tabular-nums">{enabledCount}</span>
+          <span className="text-xs text-muted-foreground">/ {pages.length} pages</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onEnableAll}>
+            Enable all
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs"
+            disabled={enabledCount === 0}
+            onClick={() => setConfirmDisableAll(true)}
+          >
+            Disable all
+          </Button>
+        </div>
+      </div>
+
+      {/* Destructive bulk action — confirm before stripping every page. */}
+      <AlertDialog open={confirmDisableAll} onOpenChange={setConfirmDisableAll}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <Ban className="size-5 text-destructive" />
+              Disable all pages?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This hides every page from the role&apos;s navigation. It does{' '}
+              <strong>not</strong> remove any permission — the role keeps all of
+              its capabilities (so e.g. POS keeps working). You can re-enable
+              pages before saving; nothing is applied until you click{' '}
+              <strong>Save</strong>.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={onDisableAll}
+              className="bg-destructive hover:bg-destructive/90"
+            >
+              Disable all
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Explainer */}
+      <div className="flex items-start gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+        <Info className="size-3.5 mt-0.5 shrink-0" />
+        <span>
+          Controls only which pages this role sees in the navigation and can
+          open. Disabling a page <strong>never removes a permission</strong> —
+          the role keeps every capability (e.g. a cashier denied the Orders page
+          still creates orders in POS). Manage what a role can <em>do</em> in the{' '}
+          <strong>Permissions</strong> tab.
+        </span>
+      </div>
+
+      {/* Grouped page toggles */}
+      <ScrollArea className="flex-1 min-h-[280px] max-h-[380px]">
+        <div className="space-y-4 pr-3">
+          {pages.length === 0 && (
+            <p className="text-sm text-muted-foreground text-center py-8">
+              No pages available.
+            </p>
+          )}
+          {groups.map(({ group, items }) => (
+            <div key={group}>
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1.5">
+                {group}
+              </p>
+              <div className="rounded-lg border bg-card overflow-hidden divide-y">
+                {items.map(page => {
+                  const enabled = isEnabled(page);
+                  const canGrant =
+                    grantableCodes === null || grantableCodes.has(page.view_codename);
+                  // You can always turn a page OFF (deny); turning it ON grants
+                  // the page's view capability, so it needs grant rights.
+                  const canToggle = enabled || canGrant;
+                  const toggle = (
+                    <Switch
+                      checked={enabled}
+                      disabled={!canToggle}
+                      onCheckedChange={v => onTogglePage(page, v === true)}
+                      className="shrink-0"
+                      aria-label={`${enabled ? 'Disable' : 'Enable'} ${page.label}`}
+                    />
+                  );
+                  return (
+                    <div
+                      key={page.key}
+                      className={`flex items-center justify-between gap-3 px-3 py-2.5 transition-colors ${
+                        enabled ? 'bg-primary/[0.03]' : ''
+                      }`}
+                    >
+                      <div className="flex items-start gap-2.5 min-w-0">
+                        <span className="text-base leading-none mt-0.5">
+                          {PAGE_ICONS[page.icon] ?? '📄'}
+                        </span>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium">{page.label}</p>
+                          <p className="text-xs text-muted-foreground leading-snug">
+                            {page.description}
+                          </p>
+                        </div>
+                      </div>
+                      {canToggle ? (
+                        toggle
+                      ) : (
+                        <TooltipProvider delayDuration={200}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              {/* Wrapper so the tooltip works on a disabled control. */}
+                              <span className="shrink-0">{toggle}</span>
+                            </TooltipTrigger>
+                            <TooltipContent side="left">
+                              You can&apos;t enable a page you don&apos;t have access to yourself.
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </ScrollArea>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
    ROLE DETAIL SHEET (view mode)
    ═══════════════════════════════════════════════════════════════════════ */
 
@@ -563,6 +781,7 @@ function RoleDetailSheet({
   role,
   assignments,
   permissionGroups,
+  pages,
   onRevoke,
 }: {
   open: boolean;
@@ -570,8 +789,18 @@ function RoleDetailSheet({
   role: RBACRole | null;
   assignments: UserRoleAssignment[];
   permissionGroups: PermissionGroup[];
+  pages: PageDefinition[];
   onRevoke: (id: number) => void;
 }) {
+  // Pages this role can open: holds the gating ``view_codename`` AND the page
+  // isn't on the role's denylist (hidden_pages).
+  const accessiblePages = useMemo(() => {
+    if (!role?.permissions) return [];
+    const permSet = new Set(role.permissions);
+    const hidden = new Set(role.hidden_pages ?? []);
+    return pages.filter(p => permSet.has(p.view_codename) && !hidden.has(p.key));
+  }, [role, pages]);
+
   // Group role's permissions by category
   const groupedPerms = useMemo(() => {
     if (!role?.permissions) return [];
@@ -636,6 +865,33 @@ function RoleDetailSheet({
                   )}
                 </div>
               </div>
+            </div>
+
+            <Separator />
+
+            {/* Pages this role can open */}
+            <div>
+              <h4 className="text-sm font-semibold flex items-center gap-2 mb-3">
+                <LayoutGrid className="size-4 text-primary" />
+                Accessible Pages
+                <Badge variant="secondary" className="text-[10px] px-1.5 h-5 tabular-nums">
+                  {accessiblePages.length}
+                </Badge>
+              </h4>
+              {accessiblePages.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  This role can&apos;t open any page.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {accessiblePages.map(p => (
+                    <Badge key={p.key} variant="outline" className="text-xs gap-1">
+                      <span>{PAGE_ICONS[p.icon] ?? '📄'}</span>
+                      {p.label}
+                    </Badge>
+                  ))}
+                </div>
+              )}
             </div>
 
             <Separator />
@@ -755,6 +1011,7 @@ export default function RolesPage() {
   // ── Data ──
   const [roles, setRoles] = useState<RBACRole[]>([]);
   const [permissionGroups, setPermissionGroups] = useState<PermissionGroup[]>([]);
+  const [pages, setPages] = useState<PageDefinition[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isActioning, setIsActioning] = useState(false);
 
@@ -779,6 +1036,8 @@ export default function RolesPage() {
   const [formDescription, setFormDescription] = useState('');
   const [formScopeType, setFormScopeType] = useState<string>('company');
   const [formPermissions, setFormPermissions] = useState<Set<string>>(new Set());
+  // Page denylist being edited (navigation only — never a permission).
+  const [hiddenPages, setHiddenPages] = useState<Set<string>>(new Set());
   // Super-Admin only: global default role (all companies) vs specific company.
   const [formIsGlobal, setFormIsGlobal] = useState(true);
   const [formCompanyId, setFormCompanyId] = useState<string>('');
@@ -813,6 +1072,7 @@ export default function RolesPage() {
 
   useEffect(() => {
     rbacService.getPermissions().then(setPermissionGroups).catch(() => {});
+    rbacService.getPages().then(setPages).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -847,6 +1107,16 @@ export default function RolesPage() {
     [currentUser],
   );
   const isPlatformAdmin = grantableCodes === null;
+
+  // How many pages the role being edited can currently open: holds the gating
+  // ``view_codename`` AND the page isn't on the denylist. Shown on the tab badge.
+  const enabledPageCount = useMemo(
+    () =>
+      pages.filter(
+        p => formPermissions.has(p.view_codename) && !hiddenPages.has(p.key),
+      ).length,
+    [pages, formPermissions, hiddenPages],
+  );
 
   // Permissions shown in the picker: limited to grantable for non-root users,
   // but always keep codes already on the edited role visible so existing
@@ -913,6 +1183,51 @@ export default function RolesPage() {
     [],
   );
 
+  /* ── Page-access toggle helpers ─────────────────────────────────────── */
+  // Page access is a navigation denylist (``hiddenPages``) saved alongside the
+  // role — completely independent of capability permissions. Denying a page
+  // only hides it; it NEVER removes a permission (so e.g. a cashier denied the
+  // Orders page keeps create_orders for POS). Enabling drops the page from the
+  // denylist and additively grants its view capability so the page is usable.
+
+  const togglePage = useCallback((page: PageDefinition, enabled: boolean) => {
+    if (enabled) {
+      // Allow: drop from the denylist and make sure the page is functional by
+      // granting its view capability (purely additive — never removes a perm).
+      setHiddenPages(prev => {
+        const next = new Set(prev);
+        next.delete(page.key);
+        return next;
+      });
+      setFormPermissions(prev =>
+        prev.has(page.view_codename) ? prev : new Set(prev).add(page.view_codename),
+      );
+    } else {
+      // Deny: hide the page only. Permissions are left completely untouched, so
+      // the role keeps every capability (e.g. create_orders for POS).
+      setHiddenPages(prev => new Set(prev).add(page.key));
+    }
+  }, []);
+
+  const enableAllPages = useCallback(() => {
+    setHiddenPages(new Set());
+    setFormPermissions(prev => {
+      const next = new Set(prev);
+      pages.forEach(p => {
+        // Only grant the view capability for pages the actor may grant.
+        if (grantableCodes === null || grantableCodes.has(p.view_codename)) {
+          next.add(p.view_codename);
+        }
+      });
+      return next;
+    });
+  }, [pages, grantableCodes]);
+
+  const disableAllPages = useCallback(() => {
+    // Hide every page — permissions are never touched.
+    setHiddenPages(new Set(pages.map(p => p.key)));
+  }, [pages]);
+
   /* ── Form helpers ──────────────────────────────────────────────────── */
 
   const resetRoleForm = useCallback(() => {
@@ -920,6 +1235,7 @@ export default function RolesPage() {
     setFormDescription('');
     setFormScopeType('company');
     setFormPermissions(new Set());
+    setHiddenPages(new Set());
     setFormIsGlobal(true);
     setFormCompanyId('');
     setEditingRole(null);
@@ -938,6 +1254,7 @@ export default function RolesPage() {
       setFormDescription(detail.description);
       setFormScopeType(detail.scope_type);
       setFormPermissions(new Set(detail.permissions));
+      setHiddenPages(new Set(detail.hidden_pages ?? []));
       setFormIsGlobal(detail.company == null);
       setFormCompanyId(detail.company != null ? String(detail.company) : '');
       setRoleDialogOpen(true);
@@ -957,6 +1274,7 @@ export default function RolesPage() {
       setFormDescription(detail.description);
       setFormScopeType(detail.scope_type);
       setFormPermissions(new Set(detail.permissions));
+      setHiddenPages(new Set(detail.hidden_pages ?? []));
       setRoleDialogOpen(true);
     } catch {
       toast.error('Failed to load role to clone');
@@ -996,6 +1314,7 @@ export default function RolesPage() {
         description: formDescription.trim(),
         scope_type: formScopeType as RoleCreateRequest['scope_type'],
         permissions: Array.from(formPermissions),
+        hidden_pages: Array.from(hiddenPages),
       };
       // Super Admin chooses the role's visibility; company users always create
       // company-specific roles (the backend forces their company regardless).
@@ -1395,6 +1714,18 @@ export default function RolesPage() {
                   <Info className="size-3.5" />
                   General
                 </TabsTrigger>
+                <TabsTrigger value="pages" className="gap-1.5">
+                  <LayoutGrid className="size-3.5" />
+                  Page Access
+                  {enabledPageCount > 0 && (
+                    <Badge
+                      variant="default"
+                      className="text-[10px] px-1.5 py-0 h-4 ml-0.5 tabular-nums"
+                    >
+                      {enabledPageCount}
+                    </Badge>
+                  )}
+                </TabsTrigger>
                 <TabsTrigger value="permissions" className="gap-1.5">
                   <KeyRound className="size-3.5" />
                   Permissions
@@ -1516,6 +1847,22 @@ export default function RolesPage() {
                     </p>
                   </div>
                 )}
+              </TabsContent>
+
+              {/* ── Page Access tab ── */}
+              <TabsContent
+                value="pages"
+                className="flex-1 min-h-0 flex flex-col px-6 py-4 overflow-hidden"
+              >
+                <PageAccessPicker
+                  pages={pages}
+                  selected={formPermissions}
+                  hiddenPages={hiddenPages}
+                  grantableCodes={grantableCodes}
+                  onTogglePage={togglePage}
+                  onEnableAll={enableAllPages}
+                  onDisableAll={disableAllPages}
+                />
               </TabsContent>
 
               {/* ── Permissions tab ── */}
@@ -1670,6 +2017,7 @@ export default function RolesPage() {
           role={viewingRole}
           assignments={roleAssignments}
           permissionGroups={permissionGroups}
+          pages={pages}
           onRevoke={handleRevoke}
         />
 

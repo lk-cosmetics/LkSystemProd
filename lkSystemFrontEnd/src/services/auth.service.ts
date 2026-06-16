@@ -86,6 +86,7 @@ class AuthService {
           role: user.role,
           roles: user.roles ?? (user.role ? [user.role] : []),
           permissions: user.permissions ?? [],
+          hidden_pages: user.hidden_pages ?? [],
           is_superuser: user.is_superuser ?? false,
           can_switch_brands: user.can_switch_brands,
           company_id: user.company_id,
@@ -200,6 +201,7 @@ class AuthService {
         role: user.role,
         roles,
         permissions: user.permissions ?? [],
+        hidden_pages: user.hidden_pages ?? [],
         is_superuser: user.is_superuser ?? false,
         can_switch_brands: user.can_switch_brands,
         company_id: user.company_id,
@@ -448,12 +450,14 @@ class AuthService {
         role?: string;
         roles?: string[];
         permissions?: string[];
+        hidden_pages?: string[];
       };
       // Transform role string to roles array for consistency
       return {
         ...userData,
         roles: userData.roles ?? (userData.role ? [userData.role] : []),
         permissions: userData.permissions ?? [],
+        hidden_pages: userData.hidden_pages ?? [],
       } as User;
     } catch {
       return null;

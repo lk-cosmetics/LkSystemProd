@@ -13,11 +13,10 @@
  * because the SW deliberately does NOT cache/replay mutating requests.
  */
 import {
-  expenseService,
-  cashDepositService,
-  type ExpenseCreate,
-  type CashDepositCreate,
-} from './expense.service';
+  cashMovementService,
+  type CashMovementCreate,
+  type CashMovementCategory,
+} from './cashMovement.service';
 
 const DB_NAME = 'lk-system-caisse-offline';
 const DB_VERSION = 1;
@@ -31,8 +30,8 @@ export interface PendingCaisseOp {
   local_id: string;
   kind: PendingCaisseKind;
   sales_channel: number;
-  /** The exact payload to POST on sync. */
-  payload: ExpenseCreate | CashDepositCreate;
+  /** The exact payload to POST on sync (carries its own movement_type). */
+  payload: CashMovementCreate;
   /** Denormalised for instant optimistic rendering without re-parsing payload. */
   amount: number;
   note: string;
@@ -69,7 +68,7 @@ function createLocalId(): string {
 
 export const offlineCaisseService = {
   /** Build + persist a pending expense; returns the optimistic row. */
-  async queueExpense(payload: ExpenseCreate, label: string): Promise<PendingCaisseOp> {
+  async queueExpense(payload: CashMovementCreate, label: string): Promise<PendingCaisseOp> {
     const op: PendingCaisseOp = {
       local_id: createLocalId(),
       kind: 'expense',
@@ -85,7 +84,7 @@ export const offlineCaisseService = {
   },
 
   /** Build + persist a pending alimentation; returns the optimistic row. */
-  async queueDeposit(payload: CashDepositCreate, label: string): Promise<PendingCaisseOp> {
+  async queueDeposit(payload: CashMovementCreate, label: string): Promise<PendingCaisseOp> {
     const op: PendingCaisseOp = {
       local_id: createLocalId(),
       kind: 'deposit',
@@ -139,11 +138,20 @@ export const offlineCaisseService = {
     let dropped = 0;
     for (const op of ops) {
       try {
-        if (op.kind === 'expense') {
-          await expenseService.create(op.payload as ExpenseCreate);
-        } else {
-          await cashDepositService.create(op.payload as CashDepositCreate);
-        }
+        // Normalise so legacy queued ops (saved before the expense/deposit
+        // merge — they carry the old ``kind`` field and no ``movement_type``)
+        // still sync instead of being rejected and dropped. ``op.kind`` is the
+        // reliable discriminator, present on every queued op.
+        const raw = op.payload as unknown as Record<string, unknown>;
+        const payload: CashMovementCreate = {
+          sales_channel: op.sales_channel,
+          movement_type: op.kind,
+          category: (raw.category ?? raw.kind ?? 'OTHER') as CashMovementCategory,
+          amount: raw.amount as number | string,
+          note: (raw.note as string) ?? '',
+          occurred_at: raw.occurred_at as string | undefined,
+        };
+        await cashMovementService.create(payload);
         await this.remove(op.local_id);
         synced += 1;
       } catch (err) {

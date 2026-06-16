@@ -56,14 +56,14 @@ export default defineConfig({
         maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
         runtimeCaching: [
           {
-            // Caisse reads: keep the last-synced stats / history / expenses /
-            // cash-deposits available offline (NetworkFirst → fresh when online,
-            // cached fallback when not). Writes are queued client-side, see
+            // Caisse reads: keep the last-synced stats / history / journal and
+            // the unified cash movements (expenses + alimentations) available
+            // offline (NetworkFirst → fresh when online, cached fallback when
+            // not). Writes are queued client-side, see
             // services/offlineCaisse.service.ts.
             urlPattern: ({ url, request }) =>
               request.method === 'GET' &&
-              (url.pathname.includes('/sales-channels/expenses') ||
-                url.pathname.includes('/sales-channels/cash-deposits')),
+              url.pathname.includes('/sales-channels/cash-movements'),
             handler: 'NetworkFirst',
             options: {
               cacheName: 'lk-caisse-api',

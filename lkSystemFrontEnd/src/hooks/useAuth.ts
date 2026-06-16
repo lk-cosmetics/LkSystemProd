@@ -88,6 +88,18 @@ export function isPlatformAdmin(user: User | null): boolean {
 }
 
 /**
+ * Whether a page is hidden from the user by per-role page access (Roles → Page
+ * Access). This is navigation-only and orthogonal to permissions: a page can be
+ * hidden while the user keeps the underlying capability (e.g. a cashier denied
+ * the Orders page still has `create_orders` for POS). Superusers see everything.
+ */
+export function isPageHidden(user: User | null, pageKey?: string): boolean {
+  if (!pageKey) return false;
+  if (hasRootAccess(user)) return false;
+  return user?.hidden_pages?.includes(pageKey) ?? false;
+}
+
+/**
  * A pure POS / cashier operator: can use the POS but has no back-office reach.
  * Defined by permissions (not role names) so any custom role with the same
  * shape behaves identically. A cashier has `use_pos` and lacks `view_dashboard`.

@@ -10,7 +10,7 @@
  */
 
 import { type ReactNode } from 'react';
-import { Navigate, useLocation } from 'react-router-dom';
+import { Navigate } from 'react-router-dom';
 import { Ban } from 'lucide-react';
 import { useAuthStore } from '@/store/authStore';
 import {
@@ -19,7 +19,7 @@ import {
   hasPermission,
   hasAnyPermission,
   hasAllPermissions,
-  isPosOnlyUser,
+  isPageHidden,
 } from '@/hooks/useAuth';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -34,11 +34,12 @@ interface RoleGuardProps {
   requiredPermission?: string;
   /** RBAC: multiple permission codenames check. */
   requiredPermissions?: string[];
+  /** Page-registry key — blocked when hidden for the role (Roles → Page Access). */
+  page?: string;
   /** When true, ALL roles/permissions must match (default: any). */
   requireAll?: boolean;
   redirectTo?: string;
   showAccessDenied?: boolean;
-  allowCashierWorkspace?: boolean;
 }
 
 export default function RoleGuard({
@@ -47,22 +48,26 @@ export default function RoleGuard({
   requiredRoles,
   requiredPermission,
   requiredPermissions,
+  page,
   requireAll = false,
   redirectTo = '/dashboard',
   showAccessDenied = true,
-  allowCashierWorkspace = false,
 }: RoleGuardProps) {
   const { user, isAuthenticated } = useAuthStore();
-  const location = useLocation();
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
   }
 
-  const cashierWorkspace = isPosOnlyUser(user);
-
-  if (cashierWorkspace && !allowCashierWorkspace && location.pathname !== '/dashboard/pos') {
-    return <Navigate to="/dashboard/pos" replace />;
+  // Page-access denial (navigation control, independent of permissions): the
+  // role still holds the capability — it just may not open this page. A cashier
+  // denied the Orders page keeps create_orders for POS but can't open Orders.
+  if (isPageHidden(user, page)) {
+    return showAccessDenied ? (
+      <AccessDenied message="This page isn't available for your role." />
+    ) : (
+      <Navigate to={redirectTo} replace />
+    );
   }
 
   // ── Permission-based check (RBAC — preferred) ──────────────────────

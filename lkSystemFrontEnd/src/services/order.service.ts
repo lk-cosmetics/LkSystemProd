@@ -272,6 +272,12 @@ export const orderService = {
     return data;
   },
 
+  /** Delete the invoice from an order — clears the invoice (removing it from
+   * the registry) but leaves the order itself untouched. ``id`` is the order id. */
+  async deleteInvoice(id: number) {
+    await apiClient.delete(`/api/v1/orders/${id}/invoice/`);
+  },
+
   /** POS / Manual order creation (Method B). */
   async createPOS(payload: POSOrderCreateRequest) {
     const { data } = await apiClient.post<OrderDetail>(

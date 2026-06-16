@@ -1,9 +1,14 @@
 /**
- * Caisse expense (dépense) service — POS register cash-out.
- * Endpoints live under /api/v1/sales-channels/expenses/.
+ * Caisse cash-movement service — one module for both sides of the POS till:
+ *   • ``expense`` (dépense)      — cash OUT
+ *   • ``deposit`` (alimentation) — cash IN
+ * Discriminated by ``movement_type``. Endpoints live under
+ * /api/v1/sales-channels/cash-movements/ (filter one side with ?type=).
  */
 
 import { apiClient } from './axios';
+
+export type MovementType = 'expense' | 'deposit';
 
 export type ExpenseCategory =
   | 'SUPPLIES'
@@ -14,29 +19,56 @@ export type ExpenseCategory =
   | 'REFUND'
   | 'OTHER';
 
-export interface Expense {
+export type DepositCategory = 'OPENING' | 'TOP_UP' | 'OTHER';
+
+export type CashMovementCategory = ExpenseCategory | DepositCategory;
+
+export interface CashMovement {
   id: number;
   company: number;
   sales_channel: number;
   sales_channel_name: string;
-  amount: string;
-  category: ExpenseCategory;
+  movement_type: MovementType;
+  movement_type_display: string;
+  category: CashMovementCategory;
   category_display: string;
+  amount: string;
   note: string;
   occurred_at: string;
   created_by: number | null;
   created_by_name: string | null;
+  is_deleted: boolean;
+  deleted_at: string | null;
   created_at: string;
   updated_at: string;
 }
 
-export interface ExpenseCreate {
+export interface CashMovementCreate {
   sales_channel: number;
+  movement_type: MovementType;
+  category: CashMovementCategory;
   amount: number | string;
-  category: ExpenseCategory;
   note?: string;
   occurred_at?: string;
 }
+
+export const EXPENSE_CATEGORY_OPTIONS: { value: ExpenseCategory; label: string }[] = [
+  { value: 'SUPPLIES',    label: 'Fournitures' },
+  { value: 'UTILITY',     label: 'Facture (eau, élec, internet)' },
+  { value: 'TRANSPORT',   label: 'Transport / Livraison' },
+  { value: 'SALARY',      label: 'Salaire' },
+  { value: 'MAINTENANCE', label: 'Maintenance / Réparation' },
+  { value: 'REFUND',      label: 'Remboursement client' },
+  { value: 'OTHER',       label: 'Autre' },
+];
+
+export const DEPOSIT_CATEGORY_OPTIONS: { value: DepositCategory; label: string }[] = [
+  { value: 'OPENING', label: 'Fond de caisse (ouverture)' },
+  { value: 'TOP_UP',  label: 'Alimentation (ajout)' },
+  { value: 'OTHER',   label: 'Autre' },
+];
+
+/* ── Caisse aggregate read shapes (unchanged) ──────────────────────────── */
 
 export interface CaisseStats {
   date: string;
@@ -75,7 +107,13 @@ export interface CaisseHistoryRow {
 }
 
 /** One row in the per-transaction caisse journal (Historique de caisse). */
-export type CaisseMovementType = 'sale' | 'return' | 'expense' | 'deposit';
+export type CaisseMovementType =
+  | 'sale'
+  | 'return'
+  | 'expense'
+  | 'expense_deleted'
+  | 'deposit'
+  | 'deposit_deleted';
 
 export interface CaisseMovement {
   id: string;
@@ -99,26 +137,25 @@ export interface CaisseJournal {
   movements: CaisseMovement[];
 }
 
-const BASE = '/api/v1/sales-channels/expenses/';
+const BASE = '/api/v1/sales-channels/cash-movements/';
 
-export const EXPENSE_CATEGORY_OPTIONS: { value: ExpenseCategory; label: string }[] = [
-  { value: 'SUPPLIES',    label: 'Fournitures' },
-  { value: 'UTILITY',     label: 'Facture (eau, élec, internet)' },
-  { value: 'TRANSPORT',   label: 'Transport / Livraison' },
-  { value: 'SALARY',      label: 'Salaire' },
-  { value: 'MAINTENANCE', label: 'Maintenance / Réparation' },
-  { value: 'REFUND',      label: 'Remboursement client' },
-  { value: 'OTHER',       label: 'Autre' },
-];
-
-export const expenseService = {
-  async list(params: { sales_channel?: number; date_from?: string; date_to?: string; category?: ExpenseCategory } = {}): Promise<Expense[]> {
+export const cashMovementService = {
+  /** List movements. Pass ``type`` to get one side (expense / deposit). */
+  async list(
+    params: {
+      type?: MovementType;
+      sales_channel?: number;
+      date_from?: string;
+      date_to?: string;
+      category?: CashMovementCategory;
+    } = {},
+  ): Promise<CashMovement[]> {
     const { data } = await apiClient.get(BASE, { params });
     // DRF paginated response shape — also handle bare list fallback.
-    return (data as any).results ?? data;
+    return (data as { results?: CashMovement[] }).results ?? (data as CashMovement[]);
   },
 
-  async create(payload: ExpenseCreate): Promise<Expense> {
+  async create(payload: CashMovementCreate): Promise<CashMovement> {
     const body = {
       ...payload,
       occurred_at: payload.occurred_at ?? new Date().toISOString(),
@@ -148,8 +185,8 @@ export const expenseService = {
     return data;
   },
 
-  /** Per-transaction caisse journal — sales, returns, expenses, alimentations,
-   *  each with a full timestamp, newest first. */
+  /** Per-transaction caisse journal — sales, returns, expenses, alimentations
+   *  (incl. their deletion reversals), each with a full timestamp, newest first. */
   async caisseJournal(
     salesChannel: number,
     params: { date_from?: string; date_to?: string } = {},
@@ -158,63 +195,5 @@ export const expenseService = {
       params: { sales_channel: salesChannel, ...params },
     });
     return data;
-  },
-};
-
-// ── Caisse funding (alimentation de caisse) — cash IN ────────────────────────
-
-export type CashDepositKind = 'OPENING' | 'TOP_UP' | 'OTHER';
-
-export interface CashDeposit {
-  id: number;
-  company: number;
-  sales_channel: number;
-  sales_channel_name: string;
-  amount: string;
-  kind: CashDepositKind;
-  kind_display: string;
-  note: string;
-  occurred_at: string;
-  created_by: number | null;
-  created_by_name: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface CashDepositCreate {
-  sales_channel: number;
-  amount: number | string;
-  kind: CashDepositKind;
-  note?: string;
-  occurred_at?: string;
-}
-
-export const CASH_DEPOSIT_KIND_OPTIONS: { value: CashDepositKind; label: string }[] = [
-  { value: 'OPENING', label: 'Fond de caisse (ouverture)' },
-  { value: 'TOP_UP',  label: 'Alimentation (ajout)' },
-  { value: 'OTHER',   label: 'Autre' },
-];
-
-const CASH_DEPOSIT_BASE = '/api/v1/sales-channels/cash-deposits/';
-
-export const cashDepositService = {
-  async list(
-    params: { sales_channel?: number; date_from?: string; date_to?: string; kind?: CashDepositKind } = {},
-  ): Promise<CashDeposit[]> {
-    const { data } = await apiClient.get(CASH_DEPOSIT_BASE, { params });
-    return (data as any).results ?? data;
-  },
-
-  async create(payload: CashDepositCreate): Promise<CashDeposit> {
-    const body = {
-      ...payload,
-      occurred_at: payload.occurred_at ?? new Date().toISOString(),
-    };
-    const { data } = await apiClient.post(CASH_DEPOSIT_BASE, body);
-    return data;
-  },
-
-  async remove(id: number): Promise<void> {
-    await apiClient.delete(`${CASH_DEPOSIT_BASE}${id}/`);
   },
 };

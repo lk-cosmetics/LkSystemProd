@@ -485,6 +485,10 @@ export default function OrdersPage() {
   const [syncingSelected, setSyncingSelected] = useState(false);
   const [activeSyncEvent, setActiveSyncEvent] = useState<OrderSyncEvent | null>(null);
 
+  // Bumped to force a list refetch even when no filter/page actually changed
+  // (e.g. after creating an order while already on the default view).
+  const [reloadNonce, setReloadNonce] = useState(0);
+
   /* ── alert state ─── */
   const [successDialog, setSuccessDialog] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
@@ -660,6 +664,7 @@ export default function OrdersPage() {
     paymentFilter,
     sourceFilter,
     priorityFilter,
+    reloadNonce,
   ]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
@@ -1747,8 +1752,17 @@ export default function OrdersPage() {
     try {
       const created = await orderService.createManual(payload);
       setCreateOrderOpen(false);
-      await fetchData();
-      setSuccessMessage(`Order ${created.order_number} created.`);
+      // Guarantee the brand-new order is visible right away: a stale tab/search/
+      // filter/sort or being on a later page is what makes a just-created order
+      // "disappear". Drop every filter back to defaults, jump to page 1, and let
+      // the reload nonce force a refetch (clearFilters alone is a no-op when the
+      // view is already default). DEFAULT_LIFO_ORDERING surfaces it at the top.
+      clearFilters();
+      setCurrentPage(1);
+      setPageJump('1');
+      setSelectedIds(new Set());
+      setReloadNonce(n => n + 1);
+      setSuccessMessage(`Order ${created.order_number} created — it's now at the top of the list.`);
       setSuccessDialog(true);
     } catch (err) {
       setErrorMessage(extractErrorMessage(err, 'Failed to create the order.'));

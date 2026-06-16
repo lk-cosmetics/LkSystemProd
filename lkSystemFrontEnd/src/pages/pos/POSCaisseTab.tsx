@@ -38,17 +38,17 @@ import {
 } from '@/components/ui/select';
 
 import {
-  expenseService,
-  cashDepositService,
+  cashMovementService,
   EXPENSE_CATEGORY_OPTIONS,
-  CASH_DEPOSIT_KIND_OPTIONS,
-  type Expense,
-  type CashDeposit,
-  type CashDepositKind,
+  DEPOSIT_CATEGORY_OPTIONS,
+  type CashMovement,
+  type DepositCategory,
   type CaisseStats,
   type CaisseMovement,
+  type CaisseHistoryRow,
   type ExpenseCategory,
-} from '@/services/expense.service';
+} from '@/services/cashMovement.service';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 const fmtTND = (raw: string | number): string => {
   const n = typeof raw === 'string' ? Number(raw) : raw;
@@ -61,7 +61,9 @@ const MOVEMENT_BADGE: Record<string, string> = {
   sale: 'border-emerald-200 text-emerald-700',
   return: 'border-red-200 text-red-700',
   expense: 'border-amber-200 text-amber-700',
+  expense_deleted: 'border-red-200 text-red-700',
   deposit: 'border-blue-200 text-blue-700',
+  deposit_deleted: 'border-red-200 text-red-700',
 };
 
 // A failed request with no HTTP response is a connectivity problem (offline /
@@ -161,9 +163,10 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
   const [stats, setStats] = useState<CaisseStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
   const [journal, setJournal] = useState<CaisseMovement[]>([]);
+  const [dailyHistory, setDailyHistory] = useState<CaisseHistoryRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [deposits, setDeposits] = useState<CashDeposit[]>([]);
+  const [expenses, setExpenses] = useState<CashMovement[]>([]);
+  const [deposits, setDeposits] = useState<CashMovement[]>([]);
   const [listLoading, setListLoading] = useState(false);
 
   // Dépense (cash-out) form
@@ -174,7 +177,7 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
 
   // Alimentation (cash-in) form
   const [depAmount, setDepAmount] = useState('');
-  const [depKind, setDepKind] = useState<CashDepositKind>('TOP_UP');
+  const [depKind, setDepKind] = useState<DepositCategory>('TOP_UP');
   const [depNote, setDepNote] = useState('');
   const [depSubmitting, setDepSubmitting] = useState(false);
 
@@ -209,6 +212,7 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
     if (!channelId) {
       setStats(null);
       setJournal([]);
+      setDailyHistory([]);
       setExpenses([]);
       setDeposits([]);
       setPending([]);
@@ -218,17 +222,19 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
     setListLoading(true);
     setHistoryLoading(true);
     try {
-      const [s, journalRes, expList, depList, pendingOps] = await Promise.all([
-        expenseService.caisseStats(channelId).catch(() => null),
-        expenseService.caisseJournal(channelId).catch(() => null),
-        expenseService.list({ sales_channel: channelId, date_from: todayISO, date_to: todayISO })
-          .catch(() => [] as Expense[]),
-        cashDepositService.list({ sales_channel: channelId, date_from: todayISO, date_to: todayISO })
-          .catch(() => [] as CashDeposit[]),
+      const [s, journalRes, dailyRes, expList, depList, pendingOps] = await Promise.all([
+        cashMovementService.caisseStats(channelId).catch(() => null),
+        cashMovementService.caisseJournal(channelId).catch(() => null),
+        cashMovementService.caisseHistory(channelId).catch(() => [] as CaisseHistoryRow[]),
+        cashMovementService.list({ type: 'expense', sales_channel: channelId, date_from: todayISO, date_to: todayISO })
+          .catch(() => [] as CashMovement[]),
+        cashMovementService.list({ type: 'deposit', sales_channel: channelId, date_from: todayISO, date_to: todayISO })
+          .catch(() => [] as CashMovement[]),
         offlineCaisseService.listPending(channelId).catch(() => [] as PendingCaisseOp[]),
       ]);
       setStats(s);
       setJournal(journalRes?.movements ?? []);
+      setDailyHistory(dailyRes);
       setExpenses(expList);
       setDeposits(depList);
       setPending(pendingOps);
@@ -249,7 +255,10 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
     if (!channelId) { setError('Sélectionnez d\'abord une caisse.'); return; }
     const n = parseAmount(amount);
     if (!n || n <= 0) { setError('Le montant de la dépense doit être strictement positif.'); return; }
-    const payload = { sales_channel: channelId, amount: n, category, note: note.trim() };
+    const payload = {
+      sales_channel: channelId, movement_type: 'expense' as const,
+      amount: n, category, note: note.trim(),
+    };
     const label = EXPENSE_CATEGORY_OPTIONS.find(o => o.value === category)?.label ?? category;
     const queueOffline = async () => {
       await offlineCaisseService.queueExpense(payload, label);
@@ -260,7 +269,7 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
     setSubmitting(true);
     try {
       if (!online) { await queueOffline(); return; }
-      await expenseService.create(payload);
+      await cashMovementService.create(payload);
       setAmount(''); setNote(''); setCategory('OTHER');
       setOkMessage(`Dépense de ${fmtTND(n)} TND enregistrée.`);
       await refresh();
@@ -279,8 +288,11 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
     if (!channelId) { setError('Sélectionnez d\'abord une caisse.'); return; }
     const n = parseAmount(depAmount);
     if (!n || n <= 0) { setError('Le montant de l\'alimentation doit être strictement positif.'); return; }
-    const payload = { sales_channel: channelId, amount: n, kind: depKind, note: depNote.trim() };
-    const label = CASH_DEPOSIT_KIND_OPTIONS.find(o => o.value === depKind)?.label ?? depKind;
+    const payload = {
+      sales_channel: channelId, movement_type: 'deposit' as const,
+      amount: n, category: depKind, note: depNote.trim(),
+    };
+    const label = DEPOSIT_CATEGORY_OPTIONS.find(o => o.value === depKind)?.label ?? depKind;
     const queueOffline = async () => {
       await offlineCaisseService.queueDeposit(payload, label);
       setDepAmount(''); setDepNote(''); setDepKind('TOP_UP');
@@ -290,7 +302,7 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
     setDepSubmitting(true);
     try {
       if (!online) { await queueOffline(); return; }
-      await cashDepositService.create(payload);
+      await cashMovementService.create(payload);
       setDepAmount(''); setDepNote(''); setDepKind('TOP_UP');
       setOkMessage(`Alimentation de ${fmtTND(n)} TND enregistrée.`);
       await refresh();
@@ -306,7 +318,7 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
   const handleDeleteExpense = useCallback(async (id: number) => {
     if (!confirm('Supprimer cette dépense ? Le solde sera ajusté.')) return;
     try {
-      await expenseService.remove(id);
+      await cashMovementService.remove(id);
       await refresh();
       onAfterChange?.();
     } catch {
@@ -317,7 +329,7 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
   const handleDeleteDeposit = useCallback(async (id: number) => {
     if (!confirm('Supprimer cette alimentation ? Le solde sera ajusté.')) return;
     try {
-      await cashDepositService.remove(id);
+      await cashMovementService.remove(id);
       await refresh();
       onAfterChange?.();
     } catch {
@@ -418,10 +430,10 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
             </div>
             <div>
               <label className="text-[11px] text-muted-foreground">Type</label>
-              <Select value={depKind} onValueChange={v => setDepKind(v as CashDepositKind)}>
+              <Select value={depKind} onValueChange={v => setDepKind(v as DepositCategory)}>
                 <SelectTrigger className="mt-1 h-9"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {CASH_DEPOSIT_KIND_OPTIONS.map(opt => (
+                  {DEPOSIT_CATEGORY_OPTIONS.map(opt => (
                     <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
                   ))}
                 </SelectContent>
@@ -522,7 +534,7 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
                 <li key={dep.id} className="flex items-start justify-between gap-3 py-2">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline" className="text-[10px]">{dep.kind_display}</Badge>
+                      <Badge variant="outline" className="text-[10px]">{dep.category_display}</Badge>
                       <span className="text-xs text-muted-foreground">
                         {new Date(dep.occurred_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
                       </span>
@@ -608,19 +620,27 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
         <div className="mb-3 flex items-center justify-between gap-2">
           <div>
             <p className="text-sm font-medium">Historique de caisse</p>
-            <p className="text-xs text-muted-foreground">Ventes, retours, dépenses et alimentations — par transaction.</p>
+            <p className="text-xs text-muted-foreground">Mouvements par transaction et solde de caisse quotidien.</p>
           </div>
           <Badge variant="secondary" className="text-[11px]">14 jours</Badge>
         </div>
-        <Separator className="mb-2" />
+        <Separator className="mb-3" />
         {historyLoading ? (
           <div className="py-6 text-center text-xs text-muted-foreground">
             <Loader2 className="mr-1.5 inline size-4 animate-spin" /> Chargement…
           </div>
-        ) : journal.length === 0 ? (
-          <p className="py-6 text-center text-xs text-muted-foreground">Aucun mouvement de caisse.</p>
         ) : (
-          <div className="overflow-x-auto">
+          <Tabs defaultValue="transactions">
+            <TabsList className="mb-3">
+              <TabsTrigger value="transactions">Transactions</TabsTrigger>
+              <TabsTrigger value="daily">Solde quotidien</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="transactions">
+              {journal.length === 0 ? (
+                <p className="py-6 text-center text-xs text-muted-foreground">Aucun mouvement de caisse.</p>
+              ) : (
+                <div className="overflow-x-auto">
             <table className="w-full min-w-[560px] text-sm">
               <thead>
                 <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
@@ -663,7 +683,45 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
                 })}
               </tbody>
             </table>
-          </div>
+                </div>
+              )}
+            </TabsContent>
+
+            <TabsContent value="daily">
+              {dailyHistory.length === 0 ? (
+                <p className="py-6 text-center text-xs text-muted-foreground">Aucune journée enregistrée.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[560px] text-sm">
+                    <thead>
+                      <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                        <th className="py-2 font-medium">Date</th>
+                        <th className="py-2 text-right font-medium">Ventes espèces</th>
+                        <th className="py-2 text-right font-medium">Alimentation</th>
+                        <th className="py-2 text-right font-medium">Dépenses</th>
+                        <th className="py-2 text-right font-medium">Solde caisse</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dailyHistory.map(row => (
+                        <tr key={row.date} className="border-b last:border-0">
+                          <td className="py-2 whitespace-nowrap text-xs text-muted-foreground">
+                            {new Date(row.date).toLocaleDateString('fr-FR', {
+                              day: '2-digit', month: '2-digit', year: 'numeric',
+                            })}
+                          </td>
+                          <td className="py-2 text-right tabular-nums text-emerald-700">{fmtTND(row.cash_sales)}</td>
+                          <td className="py-2 text-right tabular-nums text-blue-700">{fmtTND(row.funding_total)}</td>
+                          <td className="py-2 text-right tabular-nums text-amber-700">{fmtTND(row.expenses)}</td>
+                          <td className="py-2 text-right font-bold tabular-nums">{fmtTND(row.cash_balance)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </TabsContent>
+          </Tabs>
         )}
       </Card>
     </div>

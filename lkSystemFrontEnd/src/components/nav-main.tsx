@@ -11,7 +11,7 @@ import {
   useSidebar,
 } from '@/components/ui/sidebar';
 import { useAuthStore } from '@/store/authStore';
-import { hasRole, hasAnyPermission, isPosOnlyUser } from '@/hooks/useAuth';
+import { hasRole, hasAnyPermission, isPageHidden } from '@/hooks/useAuth';
 
 export function NavMain({
   items,
@@ -26,6 +26,8 @@ export function NavMain({
     requiredPermissions?: string[];
     /** Cashier workspace is intentionally tiny: POS only. */
     cashierVisible?: boolean;
+    /** Page-registry key — hidden per role via Roles → Page Access. */
+    page?: string;
   }[];
 }) {
   const location = useLocation();
@@ -40,12 +42,14 @@ export function NavMain({
 
   const isRoutable = (url: string) => url.trim() !== '' && url !== '#';
 
-  // Filter items based on RBAC permissions or legacy role
+  // Visibility is driven purely by RBAC permissions, so granting a role access
+  // to a page (Roles → Page Access) always surfaces it here — for every role,
+  // cashier accounts included. No workspace/role special-casing: a pure cashier
+  // naturally sees only the pages their permissions allow (e.g. POS).
   const visibleItems = items.filter(item => {
     if (!user) return false;
-    const cashierWorkspace = isPosOnlyUser(user);
-    if (cashierWorkspace && !item.cashierVisible) return false;
-    // RBAC permission check (preferred)
+    // Page hidden for this role (navigation control, independent of perms).
+    if (isPageHidden(user, item.page)) return false;
     if (item.requiredPermissions?.length) {
       return hasAnyPermission(user, item.requiredPermissions);
     }

@@ -26,6 +26,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Switch } from '@/components/ui/switch';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
@@ -85,7 +86,7 @@ import type {
   POSOrderCreateRequest, Client, OrderSocialSource, DiscountCalculationResult,
   OrderChannelStock,
 } from '@/types';
-import { ORDER_SOCIAL_SOURCES } from '@/types';
+import { ORDER_SOCIAL_SOURCES, SELLABLE_PRODUCT_TYPES } from '@/types';
 import {
   getFulfilmentChannelStock, stockItemFor, stockStatusOf, worstStatus,
   type StockStatus,
@@ -3708,6 +3709,15 @@ export function CreateOrderDialog({
     });
   }, [brandFilter, activeChannels]);
 
+  // When there's only one channel to pick from — a single-channel workspace, or
+  // a brand that owns just one channel — select it automatically. Forcing a pick
+  // from a one-option dropdown is pure friction, and it unblocks the product
+  // loader (which is gated on a chosen channel) in one less tap.
+  useEffect(() => {
+    if (!open || channelId) return;
+    if (visibleChannels.length === 1) setChannelId(String(visibleChannels[0].id));
+  }, [open, channelId, visibleChannels]);
+
   // Keep the picked customer across brand/channel changes — clients are
   // company-scoped, not brand-scoped, so picking the client before the channel
   // must not silently wipe it. Only a channel from ANOTHER company invalidates
@@ -3728,7 +3738,9 @@ export function CreateOrderDialog({
     setLines([]);
     setManualPriceIds(new Set());
     productService.getAllProducts({ brand: brandId, page_size: 500 })
-      .then(items => { if (!cancelled) setProducts((items || []).filter(p => p.product_type !== 'packaging_item')); })
+      // Only sellable types may go on a customer order — show resell products and
+      // packs, never components or packaging items.
+      .then(items => { if (!cancelled) setProducts((items || []).filter(p => SELLABLE_PRODUCT_TYPES.includes(p.product_type))); })
       .catch(() => { if (!cancelled) setProducts([]); })
       .finally(() => { if (!cancelled) setLoadingProducts(false); });
     return () => { cancelled = true; };
@@ -3818,6 +3830,9 @@ export function CreateOrderDialog({
     () => lines.reduce((sum, l) => sum + l.quantity * (parseFloat(l.price) || 0), 0),
     [lines],
   );
+  // Total units across all lines (a line of qty 3 counts as 3) — shown in the
+  // totals ledger so the subtotal reads as "for N items".
+  const itemCount = useMemo(() => lines.reduce((sum, l) => sum + l.quantity, 0), [lines]);
 
   // Discount preview — mirrors the server's authoritative recompute so the UI
   // total matches what the order will actually be saved with.
@@ -4135,100 +4150,122 @@ export function CreateOrderDialog({
               source of truth for the saved figures. */}
           {lines.length > 0 && (
             <>
-            <CreateSectionHeader icon={Percent} title="Review & totals" hint="Discount, delivery and the live order total" />
-            <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <Label className="text-xs font-medium">Discount</Label>
-                  <Select
-                    value={discountType}
-                    onValueChange={v => setDiscountType(v as OrderDiscountType)}
-                    disabled={isLoading}
-                  >
-                    <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="NONE">No discount</SelectItem>
-                      <SelectItem value="FIXED">Fixed amount (TND)</SelectItem>
-                      <SelectItem value="PERCENTAGE">Percentage (%)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                {discountType !== 'NONE' && (
+            <CreateSectionHeader icon={Percent} title="Discount, delivery & total" hint="Apply a discount, add delivery, then review the live total" />
+            <div className="space-y-3">
+              {/* Discount */}
+              <div className="space-y-3 rounded-xl border p-3">
+                <div className="grid gap-3 sm:grid-cols-2">
                   <div className="space-y-1.5">
-                    <Label className="text-xs font-medium">
-                      {discountType === 'PERCENTAGE' ? 'Percentage (0–100)' : 'Amount (TND)'}
-                    </Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      max={discountType === 'PERCENTAGE' ? 100 : undefined}
-                      step="0.01"
-                      value={discountValue}
-                      onChange={e => setDiscountValue(e.target.value)}
-                      className="h-9"
-                      placeholder={discountType === 'PERCENTAGE' ? 'e.g. 10' : 'e.g. 5.00'}
-                      aria-invalid={discountInvalid}
-                    />
-                  </div>
-                )}
-              </div>
-
-              {/* Delivery fee — optional, default 7 DT, the user opts in. */}
-              <div className="flex flex-wrap items-center gap-3 border-t pt-3">
-                <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
-                  <Checkbox
-                    checked={deliveryEnabled}
-                    onCheckedChange={(c) => setDeliveryEnabled(c === true)}
-                    disabled={isLoading}
-                  />
-                  <Truck className="size-3.5 text-muted-foreground" />
-                  Add delivery fee
-                </label>
-                {deliveryEnabled && (
-                  <div className="flex items-center gap-1.5">
-                    <Input
-                      type="number"
-                      min={0}
-                      step="0.001"
-                      inputMode="decimal"
-                      value={deliveryFee}
-                      onChange={(e) => setDeliveryFee(e.target.value)}
-                      className="h-9 w-28 tabular-nums"
-                      placeholder="7.000"
+                    <Label className="text-xs font-medium">Discount</Label>
+                    <Select
+                      value={discountType}
+                      onValueChange={v => setDiscountType(v as OrderDiscountType)}
                       disabled={isLoading}
-                    />
-                    <span className="text-xs text-muted-foreground">TND</span>
+                    >
+                      <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="NONE">No discount</SelectItem>
+                        <SelectItem value="FIXED">Fixed amount (TND)</SelectItem>
+                        <SelectItem value="PERCENTAGE">Percentage (%)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {discountType !== 'NONE' && (
+                    <div className="space-y-1.5">
+                      <Label className="text-xs font-medium">
+                        {discountType === 'PERCENTAGE' ? 'Percentage (0–100)' : 'Amount (TND)'}
+                      </Label>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={discountType === 'PERCENTAGE' ? 100 : undefined}
+                        step="0.01"
+                        value={discountValue}
+                        onChange={e => setDiscountValue(e.target.value)}
+                        className="h-9"
+                        placeholder={discountType === 'PERCENTAGE' ? 'e.g. 10' : 'e.g. 5.00'}
+                        aria-invalid={discountInvalid}
+                      />
+                    </div>
+                  )}
+                </div>
+                {discountInvalid && (
+                  <p className="text-xs text-red-600">
+                    {discountType === 'PERCENTAGE'
+                      ? 'Percentage must be between 0 and 100.'
+                      : 'Discount amount cannot be negative.'}
+                  </p>
+                )}
+              </div>
+
+              {/* Delivery fee — a clear on/off row; the amount field reveals on enable. */}
+              <div className="rounded-xl border p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
+                      <Truck className="size-4" />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium leading-tight">Delivery fee</p>
+                      <p className="text-[11px] leading-tight text-muted-foreground">
+                        {deliveryEnabled
+                          ? `+${deliveryFeeNum.toFixed(2)} TND added to the order total`
+                          : 'No delivery charge on this order'}
+                      </p>
+                    </div>
+                  </div>
+                  <Switch
+                    checked={deliveryEnabled}
+                    onCheckedChange={c => setDeliveryEnabled(c === true)}
+                    disabled={isLoading}
+                    aria-label="Add a delivery fee"
+                  />
+                </div>
+                {deliveryEnabled && (
+                  <div className="mt-3 space-y-1.5 border-t pt-3">
+                    <Label htmlFor="delivery-fee-amount" className="text-xs font-medium">Delivery amount</Label>
+                    <div className="relative">
+                      <Input
+                        id="delivery-fee-amount"
+                        type="number"
+                        min={0}
+                        step="0.001"
+                        inputMode="decimal"
+                        value={deliveryFee}
+                        onChange={e => setDeliveryFee(e.target.value)}
+                        className="h-10 pr-14 text-right text-base font-semibold tabular-nums"
+                        placeholder="7.000"
+                        disabled={isLoading}
+                      />
+                      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs font-medium text-muted-foreground">
+                        TND
+                      </span>
+                    </div>
                   </div>
                 )}
               </div>
 
-              {discountInvalid && (
-                <p className="text-xs text-red-600">
-                  {discountType === 'PERCENTAGE'
-                    ? 'Percentage must be between 0 and 100.'
-                    : 'Discount amount cannot be negative.'}
-                </p>
-              )}
-              <div className="space-y-1 border-t pt-2 text-sm">
+              {/* Live totals ledger — mirrors the server's authoritative recompute. */}
+              <div className="space-y-2 rounded-xl border bg-muted/40 p-3.5 text-sm">
                 <div className="flex justify-between text-muted-foreground">
-                  <span>Subtotal</span>
-                  <span>{subtotal.toFixed(2)} TND</span>
+                  <span>Subtotal · {itemCount} item{itemCount === 1 ? '' : 's'}</span>
+                  <span className="tabular-nums">{subtotal.toFixed(2)} TND</span>
                 </div>
                 {discountTotal > 0 && (
                   <div className="flex justify-between text-emerald-600">
                     <span>Discount</span>
-                    <span>−{discountTotal.toFixed(2)} TND</span>
+                    <span className="tabular-nums">−{discountTotal.toFixed(2)} TND</span>
                   </div>
                 )}
-                {deliveryFeeNum > 0 && (
-                  <div className="flex justify-between text-muted-foreground">
-                    <span>Delivery fee</span>
-                    <span>+{deliveryFeeNum.toFixed(2)} TND</span>
+                {deliveryEnabled && (
+                  <div className="flex items-center justify-between text-muted-foreground">
+                    <span className="flex items-center gap-1.5"><Truck className="size-3.5" /> Delivery fee</span>
+                    <span className="tabular-nums">+{deliveryFeeNum.toFixed(2)} TND</span>
                   </div>
                 )}
-                <div className="flex justify-between font-semibold">
-                  <span>Total</span>
-                  <span>{grandTotal.toFixed(2)} TND</span>
+                <div className="flex items-center justify-between border-t pt-2.5">
+                  <span className="text-base font-semibold">Total</span>
+                  <span className="text-lg font-bold tabular-nums text-primary">{grandTotal.toFixed(2)} TND</span>
                 </div>
               </div>
             </div>
