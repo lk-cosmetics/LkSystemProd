@@ -96,6 +96,43 @@ class InvoiceNumberTests(TestCase):
             format='json',
         )
 
+    def test_delete_invoice_clears_it_but_keeps_the_order(self):
+        order = self.create_order(name='Sonia Ben Salem')
+        self.assertEqual(self.issue(order).status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertTrue(order.invoice_number)
+        original_status = order.status
+
+        res = self.client.delete(f'/api/v1/orders/{order.id}/invoice/')
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT, res.content)
+
+        order.refresh_from_db()
+        # Invoice cleared (removed from the registry)…
+        self.assertEqual(order.invoice_number, '')
+        self.assertIsNone(order.invoice_date)
+        self.assertIsNone(order.invoice_issued_at)
+        self.assertIsNone(order.invoice_issued_by)
+        self.assertEqual(order.invoice_client_name, '')
+        # …but the order itself is untouched.
+        self.assertEqual(order.status, original_status)
+        registry = self.client.get('/api/v1/orders/invoices/')
+        self.assertEqual(registry.data['count'], 0)
+
+    def test_delete_invoice_without_an_invoice_is_rejected(self):
+        order = self.create_order()
+        res = self.client.delete(f'/api/v1/orders/{order.id}/invoice/')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_delete_invoice_requires_permission(self):
+        order = self.create_order()
+        self.assertEqual(self.issue(order).status_code, status.HTTP_200_OK)
+        # Can see the order + the registry, but lacks edit_invoice_numbers.
+        viewer = self.create_user_with_permissions(['view_orders', 'view_invoices'])
+        client = APIClient()
+        client.force_authenticate(viewer)
+        res = client.delete(f'/api/v1/orders/{order.id}/invoice/')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
     def test_new_orders_do_not_receive_an_invoice_automatically(self):
         first = self.create_order()
         second = self.create_order()

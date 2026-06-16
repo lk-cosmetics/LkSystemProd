@@ -5,7 +5,7 @@ Define explicit filtersets for better schema generation support.
 
 import django_filters
 
-from .models import Order, OrderLine
+from .models import Order
 
 
 class OrderFilterSet(django_filters.FilterSet):
@@ -62,15 +62,4 @@ class OrderFilterSet(django_filters.FilterSet):
             'priority_level': ['exact'],
             'pos_sales_channel': ['exact'],
             'assignment_type': ['exact'],
-        }
-
-
-class OrderLineFilterSet(django_filters.FilterSet):
-    """Explicit FilterSet for OrderLine model."""
-
-    class Meta:
-        model = OrderLine
-        fields = {
-            'order': ['exact'],
-            'product': ['exact'],
         }

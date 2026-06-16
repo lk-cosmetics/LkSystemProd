@@ -1500,37 +1500,6 @@ class OrderLifecycleService:
 
     @classmethod
     @transaction.atomic
-    def mark_exchanged(cls, order: Order, *, actor=None, reason: str = '') -> Order:
-        order = cls._lock(order)
-        cls._ensure_active(order)
-        if order.return_type == Order.ReturnType.EXCHANGED:
-            raise LifecycleError('Order is already marked as exchanged.')
-        order.return_type = Order.ReturnType.EXCHANGED
-        if not order.returned_at:
-            order.returned_at = timezone.now()
-            order.returned_by = actor
-        if reason:
-            order.return_reason = reason
-        order.save(update_fields=[
-            'return_type', 'returned_at', 'returned_by', 'return_reason', 'updated_at',
-        ])
-        OrderLoggingService.log(
-            order=order,
-            action=OrderLog.Action.RETURN_EXCHANGE_CHANGED,
-            user=actor,
-            details={'return_type': Order.ReturnType.EXCHANGED, 'reason': reason},
-        )
-        # Canonical lifecycle: the goods came back — done -> returned.
-        from apps.orders.status_service import OrderStatusService
-        OrderStatusService.transition(
-            order, Order.Status.RETURNED, actor=actor,
-            note=reason or 'exchanged',
-            force=(order.status != Order.Status.DONE),
-        )
-        return order
-
-    @classmethod
-    @transaction.atomic
     def restore_stock_from_return(cls, order: Order, *, actor=None) -> Order:
         order = cls._lock(order)
         cls._ensure_active(order)

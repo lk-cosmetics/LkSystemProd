@@ -42,7 +42,7 @@ from apps.clients.models import Client
 from apps.clients.utils import normalize_tunisian_phone
 from apps.company.models import Company
 from apps.inventory.models import SalesChannelInventory, InventoryMovement
-from apps.orders.models import Order, OrderLine, OrderLog, OrderSyncEvent
+from apps.orders.models import Order, OrderLine, OrderSyncEvent
 from apps.products.models import Product
 from apps.products.product_sync_service import ProductSyncService
 from apps.sales_channels.models import SalesChannel
@@ -60,9 +60,6 @@ class OrderIngestionError(Exception):
 
 
 # ─── WooCommerce status sets ──────────────────────────────────────────────────
-
-# Only new/active website orders are synced into the system by default.
-WC_ALL_SYNCABLE_STATUSES = ['processing']
 
 # Statuses that should reserve/deduct finished product stock.
 WC_MOVEMENT_STATUSES = {Order.Status.DONE}
@@ -1381,17 +1378,6 @@ class OrderIngestionService:
                 )
                 if inventory:
                     inventory.quantity = quantity_after
-
-    @classmethod
-    def _create_sale_movements(
-        cls,
-        order: Order,
-        lines: list,
-        sales_channel: SalesChannel,
-        created_by,
-    ) -> None:
-        """Backward-compatible wrapper for older callers."""
-        cls._sync_inventory_movements(order, lines, sales_channel, created_by)
 
     # ─── WC status mapping ────────────────────────────────────────────────────
 
