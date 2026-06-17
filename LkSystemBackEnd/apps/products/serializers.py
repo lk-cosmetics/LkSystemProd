@@ -9,6 +9,7 @@ from rest_framework import serializers
 from decimal import Decimal
 
 from .models import Product, ProductAuditLog
+from apps.categories.models import Category
 
 
 class PackItemSerializer(serializers.Serializer):
@@ -23,7 +24,12 @@ class ProductSerializer(serializers.ModelSerializer):
     brand_name = serializers.CharField(source='brand.name', read_only=True, allow_null=True)
     profit_margin = serializers.FloatField(read_only=True)
     pack_items_detail = serializers.SerializerMethodField(read_only=True)
-    categories = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
+    # Writable: lets staff link a product to categories from the product form
+    # (WooCommerce sync still attaches its own via the product-sync hook). The
+    # assigned categories are validated to the product's own brand in validate().
+    categories = serializers.PrimaryKeyRelatedField(
+        many=True, required=False, queryset=Category.objects.all(),
+    )
     category_names = serializers.SerializerMethodField(read_only=True)
     stock_total = serializers.SerializerMethodField(read_only=True)
     stock_by_channel = serializers.SerializerMethodField(read_only=True)
@@ -72,6 +78,26 @@ class ProductSerializer(serializers.ModelSerializer):
             'is_deleted',
             'deleted_at',
         ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Tenant isolation: a user may only link a product to categories inside
+        # the sales channels they can reach. Scoping the field queryset rejects
+        # a foreign-company category PK at field level — before validate() and
+        # independent of when the product's brand is resolved (the brand can be
+        # injected after validation on the workspace-create path).
+        request = self.context.get('request')
+        categories_field = self.fields.get('categories')
+        if request is not None and categories_field is not None:
+            from apps.rbac.services import visible_sales_channel_ids
+            channel_ids = visible_sales_channel_ids(request.user)
+            if channel_ids is None:
+                queryset = Category.objects.all()
+            elif not channel_ids:
+                queryset = Category.objects.none()
+            else:
+                queryset = Category.objects.filter(sales_channel_id__in=channel_ids)
+            categories_field.child_relation.queryset = queryset
 
     def get_pack_items_detail(self, obj):
         """Enrich pack_items with product name and image for display."""
@@ -163,6 +189,25 @@ class ProductSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'pack_items': 'pack_items must be empty when is_pack is False.'
             })
+
+        # Categories can only be linked within the product's own brand — a
+        # category belongs to a brand through its sales channel.
+        categories = attrs.get('categories')
+        if categories:
+            brand = attrs.get('brand') or getattr(self.instance, 'brand', None)
+            brand_id = getattr(brand, 'id', None)
+            if brand_id is not None:
+                cross_brand = [
+                    c.name for c in categories
+                    if getattr(c.sales_channel, 'brand_id', None) not in (None, brand_id)
+                ]
+                if cross_brand:
+                    raise serializers.ValidationError({
+                        'categories': (
+                            "These categories belong to a different brand: "
+                            + ", ".join(cross_brand)
+                        )
+                    })
 
         return attrs
 

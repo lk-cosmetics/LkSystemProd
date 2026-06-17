@@ -11,6 +11,7 @@ import type {
   CreateCategoryRequest,
   UpdateCategoryRequest,
   PaginatedResponse,
+  OrderListItem,
 } from '@/types';
 
 interface CategoryQueryParams {
@@ -107,6 +108,22 @@ class CategoryService {
   async getCategoryById(id: number): Promise<Category> {
     const response = await apiClient.get<Category>(
       `${CATEGORY_ENDPOINT}${id}/`
+    );
+    return response.data;
+  }
+
+  /**
+   * Orders that contain at least one product in this category. The backend
+   * scopes the rows to the caller's visible orders and gates them by the
+   * view_orders permission, so this never leaks orders outside the user's reach.
+   */
+  async getCategoryOrders(
+    id: number,
+    params: { page?: number; page_size?: number } = {},
+  ): Promise<PaginatedResponse<OrderListItem>> {
+    const response = await apiClient.get<PaginatedResponse<OrderListItem>>(
+      `${CATEGORY_ENDPOINT}${id}/orders/`,
+      { params },
     );
     return response.data;
   }

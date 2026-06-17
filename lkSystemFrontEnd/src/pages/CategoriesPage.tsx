@@ -82,8 +82,21 @@ import {
   useSyncCategoriesFromWooCommerce,
   usePreviewCategoriesFromWooCommerce,
   useSyncSelectedCategoriesFromWooCommerce,
+  useCategoryOrders,
 } from '@/hooks/queries';
-import type { CategoryListItem } from '@/types';
+import type { CategoryListItem, OrderListItem } from '@/types';
+
+// Canonical 8-state lifecycle → pill colors (mirrors the Orders page palette).
+const ORDER_STATUS_PILL: Record<string, string> = {
+  new: 'bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300',
+  confirmed: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
+  not_answered: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
+  delayed: 'bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300',
+  packaging: 'bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300',
+  done: 'bg-green-100 text-green-700 dark:bg-green-500/15 dark:text-green-300',
+  returned: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
+  canceled: 'bg-slate-100 text-slate-600 dark:bg-slate-500/15 dark:text-slate-300',
+};
 import { getMediaUrl } from '@/utils/helpers';
 
 // Memoized Category Row Component to prevent unnecessary re-renders
@@ -311,6 +324,12 @@ export default function CategoriesPage() {
 
   // Form state
   const [formData, setFormData] = useState<CategoryFormData>(initialFormData);
+
+  // Orders that contain a product in the open category (detail dialog only).
+  const { data: categoryOrders, isLoading: categoryOrdersLoading } = useCategoryOrders(
+    selectedCategory?.id,
+    viewDialog && !!selectedCategory,
+  );
 
   // Sync dialog state
   const [syncDialog, setSyncDialog] = useState(false);
@@ -1012,6 +1031,77 @@ export default function CategoriesPage() {
                     <p className="text-2xl font-bold">{selectedCategory.children_count}</p>
                   </div>
                 </div>
+              </div>
+
+              {/* Orders in this category */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <h4 className="font-semibold flex items-center gap-2 text-sm text-l-text-2 dark:text-d-text-2">
+                    <ListOrdered className="size-4" />
+                    Orders in this category
+                    {categoryOrders && (
+                      <Badge variant="secondary" className="tabular-nums">{categoryOrders.count}</Badge>
+                    )}
+                  </h4>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 gap-1 text-xs text-primary shrink-0"
+                    onClick={() => {
+                      setViewDialog(false);
+                      navigate(`/dashboard/products?category=${selectedCategory.id}`);
+                    }}
+                  >
+                    View products <ChevronRight className="size-3.5" />
+                  </Button>
+                </div>
+
+                {categoryOrdersLoading ? (
+                  <div className="space-y-2">
+                    {[0, 1, 2].map((i) => (
+                      <div key={i} className="h-12 rounded-lg bg-l-bg-2/60 dark:bg-d-bg-2/60 animate-pulse" />
+                    ))}
+                  </div>
+                ) : !categoryOrders || categoryOrders.results.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-l-border dark:border-d-border py-8 text-center">
+                    <ListOrdered className="size-6 text-l-text-3 dark:text-d-text-3" />
+                    <p className="text-sm text-l-text-2 dark:text-d-text-2">No orders yet for this category</p>
+                    <p className="text-xs text-l-text-3 dark:text-d-text-3 max-w-xs">
+                      Orders show up here once a customer buys a product linked to this category.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-l-border dark:border-d-border divide-y divide-l-border dark:divide-d-border max-h-72 overflow-y-auto">
+                    {categoryOrders.results.map((o: OrderListItem) => (
+                      <div
+                        key={o.id}
+                        className="flex items-center gap-3 px-3 py-2.5 hover:bg-l-bg-2/50 dark:hover:bg-d-bg-2/50 transition-colors"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-xs font-semibold truncate">{o.order_number}</span>
+                            <span
+                              className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${ORDER_STATUS_PILL[o.status] ?? 'bg-slate-100 text-slate-600'}`}
+                            >
+                              {o.status_display}
+                            </span>
+                          </div>
+                          <p className="truncate text-xs text-l-text-3 dark:text-d-text-3">
+                            {o.delivery_name || o.client_name || 'Walk-in'} · {new Date(o.created_at).toLocaleDateString()}
+                          </p>
+                        </div>
+                        <p className="shrink-0 text-sm font-semibold tabular-nums">
+                          {Number(o.total || 0).toFixed(3)}
+                        </p>
+                      </div>
+                    ))}
+                    {categoryOrders.count > categoryOrders.results.length && (
+                      <div className="px-3 py-2 text-center text-[11px] text-l-text-3 dark:text-d-text-3">
+                        Showing {categoryOrders.results.length} of {categoryOrders.count}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Timestamps */}

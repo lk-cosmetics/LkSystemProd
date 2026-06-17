@@ -40,6 +40,19 @@ export function useCategory(id: number) {
 }
 
 /**
+ * Orders containing a product in this category. Enabled-gated so it only fires
+ * while the category detail panel is open.
+ */
+export function useCategoryOrders(id: number | undefined, enabled = true) {
+  return useQuery({
+    queryKey: [...categoriesKeys.detail(id ?? 0), 'orders'],
+    queryFn: () => categoryService.getCategoryOrders(id as number, { page_size: 50 }),
+    enabled: Boolean(id) && enabled,
+    staleTime: 60 * 1000,
+  });
+}
+
+/**
  * Fetch category tree
  */
 export function useCategoryTree() {
