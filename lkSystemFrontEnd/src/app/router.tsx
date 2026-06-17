@@ -1,6 +1,5 @@
-import { Suspense } from 'react';
+import { Suspense, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import Layout from '@/components/layout/Layout';
 import DashbordLayout from '@/components/dashboardLayout/pageDashbord';
 import ProtectedRoute from '@/components/ProtectedRoute';
 import RoleGuard from '@/components/RoleGuard';
@@ -14,7 +13,6 @@ import { isPosOnlyUser } from '@/hooks/useAuth';
 // fetched on demand. This keeps the initial bundle small (the router,
 // guards and shared layouts ship eagerly; everything else streams in
 // behind the <Suspense> boundary below).
-const HomePage = lazyWithRetry(() => import('@/pages/HomePage'));
 const LoginPage = lazyWithRetry(() => import('@/pages/login'));
 const ForgotPasswordPage = lazyWithRetry(() => import('@/pages/ForgotPasswordPage'));
 const ResetPasswordPage = lazyWithRetry(() => import('@/pages/ResetPasswordPage'));
@@ -53,15 +51,30 @@ function DashboardIndexRedirect() {
   return <StatisticsPage />;
 }
 
+/**
+ * Hard redirect to an external site. Used for the public landing ("/"), which
+ * now points at the marketing site instead of an in-app home page. The app
+ * itself lives at /login and /dashboard and is unaffected.
+ */
+const PUBLIC_SITE_URL = 'https://therapybylk.com/';
+
+function ExternalRedirect({ to }: { to: string }) {
+  useEffect(() => {
+    window.location.replace(to);
+  }, [to]);
+  return null;
+}
+
 export function AppRouter() {
   return (
     <BrowserRouter>
       <RouteErrorBoundary>
         <Suspense fallback={<PageLoader />}>
         <Routes>
-        <Route path="/" element={<Layout />}>
-          <Route index element={<HomePage />} />
-        </Route>
+        {/* Public landing removed — the root path redirects to the marketing
+            site. The application is reached via /login and /dashboard. */}
+        <Route path="/" element={<ExternalRedirect to={PUBLIC_SITE_URL} />} />
+        <Route path="/home" element={<ExternalRedirect to={PUBLIC_SITE_URL} />} />
 
         {/* Protected Dashboard Routes */}
         <Route element={<ProtectedRoute />}>

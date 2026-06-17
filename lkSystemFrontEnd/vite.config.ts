@@ -44,7 +44,7 @@ export default defineConfig({
         navigateFallback: '/index.html',
         navigateFallbackDenylist: [
           /^\/api\//,
-          /^\/admin\//,
+          /^\/secure-access-lk\//,
           /^\/media\//,
           /^\/static\//,
           /^\/ws\//,
