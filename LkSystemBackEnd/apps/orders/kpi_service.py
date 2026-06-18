@@ -18,8 +18,6 @@ from apps.orders.models import Order
 class OrderKPIService:
     """Compute order KPIs from the canonical ``status``."""
 
-    SUCCESS_STATUSES = (Order.Status.DONE,)
-
     @classmethod
     def base_queryset(
         cls,

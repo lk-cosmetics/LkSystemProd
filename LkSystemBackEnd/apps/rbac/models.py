@@ -92,6 +92,19 @@ class Role(models.Model):
         default=False,
         help_text='System roles cannot be deleted or renamed.',
     )
+    # Page-access denylist: keys (from apps.rbac.constants.SEED_PAGES) of pages
+    # this role may NOT navigate to, even when it holds the page's capability
+    # permission. This is a *navigation* control only — it never grants or
+    # revokes a capability. Example: deny the Cashier role the "Orders" page
+    # while keeping ``create_orders`` so POS can still create orders. Empty
+    # (the default) means "no page is hidden" — every page the role's
+    # permissions allow stays reachable.
+    hidden_pages = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Page keys this role cannot open (navigation only; does not '
+                  'change permissions).',
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

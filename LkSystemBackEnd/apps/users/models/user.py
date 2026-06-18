@@ -54,7 +54,18 @@ class User(AbstractUser):
     
     # Remove username field - we use matricule instead
     username = None
-    
+
+    # Authorisation is handled entirely by our own RBAC system (apps.rbac:
+    # AppPermission / Role / UserRole), never Django's native auth groups or
+    # per-user permissions. Drop the two inherited M2M relations from
+    # ``PermissionsMixin`` so the schema carries no dead ``users_user_groups`` /
+    # ``users_user_user_permissions`` tables. ``is_superuser`` is kept (the
+    # single global root bypass) — Django admin is superuser-only here, so
+    # ``has_perm`` / ``has_module_perms`` short-circuit on it and never touch
+    # these relations.
+    groups = None
+    user_permissions = None
+
     # Primary identifier - Generated from Company abbreviation
     matricule = models.CharField(
         max_length=20,

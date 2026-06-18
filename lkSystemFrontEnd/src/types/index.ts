@@ -108,6 +108,13 @@ export interface User {
   allowed_brand_ids?: number[];
   /** RBAC permission codenames (e.g. 'view_products', 'create_orders', 'use_pos'). */
   permissions: string[];
+  /**
+   * Page keys this user may NOT navigate to (denied per-role via Roles → Page
+   * Access). Navigation-only: it never reflects capability permissions, so a
+   * page can be hidden while the underlying permissions (e.g. create_orders for
+   * POS) remain intact.
+   */
+  hidden_pages?: string[];
   /** True only for the Django superuser (platform owner). Single root bypass. */
   is_superuser?: boolean;
   // Computed properties for backwards compatibility
@@ -574,6 +581,9 @@ export interface ProductListItem {
   status: ProductStatus;
   purchase_price: string;
   sales_price: string;
+  /** Category ids + names this product belongs to (synced from WooCommerce or assigned). */
+  categories?: number[];
+  category_names?: string[];
   is_pack: boolean;
   pack_items: PackItem[] | null;
   created_at: string;
@@ -631,6 +641,7 @@ export interface CreateProductRequest {
   product_type?: ProductType;
   status?: ProductStatus;
   brand?: number;
+  categories?: number[];
   purchase_price?: string;
   sales_price?: string;
   image_url?: string;
@@ -645,6 +656,7 @@ export interface UpdateProductRequest {
   product_type?: ProductType;
   status?: ProductStatus;
   brand?: number | null;
+  categories?: number[];
   purchase_price?: string;
   sales_price?: string;
   image_url?: string;
@@ -673,6 +685,8 @@ export interface CategoryListItem {
   display_order: number;
   children_count: number;
   products_count: number;
+  /** Count of resell_product-type products in this category. */
+  resell_products_count: number;
   created_at: string;
   updated_at: string;
 }
@@ -1275,6 +1289,21 @@ export type OrderStatus =
 
 export type OrderSource = 'WOOCOMMERCE' | 'POS' | 'MANUAL';
 
+/** How an order's assigned employee was set. '' = never assigned. */
+export type AssignmentType = 'auto' | 'manual' | '';
+
+/** An employee that can receive orders, plus auto-assignment eligibility and
+ *  current open workload — drives the settings modal and the assign dropdown. */
+export interface AssignableEmployee {
+  id: number;
+  name: string;
+  matricule: string;
+  email: string;
+  role: string | null;
+  enabled: boolean;
+  open_orders: number;
+}
+
 /**
  * Social channel a manual / back-office order originated from. Distinct from
  * `OrderSource` (which records the *system* the order entered through).
@@ -1447,6 +1476,14 @@ export interface OrderListItem {
   edit_lock_heartbeat_at: string | null;
   edit_lock_expires_at: string | null;
   edit_lock_token: string;
+  // Assignment — who is responsible for processing the order.
+  assigned_agent: number | null;
+  assigned_agent_name: string | null;
+  assigned_by: number | null;
+  assigned_by_name: string | null;
+  assigned_at: string | null;
+  assignment_type: AssignmentType;
+  assignment_type_display: string;
   // Derived informational fields (never lifecycle)
   delivery_method: CleanDeliveryMethod;
   delivery_method_display: string;

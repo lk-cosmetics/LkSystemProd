@@ -9,10 +9,21 @@ import {
   RefreshCw,
   Search,
   SlidersHorizontal,
+  Trash2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -92,6 +103,9 @@ export default function InvoicesPage() {
   const [selectedOrder, setSelectedOrder] = useState<OrderDetail | null>(null);
   const [selectedCompany, setSelectedCompany] = useState<Company | null>(null);
 
+  const [deleteTarget, setDeleteTarget] = useState<InvoiceListItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setDebouncedSearch(search.trim());
@@ -166,6 +180,23 @@ export default function InvoicesPage() {
     setSelectedOrder(updated);
     await loadInvoices(true);
     toast.success(`Invoice ${updated.invoice_number} updated.`);
+  };
+
+  const confirmDeleteInvoice = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      // Deletes only the invoice (clears it from the registry); the order is
+      // never touched. ``id`` is the order id behind the invoice.
+      await orderService.deleteInvoice(deleteTarget.id);
+      toast.success(`Invoice ${deleteTarget.invoice_number} deleted. The order was kept.`);
+      setDeleteTarget(null);
+      await loadInvoices(true);
+    } catch (deleteError) {
+      toast.error(apiError(deleteError, 'Could not delete this invoice.'));
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const clearFilters = () => {
@@ -320,7 +351,7 @@ export default function InvoicesPage() {
                   <TableHead>Company / Brand</TableHead>
                   <TableHead>Date</TableHead>
                   <TableHead className="text-right">Total</TableHead>
-                  <TableHead className="w-20 text-right">Action</TableHead>
+                  <TableHead className="w-32 text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -355,18 +386,32 @@ export default function InvoicesPage() {
                       {formatMoney(row.currency, row.total)}
                     </TableCell>
                     <TableCell className="text-right">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="gap-1.5"
-                        onClick={() => void openInvoice(row)}
-                        disabled={openingId !== null}
-                      >
-                        {openingId === row.id
-                          ? <Loader2 className="size-3.5 animate-spin" />
-                          : <Eye className="size-3.5" />}
-                        View
-                      </Button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="gap-1.5"
+                          onClick={() => void openInvoice(row)}
+                          disabled={openingId !== null}
+                        >
+                          {openingId === row.id
+                            ? <Loader2 className="size-3.5 animate-spin" />
+                            : <Eye className="size-3.5" />}
+                          View
+                        </Button>
+                        {canEditNumbers && (
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="size-8 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            onClick={() => setDeleteTarget(row)}
+                            title="Delete invoice (keeps the order)"
+                            aria-label={`Delete invoice ${row.invoice_number}`}
+                          >
+                            <Trash2 className="size-4" />
+                          </Button>
+                        )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -381,12 +426,18 @@ export default function InvoicesPage() {
               </div>
             ))}
             {!loading && rows.map(row => (
-              <button
+              <div
                 key={row.id}
-                type="button"
-                className="w-full p-4 text-left transition-colors hover:bg-muted/40"
+                role="button"
+                tabIndex={0}
+                className="w-full cursor-pointer p-4 text-left transition-colors hover:bg-muted/40"
                 onClick={() => void openInvoice(row)}
-                disabled={openingId !== null}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    void openInvoice(row);
+                  }
+                }}
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -401,11 +452,28 @@ export default function InvoicesPage() {
                 </div>
                 <div className="mt-3 flex items-center justify-between">
                   <Badge variant="secondary">{row.brand_name || row.company_name}</Badge>
-                  {openingId === row.id
-                    ? <Loader2 className="size-4 animate-spin" />
-                    : <Eye className="size-4 text-muted-foreground" />}
+                  <div className="flex items-center gap-1">
+                    {openingId === row.id
+                      ? <Loader2 className="size-4 animate-spin" />
+                      : <Eye className="size-4 text-muted-foreground" />}
+                    {canEditNumbers && (
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="size-8 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        onClick={event => {
+                          event.stopPropagation();
+                          setDeleteTarget(row);
+                        }}
+                        title="Delete invoice (keeps the order)"
+                        aria-label={`Delete invoice ${row.invoice_number}`}
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
+                    )}
+                  </div>
                 </div>
-              </button>
+              </div>
             ))}
           </div>
 
@@ -488,6 +556,36 @@ export default function InvoicesPage() {
         canEditInvoice={canEditNumbers}
         onSaveInvoice={updateSelectedInvoice}
       />
+
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={open => { if (!open) setDeleteTarget(null); }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <Trash2 className="size-5 text-destructive" />
+              Delete invoice {deleteTarget?.invoice_number}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes the invoice from the billing registry and frees its
+              number. The order <strong>{deleteTarget?.order_number}</strong> is
+              not affected — only its invoice is deleted. This can&apos;t be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={event => { event.preventDefault(); void confirmDeleteInvoice(); }}
+              disabled={deleting}
+              className="bg-destructive hover:bg-destructive/90 gap-2"
+            >
+              {deleting && <Loader2 className="size-4 animate-spin" />}
+              Delete invoice
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

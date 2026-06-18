@@ -13,7 +13,7 @@ import {
   useSidebar,
 } from '@/components/ui/sidebar';
 import { useAuthStore } from '@/store/authStore';
-import { hasAnyPermission, isPosOnlyUser } from '@/hooks/useAuth';
+import { hasAnyPermission, isPosOnlyUser, isPageHidden } from '@/hooks/useAuth';
 
 export function NavSecondary({
   items,
@@ -28,6 +28,8 @@ export function NavSecondary({
     cashierVisible?: boolean;
     /** Item is shown *exclusively* when the user is a cashier-only workspace. */
     cashierOnly?: boolean;
+    /** Page-registry key — hidden per role via Roles → Page Access. */
+    page?: string;
   }[];
 } & React.ComponentPropsWithoutRef<typeof SidebarGroup>) {
   const { isMobile, setOpenMobile } = useSidebar();
@@ -43,9 +45,12 @@ export function NavSecondary({
 
   const visibleItems = items.filter(item => {
     if (!user) return false;
-    const cashierWorkspace = isPosOnlyUser(user);
-    if (cashierWorkspace && !item.cashierVisible) return false;
-    if (item.cashierOnly && !cashierWorkspace) return false;
+    // The cashier-only alias (e.g. "Account") is shown exclusively to a
+    // POS-only account; everything else is permission-driven so granted pages
+    // always surface.
+    if (item.cashierOnly && !isPosOnlyUser(user)) return false;
+    // Page hidden for this role (navigation control, independent of perms).
+    if (isPageHidden(user, item.page)) return false;
     if (item.requiredPermissions?.length) {
       return hasAnyPermission(user, item.requiredPermissions);
     }

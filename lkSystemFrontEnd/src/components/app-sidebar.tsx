@@ -14,6 +14,7 @@ import {
   IconDiscount,
   IconBoxSeam,
   IconReceipt,
+  IconClipboardCheck,
   IconFileInvoice,
   IconUsersGroup,
   IconCash,
@@ -34,54 +35,66 @@ import { userService } from '@/services/user.service';
 import { getMediaUrl } from '@/utils/helpers';
 
 // Static navigation data (doesn't depend on user state)
+// ``page`` ties each item to a page key in the RBAC page registry. A page can
+// be hidden per role (Roles → Page Access) without touching permissions, so an
+// item is shown only when the user holds the capability AND the page isn't
+// hidden for them. ``My Orders`` shares the ``orders`` page key.
 const navMain = [
   {
     title: 'Dashboard',
     url: '/dashboard',
     icon: IconDashboard,
     requiredPermissions: ['view_bi_dashboard'],
+    page: 'dashboard',
   },
   {
     title: 'Users',
     url: '/dashboard/users',
     icon: IconUsers,
     requiredPermissions: ['view_users'],
+    page: 'users',
   },
   {
     title: 'Roles',
     url: '/dashboard/roles',
     icon: IconShield,
     requiredPermissions: ['view_roles'],
+    page: 'roles',
   },
   {
     title: 'Companies',
     url: '/dashboard/companies',
     icon: IconBuilding,
     requiredPermissions: ['view_company'],
+    page: 'companies',
   },
   {
     title: 'Brands',
     url: '/dashboard/brands',
     icon: IconTag,
     requiredPermissions: ['view_brands'],
+    page: 'brands',
   },
   {
     title: 'Sales Channels',
     url: '/dashboard/sales-channels',
     icon: IconShoppingCart,
     requiredPermissions: ['view_sales_channels'],
+    page: 'sales_channels',
   },
   {
     title: 'Products',
     url: '/dashboard/products',
     icon: IconPackage,
     requiredPermissions: ['view_products'],
+    page: 'products',
   },
   {
     title: 'Inventory',
     url: '/dashboard/inventory',
     icon: IconBoxSeam,
     requiredPermissions: ['view_inventory'],
+    page: 'inventory',
   },
   {
     title: 'Manufacturing',
@@ -92,42 +105,56 @@ const navMain = [
     // CEO / Manager / Stock Keeper get it via the seeded SYSTEM_ROLES;
     // any custom role with view_manufacturing also sees it.
     requiredPermissions: ['view_manufacturing'],
+    page: 'manufacturing',
   },
   {
     title: 'Categories',
     url: '/dashboard/categories',
     icon: IconCategory,
     requiredPermissions: ['view_categories'],
+    page: 'categories',
   },
   {
     title: 'Promotions',
     url: '/dashboard/promotions',
     icon: IconDiscount,
     requiredPermissions: ['view_promotions'],
+    page: 'promotions',
   },
   {
     title: 'Orders',
     url: '/dashboard/orders',
     icon: IconReceipt,
     requiredPermissions: ['view_orders'],
+    page: 'orders',
+  },
+  {
+    title: 'My Orders',
+    url: '/dashboard/my-orders',
+    icon: IconClipboardCheck,
+    requiredPermissions: ['view_orders'],
+    page: 'orders',
   },
   {
     title: 'Invoices',
     url: '/dashboard/invoices',
     icon: IconFileInvoice,
     requiredPermissions: ['view_invoices'],
+    page: 'invoices',
   },
   {
     title: 'Clients',
     url: '/dashboard/clients',
     icon: IconUsersGroup,
     requiredPermissions: ['view_clients'],
+    page: 'clients',
   },
   {
     title: 'POS',
     url: '/dashboard/pos',
     icon: IconCash,
     requiredPermissions: ['use_pos'],
+    page: 'pos',
     cashierVisible: true,
   },
 ];
@@ -138,6 +165,7 @@ const navSecondary = [
     url: '/dashboard/settings',
     icon: IconSettings,
     requiredPermissions: ['view_settings'],
+    page: 'settings',
   },
   {
     // Cashier-only alias — same target page, friendlier label, only shown

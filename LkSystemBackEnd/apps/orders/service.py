@@ -42,7 +42,7 @@ from apps.clients.models import Client
 from apps.clients.utils import normalize_tunisian_phone
 from apps.company.models import Company
 from apps.inventory.models import SalesChannelInventory, InventoryMovement
-from apps.orders.models import Order, OrderLine, OrderLog, OrderSyncEvent
+from apps.orders.models import Order, OrderLine, OrderSyncEvent
 from apps.products.models import Product
 from apps.products.product_sync_service import ProductSyncService
 from apps.sales_channels.models import SalesChannel
@@ -60,9 +60,6 @@ class OrderIngestionError(Exception):
 
 
 # ─── WooCommerce status sets ──────────────────────────────────────────────────
-
-# Only new/active website orders are synced into the system by default.
-WC_ALL_SYNCABLE_STATUSES = ['processing']
 
 # Statuses that should reserve/deduct finished product stock.
 WC_MOVEMENT_STATUSES = {Order.Status.DONE}
@@ -344,6 +341,21 @@ class OrderIngestionService:
                 "Client order count updated: client=%s now has %d orders",
                 client.id, client.number_of_orders
             )
+
+        # 9. auto-assign brand-new WooCommerce/API imports to a pool employee.
+        # Best-effort, savepoint-isolated: a failure here must never roll back
+        # or block the import. POS/manual orders are handled by the person who
+        # created them, so they are intentionally out of scope.
+        if is_new and source == Order.Source.WOOCOMMERCE:
+            try:
+                with transaction.atomic():
+                    from apps.orders.assignment_service import OrderAssignmentService
+                    OrderAssignmentService.auto_assign(order)
+            except Exception:
+                logger.exception(
+                    "Auto-assignment failed for order %s; left unassigned",
+                    order.order_number,
+                )
 
         action = 'created' if is_new else 'updated'
         logger.info(
@@ -1366,17 +1378,6 @@ class OrderIngestionService:
                 )
                 if inventory:
                     inventory.quantity = quantity_after
-
-    @classmethod
-    def _create_sale_movements(
-        cls,
-        order: Order,
-        lines: list,
-        sales_channel: SalesChannel,
-        created_by,
-    ) -> None:
-        """Backward-compatible wrapper for older callers."""
-        cls._sync_inventory_movements(order, lines, sales_channel, created_by)
 
     # ─── WC status mapping ────────────────────────────────────────────────────
 

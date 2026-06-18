@@ -39,3 +39,56 @@ class ClientMatriculeFiscaleTests(TestCase):
             company=self.company, email='person@example.com', first_name='P',
         )
         self.assertEqual(client.matricule_fiscale, '')
+
+
+class POSClientCreateIdempotencyTests(TestCase):
+    """create-from-pos must never dead-end on a duplicate: it selects the
+    existing client (matched by normalized phone, then email) and flags
+    ``existing`` so the POS auto-selects it instead of erroring."""
+
+    def setUp(self):
+        from rest_framework.test import APIRequestFactory
+        from apps.sales_channels.models import SalesChannel
+        self.company = Company.objects.create(name='POS Co', abbreviation='PC')
+        self.brand = Brand.objects.create(company=self.company, name='PB')
+        self.channel = SalesChannel.objects.create(
+            brand=self.brand, name='Shop', code='SHOP',
+            channel_type=SalesChannel.ChannelType.POS,
+        )
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        self.admin = User.objects.create_user(
+            matricule='PADM', email='padm@x.com', password='x',
+            current_company=self.company,
+        )
+        self.admin.is_superuser = True
+        self.admin.save(update_fields=['is_superuser'])
+        self.factory = APIRequestFactory()
+
+    def _create(self, payload):
+        from rest_framework.test import force_authenticate
+        from apps.clients.views import ClientViewSet
+        request = self.factory.post('/api/v1/clients/create-from-pos/', payload, format='json')
+        force_authenticate(request, user=self.admin)
+        return ClientViewSet.as_view({'post': 'create_from_pos'})(request)
+
+    def test_new_client_is_created(self):
+        resp = self._create({'sales_channel': self.channel.id, 'first_name': 'Sam', 'phone': '24512995'})
+        self.assertEqual(resp.status_code, 201)
+        self.assertFalse(resp.data.get('existing'))
+        self.assertEqual(Client.objects.filter(company=self.company).count(), 1)
+
+    def test_duplicate_phone_selects_existing_no_400(self):
+        self._create({'sales_channel': self.channel.id, 'first_name': 'Sam', 'phone': '24512995'})
+        # Same number in a different written form → normalized match.
+        resp = self._create({'sales_channel': self.channel.id, 'first_name': 'Sam', 'phone': '+216 24 512 995'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data.get('existing'))
+        self.assertEqual(Client.objects.filter(company=self.company).count(), 1)
+
+    def test_duplicate_email_selects_existing_no_400(self):
+        self._create({'sales_channel': self.channel.id, 'first_name': 'A', 'email': 'dup@x.com'})
+        resp = self._create({'sales_channel': self.channel.id, 'first_name': 'B', 'email': 'dup@x.com'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data.get('existing'))
+        self.assertEqual(Client.objects.filter(company=self.company, email='dup@x.com').count(), 1)

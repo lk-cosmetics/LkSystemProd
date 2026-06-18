@@ -18,13 +18,13 @@ import {
   Undo2, Loader2, TrendingUp,
   Truck, Store, RotateCcw, Star, ArrowUpDown, ArrowUp, ArrowDown,
   X, SlidersHorizontal, AlertTriangle, Phone, ShieldAlert, Plus, Ban,
-  User, ChevronRight,
+  User, ChevronRight, ChevronLeft, ChevronDown, Users,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -57,7 +57,7 @@ import {
 import type {
   OrderListItem, OrderDetail, OrderEditLineInput, OrderEditRequest,
   OrderDiscountType, OrderSummary, OrderStatus, SalesChannel, ProductListItem,
-  OrderLogEntry, POSOrderCreateRequest,
+  OrderLogEntry, POSOrderCreateRequest, AssignableEmployee,
 } from '@/types';
 import type {
   OrderSyncEvent,
@@ -72,6 +72,9 @@ import {
   PackagingDialog, ALLOWED_NEXT_STATUSES,
 } from './components/OrderDialogs';
 import { getMissingStock, type MissingStockLine } from './components/orderStock';
+import {
+  AssignmentBadge, AssignEmployeeDialog, AutoAssignmentSettingsDialog,
+} from './components/OrderAssignment';
 import {
   ORDER_STATUS_ROW_STYLES, OrderStatusBadge,
   SyncStatusBadge, orderStatusLabel,
@@ -150,6 +153,9 @@ const ORDER_SORT_OPTIONS = [
   { value: 'business_priority_rank,-created_at', label: 'Business priority' },
   { value: '-client__points,-created_at', label: 'Client points' },
 ] as const;
+
+// Shared label styling for the filter-bar dropdowns (compact, uppercase, muted).
+const FILTER_LABEL = 'mb-1 block text-[11px] font-semibold uppercase tracking-wide text-muted-foreground';
 
 // The tabs ARE the canonical lifecycle (plus "All"). Each tab maps 1:1 to a
 // status value, so the tab filter (?status=…), the count (by_status) and the
@@ -330,20 +336,33 @@ function PriorityBadge({
 /* KPI CARD                                                                  */
 /* ═══════════════════════════════════════════════════════════════════════════ */
 
-function KpiCard({ title, value, tone, icon }: Readonly<{
-  title: string; value: string | number; tone?: string; icon?: ReactNode;
+function KpiCard({ title, value, unit, accent = false, icon }: Readonly<{
+  title: string;
+  value: string | number;
+  /** Small currency/unit label rendered before the value (e.g. "TND") so the
+   *  hero number never wraps onto its own line. */
+  unit?: string;
+  /** Emerald highlight for the headline metrics (net revenue, sales). */
+  accent?: boolean;
+  icon?: ReactNode;
 }>) {
   return (
-    <Card>
-      <CardHeader className="p-4 pb-1">
-        <CardTitle className={`text-xs flex items-center gap-1 text-muted-foreground ${tone ?? ''}`}>
-          {icon}{title}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="p-4 pt-0">
-        <p className={`text-2xl font-bold tracking-tight tabular-nums ${tone ?? ''}`}>{value}</p>
-      </CardContent>
-    </Card>
+    <div className="flex min-w-[8rem] shrink-0 snap-start flex-col gap-2 rounded-xl border bg-card p-3.5 shadow-sm sm:min-w-0 sm:p-4">
+      <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        {icon && (
+          <span className={`flex size-6 shrink-0 items-center justify-center rounded-md ${accent ? 'bg-emerald-50 text-emerald-600' : 'bg-muted text-muted-foreground'}`}>
+            {icon}
+          </span>
+        )}
+        <span className="truncate">{title}</span>
+      </span>
+      <span className="flex items-baseline gap-1">
+        {unit && <span className="text-xs font-semibold text-muted-foreground">{unit}</span>}
+        <span className={`text-xl font-bold tabular-nums tracking-tight sm:text-2xl ${accent ? 'text-emerald-600' : 'text-foreground'}`}>
+          {value}
+        </span>
+      </span>
+    </div>
   );
 }
 
@@ -363,8 +382,16 @@ export default function OrdersPage() {
   const [paymentFilter, setPaymentFilter] = useState('all');
   const [brandFilter, setBrandFilter] = useState('all');
   const [channelFilter, setChannelFilter] = useState('all');
+  // Assignment filters: 'all' | 'unassigned' | '<employeeId>' and 'all'|'auto'|'manual'.
+  const [assignedFilter, setAssignedFilter] = useState('all');
+  const [assignmentTypeFilter, setAssignmentTypeFilter] = useState('all');
   const [ordering, setOrdering] = useState(DEFAULT_LIFO_ORDERING);
   const [includeDeleted, setIncludeDeleted] = useState(false);
+  // Filters card is collapsible. Default open on tablet/desktop, collapsed on
+  // phones (where the search + 6 dropdowns otherwise eat the whole screen).
+  const [filtersOpen, setFiltersOpen] = useState(
+    () => typeof window === 'undefined' || window.matchMedia('(min-width: 640px)').matches,
+  );
   const [currentPage, setCurrentPage] = useState(1);
   const [pageJump, setPageJump] = useState('1');
   const [totalOrders, setTotalOrders] = useState(0);
@@ -458,6 +485,10 @@ export default function OrdersPage() {
   const [syncingSelected, setSyncingSelected] = useState(false);
   const [activeSyncEvent, setActiveSyncEvent] = useState<OrderSyncEvent | null>(null);
 
+  // Bumped to force a list refetch even when no filter/page actually changed
+  // (e.g. after creating an order while already on the default view).
+  const [reloadNonce, setReloadNonce] = useState(0);
+
   /* ── alert state ─── */
   const [successDialog, setSuccessDialog] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
@@ -496,6 +527,13 @@ export default function OrdersPage() {
   const canEditInvoiceNumbers = hasPermission(user, 'edit_invoice_numbers');
   // Phase D — admin/manager-only audited backward status override.
   const canManualOverride = hasPermission(user, 'manual_status_override');
+  const canAssign = hasPermission(user, 'assign_orders');
+
+  // Manual (re)assignment + auto-assignment pool (managers only).
+  const [assignTarget, setAssignTarget] = useState<OrderListItem | null>(null);
+  const [assignmentSettingsOpen, setAssignmentSettingsOpen] = useState(false);
+  const [assignEmployees, setAssignEmployees] = useState<AssignableEmployee[]>([]);
+  const [assignEmployeesLoading, setAssignEmployeesLoading] = useState(false);
   const deferredSearch = useDeferredValue(search);
 
   /* ── brand/channel maps ─── */
@@ -517,6 +555,8 @@ export default function OrdersPage() {
     paymentFilter !== 'all' ||
     brandFilter !== 'all' ||
     channelFilter !== 'all' ||
+    assignedFilter !== 'all' ||
+    assignmentTypeFilter !== 'all' ||
     includeDeleted ||
     ordering !== defaultOrderingForFlow(flowFilter),
   );
@@ -541,6 +581,8 @@ export default function OrdersPage() {
     setPaymentFilter('all');
     setBrandFilter('all');
     setChannelFilter('all');
+    setAssignedFilter('all');
+    setAssignmentTypeFilter('all');
     setIncludeDeleted(false);
     setOrdering(DEFAULT_LIFO_ORDERING);
   }, []);
@@ -562,6 +604,14 @@ export default function OrdersPage() {
         ...(paymentFilter !== 'all' ? { payment_status: paymentFilter } : {}),
         ...(brandFilter !== 'all' ? { brand: Number(brandFilter) } : {}),
         ...(channelFilter !== 'all' ? { sales_channel: Number(channelFilter) } : {}),
+        ...(assignedFilter === 'unassigned'
+          ? { unassigned: true }
+          : assignedFilter !== 'all'
+            ? { assigned_to: Number(assignedFilter) }
+            : {}),
+        ...(assignmentTypeFilter !== 'all'
+          ? { assignment_type: assignmentTypeFilter as 'auto' | 'manual' }
+          : {}),
         ...(deferredSearch ? { search: deferredSearch } : {}),
       };
       // Each tab maps 1:1 to a canonical order_status value; 'all' filters
@@ -604,6 +654,8 @@ export default function OrdersPage() {
     brandFilter,
     canViewDeleted,
     channelFilter,
+    assignedFilter,
+    assignmentTypeFilter,
     currentPage,
     deferredSearch,
     flowFilter,
@@ -612,9 +664,27 @@ export default function OrdersPage() {
     paymentFilter,
     sourceFilter,
     priorityFilter,
+    reloadNonce,
   ]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Load the assignable-employee roster once for managers — powers the
+  // "Assigned employee" filter, the assign dialog, and the settings modal.
+  const loadAssignEmployees = useCallback(async () => {
+    if (!canAssign) return;
+    try {
+      setAssignEmployeesLoading(true);
+      const res = await orderService.getAssignmentSettings();
+      setAssignEmployees(res.employees);
+    } catch (err) {
+      console.error('Failed to load assignable employees', err);
+    } finally {
+      setAssignEmployeesLoading(false);
+    }
+  }, [canAssign]);
+
+  useEffect(() => { loadAssignEmployees(); }, [loadAssignEmployees]);
 
   // ── Real-time auto-refresh ────────────────────────────────────────────────
   // The priority queue refetches SILENTLY (no spinner) on an interval so new
@@ -1384,7 +1454,7 @@ export default function OrdersPage() {
   const runBulk = async (
     action: BulkOrderAction,
     ids: number[],
-    options: { pos_sales_channel?: number; reason?: string } | undefined,
+    options: { pos_sales_channel?: number; reason?: string; employee_id?: number } | undefined,
     verbPast: string,
   ) => {
     if (ids.length === 0) return;
@@ -1413,6 +1483,16 @@ export default function OrdersPage() {
 
   const handleBulkDelivery = () =>
     runBulk('submit_delivery', deliveryEligibleIds, undefined, 'Sent to delivery');
+  // Bulk assignment (managers): auto-distribute across the pool, or assign all
+  // selected to one employee. Reload the roster after so open-order counts update.
+  const handleBulkAutoAssign = async () => {
+    await runBulk('auto_assign', Array.from(selectedIds), undefined, 'Auto-assigned');
+    loadAssignEmployees();
+  };
+  const handleBulkAssignTo = async (employeeId: number) => {
+    await runBulk('assign', Array.from(selectedIds), { employee_id: employeeId }, 'Assigned');
+    loadAssignEmployees();
+  };
   const openBulkPos = async () => {
     setBulkPosChannel('');
     setBulkPosDestinations([]);
@@ -1672,8 +1752,17 @@ export default function OrdersPage() {
     try {
       const created = await orderService.createManual(payload);
       setCreateOrderOpen(false);
-      await fetchData();
-      setSuccessMessage(`Order ${created.order_number} created.`);
+      // Guarantee the brand-new order is visible right away: a stale tab/search/
+      // filter/sort or being on a later page is what makes a just-created order
+      // "disappear". Drop every filter back to defaults, jump to page 1, and let
+      // the reload nonce force a refetch (clearFilters alone is a no-op when the
+      // view is already default). DEFAULT_LIFO_ORDERING surfaces it at the top.
+      clearFilters();
+      setCurrentPage(1);
+      setPageJump('1');
+      setSelectedIds(new Set());
+      setReloadNonce(n => n + 1);
+      setSuccessMessage(`Order ${created.order_number} created — it's now at the top of the list.`);
       setSuccessDialog(true);
     } catch (err) {
       setErrorMessage(extractErrorMessage(err, 'Failed to create the order.'));
@@ -1832,58 +1921,58 @@ export default function OrdersPage() {
     return counts;
   }, [summary]);
 
+  // Secondary header actions — rendered as a button row on tablet/desktop and
+  // collapsed into a "⋮ More" menu on phones so the header never wraps.
+  const secondaryActions: Array<{ icon: typeof Package; label: string; onClick: () => void; spin?: boolean }> = [
+    ...(canPackageOrders ? [{ icon: Package, label: 'Scan Packaging', onClick: () => { setLookupMode('packaging'); setReturnLookupDialog(true); } }] : []),
+    ...(canProcessReturn ? [{ icon: RotateCcw, label: 'Find Return', onClick: () => { setLookupMode('return'); setReturnLookupDialog(true); } }] : []),
+    ...(canImportOrders ? [{ icon: RefreshCw, label: 'Sync WC', onClick: () => setSyncDialog(true) }] : []),
+    ...(canAssign ? [{ icon: Users, label: 'Auto-assignment', onClick: () => setAssignmentSettingsOpen(true) }] : []),
+    { icon: RefreshCw, label: 'Refresh', onClick: () => fetchData(), spin: loading },
+  ];
+
   return (
     <div className="space-y-5 p-4 sm:p-6">
 
       {/* ── Header ─── */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
           <h1 className="text-xl sm:text-2xl font-bold flex items-center gap-2 tracking-tight">
-            <ShoppingCart className="size-5 sm:size-6" /> Order Operations
+            <ShoppingCart className="size-5 sm:size-6 shrink-0" /> Order Operations
           </h1>
           <p className="text-muted-foreground text-xs sm:text-sm mt-0.5">
-            Confirm clients, route orders to POS, submit delivery, and process returns
+            Confirm clients, route to POS, submit delivery, and process returns
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           {canCreateOrders && (
-            <Button
-              size="sm"
-              onClick={() => setCreateOrderOpen(true)}
-              className="gap-2"
-            >
-              <Plus className="size-4" /> Create Order
+            <Button size="sm" onClick={() => setCreateOrderOpen(true)} className="gap-1.5">
+              <Plus className="size-4" /> <span className="hidden sm:inline">Create Order</span><span className="sm:hidden">Create</span>
             </Button>
           )}
-          {canPackageOrders && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => { setLookupMode('packaging'); setReturnLookupDialog(true); }}
-              className="gap-2"
-            >
-              <Package className="size-4" /> Scan Packaging
-            </Button>
-          )}
-          {canProcessReturn && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => { setLookupMode('return'); setReturnLookupDialog(true); }}
-              className="gap-2"
-            >
-              <RotateCcw className="size-4" /> Find Return
-            </Button>
-          )}
-          {canImportOrders && (
-            <Button variant="outline" size="sm" onClick={() => setSyncDialog(true)} className="gap-2">
-              <RefreshCw className="size-4" /> Sync WC
-            </Button>
-          )}
-          <Button variant="outline" size="sm" onClick={() => fetchData()} disabled={loading}>
-            <RefreshCw className={`size-4 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </Button>
+          {/* Tablet / desktop: full button row */}
+          <div className="hidden items-center gap-2 sm:flex">
+            {secondaryActions.map(a => (
+              <Button key={a.label} variant="outline" size="sm" onClick={a.onClick} disabled={a.spin} className="gap-1.5">
+                <a.icon className={`size-4 ${a.spin ? 'animate-spin' : ''}`} /> {a.label}
+              </Button>
+            ))}
+          </div>
+          {/* Phone: collapse secondary actions into a menu */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="icon" className="size-9 sm:hidden" aria-label="More actions">
+                <MoreVertical className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44">
+              {secondaryActions.map(a => (
+                <DropdownMenuItem key={a.label} onClick={a.onClick} className="gap-2">
+                  <a.icon className={`size-4 ${a.spin ? 'animate-spin' : ''}`} /> {a.label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 
@@ -1910,20 +1999,22 @@ export default function OrdersPage() {
           below then narrows the working set shown in the queue. */}
       <div className="space-y-3">
         {canViewRevenue && summary && (showRevenue || showNetRevenue) && (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <div className="-mx-1 flex snap-x gap-3 overflow-x-auto px-1 pb-1 sm:mx-0 sm:grid sm:grid-cols-3 sm:overflow-x-visible sm:px-0 sm:pb-0">
             {showNetRevenue && (
-              <KpiCard title="Net Revenue" value={`TND ${summary.order_status_kpis?.revenue}`} tone="text-emerald-600" icon={<TrendingUp className="size-3" />} />
+              <KpiCard title="Net Revenue" unit="TND" value={summary.order_status_kpis?.revenue ?? '—'} accent icon={<TrendingUp className="size-3.5" />} />
             )}
             {showRevenue && (
-              <KpiCard title="Gross Revenue" value={`TND ${summary.revenue}`} tone="text-muted-foreground" icon={<TrendingUp className="size-3" />} />
+              <KpiCard title="Gross Revenue" unit="TND" value={summary.revenue ?? '—'} icon={<TrendingUp className="size-3.5" />} />
             )}
             {summary.order_status_kpis?.successful_sales != null && (
-              <KpiCard title="Successful Sales" value={summary.order_status_kpis.successful_sales} tone="text-emerald-600" icon={<CheckCircle className="size-3" />} />
+              <KpiCard title="Successful Sales" value={summary.order_status_kpis.successful_sales} accent icon={<CheckCircle className="size-3.5" />} />
             )}
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-7">
+        {/* Phones: one horizontally-scrollable row of compact stat-chips.
+            Tablet/desktop: a wrapping grid of cards. */}
+        <div className="-mx-1 flex snap-x gap-2 overflow-x-auto px-1 pb-1 sm:mx-0 sm:grid sm:grid-cols-3 sm:overflow-x-visible sm:px-0 sm:pb-0 md:grid-cols-4 xl:grid-cols-7">
           {visibleFlowTabs.map(tab => {
             const count = tabCounts[tab.value] ?? 0;
             const active = flowFilter === tab.value;
@@ -1933,17 +2024,19 @@ export default function OrdersPage() {
                 type="button"
                 onClick={() => handleFlowFilterChange(tab.value)}
                 aria-pressed={active}
-                className={`flex flex-col gap-1 rounded-xl border p-3 text-left transition ${
+                className={`flex shrink-0 snap-start items-center gap-2 whitespace-nowrap rounded-full border px-3 py-2 text-sm font-medium transition sm:w-full sm:justify-between sm:rounded-xl ${
                   active
-                    ? 'border-primary bg-primary/5 shadow-sm ring-1 ring-primary'
-                    : 'border-border bg-card hover:border-primary/40 hover:bg-muted/40'
+                    ? 'border-primary bg-primary text-primary-foreground shadow-sm'
+                    : 'border-border bg-card text-foreground hover:border-primary/40 hover:bg-muted/50'
                 }`}
               >
-                <span className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-                  {tab.icon}
-                  <span className="truncate">{tab.label}</span>
+                <span className="flex items-center gap-1.5">
+                  <span className={active ? 'text-primary-foreground' : 'text-muted-foreground'}>{tab.icon}</span>
+                  {tab.label}
                 </span>
-                <span className={`text-xl font-bold tabular-nums ${active ? 'text-primary' : ''}`}>
+                <span className={`min-w-[1.5rem] rounded-full px-1.5 py-0.5 text-center text-xs font-semibold tabular-nums ${
+                  active ? 'bg-primary-foreground/20 text-primary-foreground' : 'bg-muted text-muted-foreground'
+                }`}>
                   {count > 9999 ? '9999+' : count}
                 </span>
               </button>
@@ -1952,43 +2045,67 @@ export default function OrdersPage() {
         </div>
       </div>
 
-      {/* ── Filters ─── */}
+      {/* ── Filters (collapsible) ─── */}
       <Card className="border-muted/70">
-        <CardHeader className="p-4 pb-0">
-          <CardTitle className="flex items-center gap-2 text-sm font-semibold">
-            <SlidersHorizontal className="size-4" />
-            Filters and Sorting
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="p-4">
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-8">
-            <div className="space-y-1.5 md:col-span-2 xl:col-span-2">
-              <span className="text-xs font-medium text-muted-foreground">Search</span>
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-                {search && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="absolute right-1 top-1/2 size-7 -translate-y-1/2"
-                    onClick={() => setSearch('')}
-                  >
-                    <X className="size-3.5" />
-                  </Button>
-                )}
-                <Input
-                  placeholder="Order #, delivery name, phone, address..."
-                  className="pl-9 pr-9"
-                  value={search}
-                  onChange={e => setSearch(e.target.value)}
-                />
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <span className="text-xs font-medium text-muted-foreground">Business priority</span>
+        <button
+          type="button"
+          onClick={() => setFiltersOpen(open => !open)}
+          aria-expanded={filtersOpen}
+          aria-controls="orders-filters-body"
+          className="flex w-full items-center justify-between gap-2 rounded-t-xl p-4 text-left transition hover:bg-muted/30"
+        >
+          <span className="flex items-center gap-2 text-sm font-semibold">
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <SlidersHorizontal className="size-4" />
+            </span>
+            Filters &amp; sorting
+            {hasActiveFilters && (
+              <span className="inline-flex h-5 items-center rounded-full bg-primary/10 px-2 text-[11px] font-semibold text-primary">
+                Active
+              </span>
+            )}
+          </span>
+          <span className="flex shrink-0 items-center gap-2">
+            <Badge variant="secondary" className="tabular-nums font-medium">
+              {loading ? '…' : `${totalOrders} order${totalOrders !== 1 ? 's' : ''}`}
+            </Badge>
+            <ChevronDown className={`size-4 text-muted-foreground transition-transform duration-200 ${filtersOpen ? 'rotate-180' : ''}`} />
+          </span>
+        </button>
+        {filtersOpen && (
+        <CardContent id="orders-filters-body" className="space-y-4 p-4 pt-0">
+          {/* Search — the primary filter, full width and prominent. */}
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              placeholder="Search by order #, delivery name, phone or address…"
+              className="h-10 pl-9 pr-9"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+            />
+            {search && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="absolute right-1 top-1/2 size-8 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                onClick={() => setSearch('')}
+                aria-label="Clear search"
+              >
+                <X className="size-4" />
+              </Button>
+            )}
+          </div>
+
+          {/* Dropdown filters — even, responsive grid. `min-w-0` lets each cell
+              shrink so long select values (e.g. the sort label) truncate inside
+              the trigger instead of overflowing the card. The long "Sort by"
+              spans the full row on phones so it stays readable. */}
+          <div className="grid grid-cols-2 gap-x-3 gap-y-3 sm:grid-cols-3 xl:grid-cols-6">
+            <div className="min-w-0 space-y-1.5">
+              <label className={FILTER_LABEL}>Priority</label>
               <Select value={priorityFilter} onValueChange={setPriorityFilter}>
-                <SelectTrigger><SelectValue placeholder="Priority" /></SelectTrigger>
+                <SelectTrigger className="h-9 w-full"><SelectValue placeholder="Priority" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All priorities</SelectItem>
                   <SelectItem value="high">High</SelectItem>
@@ -1997,10 +2114,10 @@ export default function OrdersPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-1.5">
-              <span className="text-xs font-medium text-muted-foreground">Source</span>
+            <div className="min-w-0 space-y-1.5">
+              <label className={FILTER_LABEL}>Source</label>
               <Select value={sourceFilter} onValueChange={setSourceFilter}>
-                <SelectTrigger><SelectValue placeholder="Source" /></SelectTrigger>
+                <SelectTrigger className="h-9 w-full"><SelectValue placeholder="Source" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All Sources</SelectItem>
                   <SelectItem value="WOOCOMMERCE">WooCommerce</SelectItem>
@@ -2009,10 +2126,10 @@ export default function OrdersPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-1.5">
-              <span className="text-xs font-medium text-muted-foreground">Payment</span>
+            <div className="min-w-0 space-y-1.5">
+              <label className={FILTER_LABEL}>Payment</label>
               <Select value={paymentFilter} onValueChange={setPaymentFilter}>
-                <SelectTrigger><SelectValue placeholder="Payment" /></SelectTrigger>
+                <SelectTrigger className="h-9 w-full"><SelectValue placeholder="Payment" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All Payments</SelectItem>
                   <SelectItem value="UNPAID">Unpaid</SelectItem>
@@ -2023,10 +2140,10 @@ export default function OrdersPage() {
               </Select>
             </div>
             {canFilterByBrand && (
-              <div className="space-y-1.5">
-                <span className="text-xs font-medium text-muted-foreground">Brand</span>
+              <div className="min-w-0 space-y-1.5">
+                <label className={FILTER_LABEL}>Brand</label>
                 <Select value={brandFilter} onValueChange={setBrandFilter}>
-                  <SelectTrigger><SelectValue placeholder="Brand" /></SelectTrigger>
+                  <SelectTrigger className="h-9 w-full"><SelectValue placeholder="Brand" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">All Brands</SelectItem>
                     {availableBrands.map(brand => (
@@ -2036,10 +2153,10 @@ export default function OrdersPage() {
                 </Select>
               </div>
             )}
-            <div className="space-y-1.5">
-              <span className="text-xs font-medium text-muted-foreground">Channel</span>
+            <div className="min-w-0 space-y-1.5">
+              <label className={FILTER_LABEL}>Channel</label>
               <Select value={channelFilter} onValueChange={setChannelFilter}>
-                <SelectTrigger><SelectValue placeholder="Channel" /></SelectTrigger>
+                <SelectTrigger className="h-9 w-full"><SelectValue placeholder="Channel" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All Channels</SelectItem>
                   {channels.map(channel => (
@@ -2048,10 +2165,38 @@ export default function OrdersPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-1.5">
-              <span className="text-xs font-medium text-muted-foreground">Sort</span>
+            {canAssign && (
+              <>
+                <div className="min-w-0 space-y-1.5">
+                  <label className={FILTER_LABEL}>Assigned to</label>
+                  <Select value={assignedFilter} onValueChange={setAssignedFilter}>
+                    <SelectTrigger className="h-9 w-full"><SelectValue placeholder="Assigned" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Anyone</SelectItem>
+                      <SelectItem value="unassigned">Unassigned</SelectItem>
+                      {assignEmployees.map(emp => (
+                        <SelectItem key={emp.id} value={String(emp.id)}>{emp.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="min-w-0 space-y-1.5">
+                  <label className={FILTER_LABEL}>Assignment</label>
+                  <Select value={assignmentTypeFilter} onValueChange={setAssignmentTypeFilter}>
+                    <SelectTrigger className="h-9 w-full"><SelectValue placeholder="Type" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Any type</SelectItem>
+                      <SelectItem value="auto">Automatic</SelectItem>
+                      <SelectItem value="manual">Manual</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </>
+            )}
+            <div className="col-span-2 min-w-0 space-y-1.5 sm:col-span-1">
+              <label className={FILTER_LABEL}>Sort by</label>
               <Select value={ordering} onValueChange={setOrdering}>
-                <SelectTrigger><SelectValue placeholder="Sort" /></SelectTrigger>
+                <SelectTrigger className="h-9 w-full"><SelectValue placeholder="Sort" /></SelectTrigger>
                 <SelectContent>
                   {ORDER_SORT_OPTIONS.map(option => (
                     <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
@@ -2061,29 +2206,32 @@ export default function OrdersPage() {
             </div>
           </div>
 
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-sm">
-            <span className="text-muted-foreground">
-              {loading ? 'Loading...' : `${totalOrders} order${totalOrders !== 1 ? 's' : ''}`}
-            </span>
-            <div className="flex flex-wrap items-center gap-2">
-              {canViewDeleted && (
+          {/* Footer — secondary toggles + reset, set off by a divider. */}
+          {(canViewDeleted || hasActiveFilters) && (
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 text-sm">
+              {canViewDeleted ? (
                 <label className="flex cursor-pointer items-center gap-2 text-muted-foreground">
                   <Checkbox
                     checked={includeDeleted}
                     onCheckedChange={c => setIncludeDeleted(Boolean(c))}
                   />
-                  Include deleted
+                  Include deleted orders
                 </label>
-              )}
+              ) : <span />}
               {hasActiveFilters && (
-                <Button variant="ghost" size="sm" className="h-8 gap-1.5" onClick={clearFilters}>
-                  <X className="size-3.5" />
-                  Clear
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 gap-1.5 text-muted-foreground hover:text-foreground"
+                  onClick={clearFilters}
+                >
+                  <X className="size-3.5" /> Clear filters
                 </Button>
               )}
             </div>
-          </div>
+          )}
         </CardContent>
+        )}
       </Card>
 
       {/* ── Orders table ─── */}
@@ -2138,6 +2286,7 @@ export default function OrdersPage() {
                 <SortableHead label="Channel" field="sales_channel__name" ordering={ordering} onSort={handleSort} className="hidden md:table-cell" />
                 <SortableHead label="Source" field="source" ordering={ordering} onSort={handleSort} className="hidden sm:table-cell" />
                 <SortableHead label="Status" field="status" ordering={ordering} onSort={handleSort} />
+                {canAssign && <TableHead className="h-10 text-xs font-semibold hidden lg:table-cell">Assigned To</TableHead>}
                 <SortableHead label="Payment" field="payment_status" ordering={ordering} onSort={handleSort} className="hidden lg:table-cell" />
                 <SortableHead label="Total" field="total" ordering={ordering} onSort={handleSort} className="text-right" />
                 <SortableHead label="Date" field="created_at" ordering={ordering} onSort={handleSort} className="hidden md:table-cell" />
@@ -2228,6 +2377,11 @@ export default function OrdersPage() {
                       {o.is_deleted && <Badge variant="destructive" className="text-xs">Deleted</Badge>}
                     </div>
                   </TableCell>
+                  {canAssign && (
+                    <TableCell className="hidden lg:table-cell" onClick={e => e.stopPropagation()}>
+                      <AssignmentBadge order={o} canAssign onClick={() => setAssignTarget(o)} />
+                    </TableCell>
+                  )}
                   <TableCell className="hidden lg:table-cell"><PaymentBadge status={o.payment_status} /></TableCell>
                   <TableCell className="text-right font-semibold tabular-nums">{fmtCurrency(o.currency, o.total)}</TableCell>
                   <TableCell className="text-xs text-muted-foreground hidden md:table-cell">{fmtDate(o.created_at)}</TableCell>
@@ -2400,6 +2554,11 @@ export default function OrdersPage() {
                   <SourceBadge source={o.source} />
                   <SyncStatusBadge status={o.sync_status} label={o.sync_status_display} />
                   {o.is_deleted && <Badge variant="destructive" className="text-[10px]">Deleted</Badge>}
+                  {canAssign && (
+                    <span onClick={e => e.stopPropagation()}>
+                      <AssignmentBadge order={o} canAssign onClick={() => setAssignTarget(o)} />
+                    </span>
+                  )}
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
                   <div className="text-right">
@@ -2415,24 +2574,28 @@ export default function OrdersPage() {
       </Card>
 
       <div className="flex flex-col gap-3 text-sm lg:flex-row lg:items-center lg:justify-between">
-        <span className="text-muted-foreground">
+        <span className="text-center text-muted-foreground lg:text-left">
           {totalOrders > 0
             ? `Showing ${(currentPage - 1) * pageSize + 1}-${Math.min(currentPage * pageSize, totalOrders)} of ${totalOrders}`
             : 'No orders'}
           {' · '}
           Page {currentPage} of {totalPages}
         </span>
-        <div className="flex flex-wrap items-center gap-1.5">
+        {/* Phones: a clean ‹ Prev · X / Y · Next › bar (no wrapping grid).
+            Tablet/desktop: full numbered pages + a "Go to" jump box. */}
+        <div className="flex items-center justify-between gap-2 sm:justify-end sm:gap-1.5">
           <Button
             variant="outline"
             size="sm"
+            className="flex-1 gap-1 sm:flex-none"
             disabled={loading || currentPage <= 1}
             onClick={() => setCurrentPage(page => Math.max(1, page - 1))}
           >
+            <ChevronLeft className="size-4" />
             Previous
           </Button>
 
-          <div className="flex items-center gap-1" aria-label="Order result pages">
+          <div className="hidden items-center gap-1 sm:flex" aria-label="Order result pages">
             {paginationItems.map(item => (
               typeof item === 'number' ? (
                 <Button
@@ -2460,16 +2623,23 @@ export default function OrdersPage() {
             ))}
           </div>
 
+          {/* Compact page indicator — phones only. */}
+          <span className="shrink-0 px-1 text-sm font-medium tabular-nums text-muted-foreground sm:hidden">
+            {currentPage} / {totalPages}
+          </span>
+
           <Button
             variant="outline"
             size="sm"
+            className="flex-1 gap-1 sm:flex-none"
             disabled={loading || currentPage >= totalPages}
             onClick={() => setCurrentPage(page => Math.min(totalPages, page + 1))}
           >
             Next
+            <ChevronRight className="size-4" />
           </Button>
 
-          <div className="ml-1 flex items-center gap-1.5 border-l pl-2">
+          <div className="ml-1 hidden items-center gap-1.5 border-l pl-2 sm:flex">
             <Label htmlFor="orders-page-jump" className="whitespace-nowrap text-xs text-muted-foreground">
               Go to
             </Label>
@@ -2692,6 +2862,36 @@ export default function OrdersPage() {
                 <Truck className="size-3.5" /> Delivery
                 {deliveryEligibleIds.length > 0 && <span className="tabular-nums">({deliveryEligibleIds.length})</span>}
               </Button>
+            )}
+            {canAssign && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button size="sm" variant="outline" className="h-8 gap-1.5" disabled={bulkBusy}>
+                    <Users className="size-3.5" /> Assign
+                    <ChevronDown className="size-3.5 opacity-60" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="max-h-72 w-56 overflow-y-auto">
+                  <DropdownMenuItem onClick={handleBulkAutoAssign} className="gap-2">
+                    <Users className="size-4" /> Auto-assign (balanced)
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="text-[11px] font-semibold uppercase text-muted-foreground">
+                    Assign all to
+                  </DropdownMenuLabel>
+                  {assignEmployees.length === 0 ? (
+                    <div className="px-2 py-1.5 text-xs text-muted-foreground">No employees found.</div>
+                  ) : (
+                    assignEmployees.map(emp => (
+                      <DropdownMenuItem key={emp.id} onClick={() => handleBulkAssignTo(emp.id)} className="gap-2">
+                        <User className="size-4" />
+                        <span className="truncate">{emp.name}</span>
+                        <span className="ml-auto text-[11px] tabular-nums text-muted-foreground">{emp.open_orders} open</span>
+                      </DropdownMenuItem>
+                    ))
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
             )}
             {canCancelOrders && (
               <Button
@@ -2929,6 +3129,31 @@ export default function OrdersPage() {
 
       <MessageAlert open={successDialog} onOpenChange={setSuccessDialog} type="success" message={successMessage} />
       <MessageAlert open={errorDialog} onOpenChange={setErrorDialog} type="error" message={errorMessage} />
+
+      {/* Manual (re)assignment + auto-assignment pool (assign_orders only) */}
+      {canAssign && (
+        <>
+          <AssignEmployeeDialog
+            open={!!assignTarget}
+            onOpenChange={open => { if (!open) setAssignTarget(null); }}
+            order={assignTarget}
+            employees={assignEmployees}
+            loadingEmployees={assignEmployeesLoading}
+            onAssigned={() => {
+              setAssignTarget(null);
+              fetchData({ silent: true });
+              loadAssignEmployees();
+            }}
+          />
+          <AutoAssignmentSettingsDialog
+            open={assignmentSettingsOpen}
+            onOpenChange={setAssignmentSettingsOpen}
+            employees={assignEmployees}
+            loading={assignEmployeesLoading}
+            onSaved={emps => { setAssignEmployees(emps); fetchData({ silent: true }); }}
+          />
+        </>
+      )}
     </div>
   );
 }

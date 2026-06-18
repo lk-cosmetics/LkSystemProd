@@ -65,6 +65,10 @@ class RoleDetailSerializer(serializers.ModelSerializer):
         slug_field='codename',
         queryset=AppPermission.objects.all(),
     )
+    # Page-access denylist (navigation only — independent of permissions).
+    hidden_pages = serializers.ListField(
+        child=serializers.CharField(), required=False,
+    )
     company_name = serializers.CharField(
         source='company.name', read_only=True, default=None
     )
@@ -74,10 +78,16 @@ class RoleDetailSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'description', 'scope_type',
             'company', 'company_name',
-            'permissions', 'is_system',
+            'permissions', 'hidden_pages', 'is_system',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'is_system', 'created_at', 'updated_at']
+
+    def validate_hidden_pages(self, value):
+        """Only accept real page keys, de-duplicated."""
+        from apps.rbac.constants import get_page_definitions
+        valid = {p['key'] for p in get_page_definitions()}
+        return sorted({k for k in value if k in valid})
 
     def validate_name(self, value):
         # Prevent renaming system roles

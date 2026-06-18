@@ -1,6 +1,5 @@
-import { Suspense } from 'react';
+import { Suspense, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import Layout from '@/components/layout/Layout';
 import DashbordLayout from '@/components/dashboardLayout/pageDashbord';
 import ProtectedRoute from '@/components/ProtectedRoute';
 import RoleGuard from '@/components/RoleGuard';
@@ -14,7 +13,6 @@ import { isPosOnlyUser } from '@/hooks/useAuth';
 // fetched on demand. This keeps the initial bundle small (the router,
 // guards and shared layouts ship eagerly; everything else streams in
 // behind the <Suspense> boundary below).
-const HomePage = lazyWithRetry(() => import('@/pages/HomePage'));
 const LoginPage = lazyWithRetry(() => import('@/pages/login'));
 const ForgotPasswordPage = lazyWithRetry(() => import('@/pages/ForgotPasswordPage'));
 const ResetPasswordPage = lazyWithRetry(() => import('@/pages/ResetPasswordPage'));
@@ -36,6 +34,7 @@ const ManufacturingPage = lazyWithRetry(() => import('@/pages/ManufacturingPage'
 const CategoriesPage = lazyWithRetry(() => import('@/pages/CategoriesPage'));
 const PromotionsPage = lazyWithRetry(() => import('@/pages/PromotionsPage'));
 const OrdersPage = lazyWithRetry(() => import('@/pages/OrdersPage'));
+const MyOrdersPage = lazyWithRetry(() => import('@/pages/MyOrdersPage'));
 const InvoicesPage = lazyWithRetry(() => import('@/pages/InvoicesPage'));
 const ClientsPage = lazyWithRetry(() => import('@/pages/ClientsPage'));
 const POSPage = lazyWithRetry(() => import('@/pages/POSPage'));
@@ -52,15 +51,30 @@ function DashboardIndexRedirect() {
   return <StatisticsPage />;
 }
 
+/**
+ * Hard redirect to an external site. Used for the public landing ("/"), which
+ * now points at the marketing site instead of an in-app home page. The app
+ * itself lives at /login and /dashboard and is unaffected.
+ */
+const PUBLIC_SITE_URL = 'https://therapybylk.com/';
+
+function ExternalRedirect({ to }: { to: string }) {
+  useEffect(() => {
+    window.location.replace(to);
+  }, [to]);
+  return null;
+}
+
 export function AppRouter() {
   return (
     <BrowserRouter>
       <RouteErrorBoundary>
         <Suspense fallback={<PageLoader />}>
         <Routes>
-        <Route path="/" element={<Layout />}>
-          <Route index element={<HomePage />} />
-        </Route>
+        {/* Public landing removed — the root path redirects to the marketing
+            site. The application is reached via /login and /dashboard. */}
+        <Route path="/" element={<ExternalRedirect to={PUBLIC_SITE_URL} />} />
+        <Route path="/home" element={<ExternalRedirect to={PUBLIC_SITE_URL} />} />
 
         {/* Protected Dashboard Routes */}
         <Route element={<ProtectedRoute />}>
@@ -70,7 +84,7 @@ export function AppRouter() {
             <Route
               path="users"
               element={
-                <RoleGuard requiredPermission="view_users">
+                <RoleGuard requiredPermission="view_users" page="users">
                   <UsersPageNew />
                 </RoleGuard>
               }
@@ -78,7 +92,7 @@ export function AppRouter() {
             <Route
               path="users/add"
               element={
-                <RoleGuard requiredPermission="create_users">
+                <RoleGuard requiredPermission="create_users" page="users">
                   <AddUserPageNew />
                 </RoleGuard>
               }
@@ -86,7 +100,7 @@ export function AppRouter() {
             <Route
               path="users/:id"
               element={
-                <RoleGuard requiredPermission="view_users">
+                <RoleGuard requiredPermission="view_users" page="users">
                   <UserDetailsPage />
                 </RoleGuard>
               }
@@ -94,7 +108,7 @@ export function AppRouter() {
             <Route
               path="users/:id/edit"
               element={
-                <RoleGuard requiredPermission="edit_users">
+                <RoleGuard requiredPermission="edit_users" page="users">
                   <EditUserPage />
                 </RoleGuard>
               }
@@ -103,7 +117,7 @@ export function AppRouter() {
             <Route
               path="add-user"
               element={
-                <RoleGuard requiredPermission="create_users">
+                <RoleGuard requiredPermission="create_users" page="users">
                   <AddUserPageNew />
                 </RoleGuard>
               }
@@ -112,7 +126,7 @@ export function AppRouter() {
             <Route
               path="roles"
               element={
-                <RoleGuard requiredPermission="view_roles">
+                <RoleGuard requiredPermission="view_roles" page="roles">
                   <RolesPage />
                 </RoleGuard>
               }
@@ -121,7 +135,7 @@ export function AppRouter() {
             <Route
               path="companies"
               element={
-                <RoleGuard requiredPermission="view_company">
+                <RoleGuard requiredPermission="view_company" page="companies">
                   <CompaniesPage />
                 </RoleGuard>
               }
@@ -129,7 +143,7 @@ export function AppRouter() {
             <Route
               path="add-company"
               element={
-                <RoleGuard requiredPermission="create_company">
+                <RoleGuard requiredPermission="create_company" page="companies">
                   <AddCompanyPage />
                 </RoleGuard>
               }
@@ -137,7 +151,7 @@ export function AppRouter() {
             <Route
               path="brands"
               element={
-                <RoleGuard requiredPermission="view_brands">
+                <RoleGuard requiredPermission="view_brands" page="brands">
                   <BrandsPage />
                 </RoleGuard>
               }
@@ -145,7 +159,7 @@ export function AppRouter() {
             <Route
               path="sales-channels"
               element={
-                <RoleGuard requiredPermission="view_sales_channels">
+                <RoleGuard requiredPermission="view_sales_channels" page="sales_channels">
                   <SalesChannelsPage />
                 </RoleGuard>
               }
@@ -154,7 +168,7 @@ export function AppRouter() {
             <Route
               path="products"
               element={
-                <RoleGuard requiredPermission="view_products">
+                <RoleGuard requiredPermission="view_products" page="products">
                   <ProductsPage />
                 </RoleGuard>
               }
@@ -162,7 +176,7 @@ export function AppRouter() {
             <Route
               path="inventory"
               element={
-                <RoleGuard requiredPermission="view_inventory">
+                <RoleGuard requiredPermission="view_inventory" page="inventory">
                   <InventoryPage />
                 </RoleGuard>
               }
@@ -170,7 +184,7 @@ export function AppRouter() {
             <Route
               path="manufacturing"
               element={
-                <RoleGuard requiredPermission="view_manufacturing">
+                <RoleGuard requiredPermission="view_manufacturing" page="manufacturing">
                   <ManufacturingPage />
                 </RoleGuard>
               }
@@ -178,7 +192,7 @@ export function AppRouter() {
             <Route
               path="categories"
               element={
-                <RoleGuard requiredPermission="view_categories">
+                <RoleGuard requiredPermission="view_categories" page="categories">
                   <CategoriesPage />
                 </RoleGuard>
               }
@@ -187,7 +201,7 @@ export function AppRouter() {
             <Route
               path="promotions"
               element={
-                <RoleGuard requiredPermission="view_promotions">
+                <RoleGuard requiredPermission="view_promotions" page="promotions">
                   <PromotionsPage />
                 </RoleGuard>
               }
@@ -196,15 +210,23 @@ export function AppRouter() {
             <Route
               path="orders"
               element={
-                <RoleGuard requiredPermission="view_orders">
+                <RoleGuard requiredPermission="view_orders" page="orders">
                   <OrdersPage />
+                </RoleGuard>
+              }
+            />
+            <Route
+              path="my-orders"
+              element={
+                <RoleGuard requiredPermission="view_orders" page="orders">
+                  <MyOrdersPage />
                 </RoleGuard>
               }
             />
             <Route
               path="invoices"
               element={
-                <RoleGuard requiredPermission="view_invoices">
+                <RoleGuard requiredPermission="view_invoices" page="invoices">
                   <InvoicesPage />
                 </RoleGuard>
               }
@@ -217,7 +239,7 @@ export function AppRouter() {
             <Route
               path="clients"
               element={
-                <RoleGuard requiredPermission="view_clients">
+                <RoleGuard requiredPermission="view_clients" page="clients">
                   <ClientsPage />
                 </RoleGuard>
               }
@@ -225,7 +247,7 @@ export function AppRouter() {
             <Route
               path="pos"
               element={
-                <RoleGuard requiredPermission="use_pos" allowCashierWorkspace>
+                <RoleGuard requiredPermission="use_pos" page="pos">
                   <POSPage />
                 </RoleGuard>
               }
@@ -248,7 +270,7 @@ export function AppRouter() {
             <Route
               path="settings"
               element={
-                <RoleGuard allowCashierWorkspace>
+                <RoleGuard>
                   <SettingsPage />
                 </RoleGuard>
               }

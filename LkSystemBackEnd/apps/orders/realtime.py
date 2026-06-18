@@ -9,7 +9,7 @@ Security & correctness model
   by ``OrderViewSet._scope_queryset``. A mis-scoped group therefore can never
   leak order data; at worst it triggers a refetch that returns nothing extra.
 * **Groups mirror RBAC.** ``user_order_groups`` reproduces the exact assignment
-  query used by ``OrderViewSet._permission_scope_q`` (the same
+  query used by ``selectors.permission_scope_q`` (the same
   ``role__permissions__codename='view_orders'`` filter), and a broadcast targets
   every scope dimension an order belongs to (company, brand, sales channel and
   POS channel). So a user only receives frames for orders inside their RBAC
@@ -54,7 +54,7 @@ def pos_channel_group(pos_sales_channel_id) -> str:
 def order_broadcast_groups(order) -> set[str]:
     """Every group an order's update should be delivered to.
 
-    Mirrors the matching done in ``OrderViewSet._permission_scope_q``:
+    Mirrors the matching done in ``selectors.permission_scope_q``:
     a sales-channel assignment matches ``sales_channel`` *or* ``pos_sales_channel``;
     a brand assignment matches the order's brand *or* its channel's brand;
     a company assignment matches the order's company.
@@ -95,7 +95,7 @@ def user_order_groups(user):
         return {GROUP_ALL}
 
     # 3) Everyone else: derive groups from the assignments that grant view_orders,
-    #    using the SAME query as OrderViewSet._permission_scope_q.
+    #    using the SAME query as selectors.permission_scope_q.
     assignments = (
         UserRole.objects.filter(
             user=user, role__permissions__codename=codename

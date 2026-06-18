@@ -21,6 +21,23 @@ export interface PermissionGroup {
   permissions: AppPermission[];
 }
 
+/**
+ * A navigable application page in the Page Access manager. ``view_codename`` is
+ * the permission that gates the page (sidebar item + route guard); a role
+ * "has" the page when it holds that codename. ``codenames`` is the full bundle
+ * stripped from a role when the page is turned off, so the backend denies the
+ * page's entire API surface — not just its list view.
+ */
+export interface PageDefinition {
+  key: string;
+  label: string;
+  group: string;
+  icon: string;
+  description: string;
+  view_codename: string;
+  codenames: string[];
+}
+
 export interface RBACRole {
   id: number;
   name: string;
@@ -29,6 +46,8 @@ export interface RBACRole {
   company: number | null;
   company_name: string | null;
   permissions: string[]; // codenames (detail) or count (list)
+  /** Page keys this role may NOT open — navigation only, never a permission. */
+  hidden_pages?: string[];
   permissions_count?: number;
   assignments_count?: number;
   /** Operational role (Employee/Cashier) that must be pinned to a sales point. */
@@ -47,6 +66,8 @@ export interface RoleCreateRequest {
    * every company. Ignored for non-platform users (backend forces their company). */
   is_global?: boolean;
   permissions: string[]; // codenames
+  /** Page keys this role may NOT open (navigation only). */
+  hidden_pages?: string[];
 }
 
 export interface UserRoleAssignment {
@@ -85,6 +106,10 @@ export const rbacService = {
   // ── Permissions ──
   getPermissions: () =>
     apiClient.get<PermissionGroup[]>(`${BASE}/permissions/`).then(r => r.data),
+
+  // ── Pages (page-access catalogue) ──
+  getPages: () =>
+    apiClient.get<PageDefinition[]>(`${BASE}/pages/`).then(r => r.data),
 
   // ── Roles ──
   getRoles: (params?: Record<string, unknown>) =>

@@ -51,8 +51,10 @@
     offset?: number;
     search?: string;
     brand?: number;
+    categories?: number;
     status?: 'publish' | 'draft' | 'pending' | 'private';
     product_type?: string;
+    is_pack?: boolean;
     ordering?: string;
     show_deleted?: boolean;
     only_deleted?: boolean;

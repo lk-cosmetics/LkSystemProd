@@ -5,7 +5,7 @@ Define explicit filtersets for better schema generation support.
 
 import django_filters
 
-from .models import Order, OrderLine
+from .models import Order
 
 
 class OrderFilterSet(django_filters.FilterSet):
@@ -21,12 +21,34 @@ class OrderFilterSet(django_filters.FilterSet):
     created_to = django_filters.DateFilter(field_name='created_at', lookup_expr='date__lte')
     created_date = django_filters.DateFilter(field_name='created_at', lookup_expr='date')
 
+    # ── Assignment filters ────────────────────────────────────────────────
+    # ?assigned_to=<employee_id> — orders assigned to that employee.
+    assigned_to = django_filters.NumberFilter(field_name='assigned_agent')
+    # ?assigned_to_me=true — the caller's own assigned orders (My Orders page).
+    assigned_to_me = django_filters.BooleanFilter(method='filter_assigned_to_me')
+    # ?unassigned=true — orders with no assigned employee.
+    unassigned = django_filters.BooleanFilter(method='filter_unassigned')
+
     @staticmethod
     def filter_status(queryset, _name, value):
         values = [v.strip() for v in (value or '').split(',') if v.strip()]
         if not values:
             return queryset
         return queryset.filter(status__in=values)
+
+    def filter_assigned_to_me(self, queryset, _name, value):
+        if not value:
+            return queryset
+        user = getattr(self.request, 'user', None)
+        if user is None or not user.is_authenticated:
+            return queryset.none()
+        return queryset.filter(assigned_agent=user)
+
+    @staticmethod
+    def filter_unassigned(queryset, _name, value):
+        if value is None:
+            return queryset
+        return queryset.filter(assigned_agent__isnull=bool(value))
 
     class Meta:
         model = Order
@@ -39,15 +61,5 @@ class OrderFilterSet(django_filters.FilterSet):
             'sync_status': ['exact'],
             'priority_level': ['exact'],
             'pos_sales_channel': ['exact'],
-        }
-
-
-class OrderLineFilterSet(django_filters.FilterSet):
-    """Explicit FilterSet for OrderLine model."""
-
-    class Meta:
-        model = OrderLine
-        fields = {
-            'order': ['exact'],
-            'product': ['exact'],
+            'assignment_type': ['exact'],
         }

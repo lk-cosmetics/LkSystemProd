@@ -162,13 +162,19 @@ class ClientCreateFromPOSSerializer(serializers.ModelSerializer):
             'created_by', 'created_by_username', 'created_at', 'updated_at',
         ]
         extra_kwargs = {
-            'email': {'required': True},
             'first_name': {'required': False, 'allow_blank': True},
             'last_name': {'required': False, 'allow_blank': True},
             'phone': {'required': False, 'allow_blank': True},
             'email': {'required': False, 'allow_blank': True},
             'country': {'required': False, 'allow_blank': True},
         }
+        # Disable DRF's auto UniqueTogetherValidator(company, email): `company`
+        # is read-only (derived server-side from the sales channel), so the
+        # validator would reject every request with "company is required" and,
+        # worse, block a duplicate email BEFORE create()'s find-or-select can
+        # reuse the existing client. Deduplication is handled in create() (match
+        # by normalized phone, then email) + the view's IntegrityError fallback.
+        validators: list = []
 
     def validate_phone(self, value):
         """Ensure phone is unique (if provided)."""
@@ -241,8 +247,15 @@ class ClientCreateFromPOSSerializer(serializers.ModelSerializer):
             client = Client.objects.filter(company=company, email=email).first()
 
         if client:
+            # Existing client matched (by phone or email) → SELECT it instead of
+            # erroring. Fill in extra details, but NEVER overwrite the identity
+            # keys (email / phone): rewriting them could collide with a different
+            # client's unique email, and "this client already exists" should just
+            # reuse the record, not mutate its identity. ``_was_existing`` lets the
+            # view tell the POS it matched rather than created a client.
+            client._was_existing = True
             updatable = [
-                'first_name', 'last_name', 'email', 'phone', 'client_type',
+                'first_name', 'last_name', 'client_type', 'matricule_fiscale',
                 'date_of_birth', 'address', 'state', 'postcode', 'country',
                 'reseller', 'wc_customer_id', 'notes',
             ]
@@ -251,11 +264,17 @@ class ClientCreateFromPOSSerializer(serializers.ModelSerializer):
                 if field in validated_data and validated_data[field] not in (None, ''):
                     setattr(client, field, validated_data[field])
                     update_fields.append(field)
-            client.brand = client.brand or brand
-            client.company = client.company or company
-            client.sales_channel = client.sales_channel or sales_channel
-            update_fields.extend(['brand', 'company', 'sales_channel'])
-            client.save(update_fields=[*dict.fromkeys(update_fields), 'phone_normalized', 'updated_at'])
+            if client.brand_id is None:
+                client.brand = brand
+                update_fields.append('brand')
+            if client.company_id is None:
+                client.company = company
+                update_fields.append('company')
+            if client.sales_channel_id is None:
+                client.sales_channel = sales_channel
+                update_fields.append('sales_channel')
+            if update_fields:
+                client.save(update_fields=[*dict.fromkeys(update_fields), 'updated_at'])
             return client
 
         client = Client.objects.create(

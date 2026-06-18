@@ -216,6 +216,31 @@ class NotificationService:
         )
 
     @classmethod
+    def order_sent_to_pos(cls, order, actor=None):
+        """A confirmed order was routed to a POS till for in-store pickup /
+        validation. Notify the cashier(s) operating that specific till (the
+        users pinned to its sales channel) so they pick it up in real time."""
+        channel = getattr(order, 'pos_sales_channel', None)
+        if channel is None:
+            return
+        User = get_user_model()
+        recipients = list(
+            User.objects.filter(is_active=True, assigned_sales_channel=channel)
+        )
+        if not recipients:
+            return
+        cls.notify(
+            company=order.company_id, category=Category.ORDER,
+            priority=Priority.NORMAL,
+            recipients=recipients, target_type=TargetType.USER,
+            title=f'Commande au point de vente · {order.order_number}',
+            body=(f'La commande {order.order_number} attend la validation '
+                  f'au point de vente {channel.name}.'),
+            link_url='/dashboard/pos', entity_type='order',
+            entity_id=order.id, created_by=actor, exclude_actor=True,
+        )
+
+    @classmethod
     def order_confirmed(cls, order, actor=None):
         cls.notify(
             company=order.company_id, category=Category.ORDER,

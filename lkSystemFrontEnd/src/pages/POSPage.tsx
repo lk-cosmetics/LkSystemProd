@@ -36,6 +36,7 @@ import {
 } from '@/components/ui/drawer';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { useDebounce } from '@/hooks/useDebounce';
+import { useWebSocket } from '@/hooks/useWebSocket';
 import { useInfiniteProducts } from '@/hooks/queries/useProducts';
 import { usePermission } from '@/hooks/useAuth';
 
@@ -428,6 +429,26 @@ export default function POSPage() {
     fetchWaitingPOSOrders();
   }, [fetchWaitingPOSOrders]);
 
+  // Real-time waiting POS: refresh the waiting list (+ POS history) the moment
+  // any order changes server-side — e.g. an order routed to this till — so a
+  // cashier sees it appear instantly without reloading. Debounced to coalesce
+  // bursts. Backed by the orders WebSocket (broadcast on every order commit).
+  const waitingRefetchRef = useRef<() => void>(() => {});
+  waitingRefetchRef.current = () => {
+    void fetchWaitingPOSOrders();
+    void fetchPOSHistoryOrders();
+  };
+  const wsRefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleOrderEvent = useCallback(() => {
+    if (wsRefetchTimer.current) clearTimeout(wsRefetchTimer.current);
+    wsRefetchTimer.current = setTimeout(() => waitingRefetchRef.current(), 400);
+  }, []);
+  useWebSocket({
+    path: '/ws/orders/',
+    enabled: !!channelId,
+    onMessage: handleOrderEvent,
+  });
+
   useEffect(() => {
     fetchPOSHistoryOrders();
   }, [fetchPOSHistoryOrders]);
@@ -485,7 +506,11 @@ export default function POSPage() {
     } catch (err) {
       console.warn('[POS] Product cache refresh failed, using IndexedDB snapshot:', err);
       await loadCachedPOSProducts(salesChannelId);
-      setIsOnlineMode(false);
+      // Only drop into OFFLINE mode on real connectivity loss. A transient
+      // server/API error while the browser is still online must NOT strand the
+      // POS in offline mode — it would never recover (no 'online' event fires)
+      // and checkout would wrongly queue locally instead of hitting the server.
+      setIsOnlineMode(navigator.onLine);
       return false;
     }
   }, [channelId, selectedChannel, canViewPromotions, loadCachedPOSProducts]);
@@ -568,7 +593,7 @@ export default function POSPage() {
           await offlinePOSService.markTicketFailed(ticket, message);
           setErrorMsg(`Ticket ${ticket.ticket_id} could not sync: ${message}`);
           console.warn('[POS] Offline ticket sync failed:', ticket.ticket_id, err);
-          break;
+          continue; // keep syncing the rest — one bad ticket must not strand the queue
         }
       }
     } finally {

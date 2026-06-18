@@ -119,6 +119,11 @@ class Order(models.Model):
         HOME_DELIVERY = 'home_delivery', 'Home Delivery'
         POS_PICKUP    = 'pos_pickup',    'POS Pickup'
 
+    # How the order's ``assigned_agent`` was set. Blank = never assigned.
+    class AssignmentType(models.TextChoices):
+        AUTO   = 'auto',   'Automatic'
+        MANUAL = 'manual', 'Manual'
+
     class StockStatus(models.TextChoices):
         IN_STOCK      = 'in_stock',      'In Stock'
         PARTIAL_STOCK = 'partial_stock', 'Partial Stock'
@@ -509,7 +514,24 @@ class Order(models.Model):
         on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name='assigned_orders',
-        help_text='Confirmation agent assigned to this order.',
+        help_text='Employee responsible for processing this order.',
+    )
+    # Assignment metadata (auto-assignment on import + manual (re)assignment).
+    # ``assigned_by`` is NULL when the system auto-assigned the order.
+    assigned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='orders_assigned_by',
+        help_text='User who performed the assignment (NULL = system / auto).',
+    )
+    assigned_at = models.DateTimeField(null=True, blank=True)
+    assignment_type = models.CharField(
+        max_length=10,
+        choices=AssignmentType.choices,
+        blank=True,
+        default='',
+        help_text='How assigned_agent was set: auto (on import) or manual.',
     )
 
     # ── Audit ─────────────────────────────────────────────────────────────────
@@ -986,6 +1008,9 @@ class OrderLog(models.Model):
         MANUAL_STATUS_OVERRIDE = 'MANUAL_STATUS_OVERRIDE', 'Manual Status Override'
         WC_CANCEL_SYNCED       = 'WC_CANCEL_SYNCED',       'WooCommerce Cancel Synced'
         WC_SYNC_RETRIED        = 'WC_SYNC_RETRIED',        'WooCommerce Sync Retried'
+        # Employee assignment (auto on import + manual (re)assignment)
+        ASSIGNED               = 'ASSIGNED',               'Assigned to Employee'
+        UNASSIGNED             = 'UNASSIGNED',             'Assignment Cleared'
 
     order   = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='logs')
     action  = models.CharField(max_length=30, choices=Action.choices)
@@ -1214,3 +1239,70 @@ class SystemSetting(models.Model):
         """Return the company's settings row, creating defaults if absent."""
         obj, _ = cls.objects.get_or_create(company=company)
         return obj
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# AUTO-ASSIGNMENT SETTINGS
+# ═════════════════════════════════════════════════════════════════════════════
+
+class OrderAutoAssignmentSetting(models.Model):
+    """Per-employee eligibility for **automatic** order assignment.
+
+    One row per (company, employee). ``enabled=True`` rows form the company's
+    auto-assignment *pool*: when a new WooCommerce/API order is imported it is
+    handed to the eligible employee with the fewest open (non-terminal) orders.
+    An empty pool simply leaves new orders unassigned.
+
+    Managed by users holding the ``assign_orders`` permission. Every query MUST
+    stay scoped by company for multi-tenant isolation.
+    """
+
+    company = models.ForeignKey(
+        'company.Company',
+        on_delete=models.CASCADE,
+        related_name='auto_assignment_settings',
+    )
+    employee = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='auto_assignment_settings',
+    )
+    enabled = models.BooleanField(
+        default=True,
+        help_text='When true, this employee is eligible for automatic assignment.',
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='auto_assignment_settings_created',
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='auto_assignment_settings_updated',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'orders'
+        db_table = 'order_auto_assignment_setting'
+        verbose_name = 'Auto Assignment Setting'
+        verbose_name_plural = 'Auto Assignment Settings'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['company', 'employee'],
+                name='uniq_auto_assignment_company_employee',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['company', 'enabled'], name='order_auto_company_enabled_idx'),
+        ]
+
+    def __str__(self):
+        return (
+            f"AutoAssign<company={self.company_id} "
+            f"employee={self.employee_id} enabled={self.enabled}>"
+        )

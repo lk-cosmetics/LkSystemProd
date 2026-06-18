@@ -70,12 +70,22 @@ class CategoryViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         role (CEO) sees every category of every brand in their company,
         not just the brand(s) on their ``allowed_brands`` M2M.
         """
+        from django.db.models import Count, Q
+        from apps.products.models import Product
+
         user = self.request.user
         queryset = Category.objects.select_related(
             'sales_channel',
             'sales_channel__brand',
             'parent',
-        ).prefetch_related('children')
+        ).prefetch_related('children').annotate(
+            products_count=Count('products', distinct=True),
+            resell_products_count=Count(
+                'products',
+                filter=Q(products__product_type=Product.ProductType.RESELL_PRODUCT),
+                distinct=True,
+            ),
+        )
 
         from apps.rbac.services import visible_brand_ids
         brand_ids = visible_brand_ids(user)
@@ -92,7 +102,7 @@ class CategoryViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     def perform_update(self, serializer):
         """Set updated_by on category update."""
         serializer.save(updated_by=self.request.user)
-    
+
     @action(detail=False, methods=['get'])
     def tree(self, request):
         """

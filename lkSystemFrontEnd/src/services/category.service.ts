@@ -11,6 +11,7 @@ import type {
   CreateCategoryRequest,
   UpdateCategoryRequest,
   PaginatedResponse,
+  ProductListItem,
 } from '@/types';
 
 interface CategoryQueryParams {
@@ -112,6 +113,21 @@ class CategoryService {
   }
 
   /**
+   * Products that belong to this category. Reuses the products list endpoint
+   * (already brand/RBAC-scoped and category-filterable via ?categories=).
+   */
+  async getCategoryProducts(
+    id: number,
+    params: { page?: number; page_size?: number } = {},
+  ): Promise<PaginatedResponse<ProductListItem>> {
+    const response = await apiClient.get<PaginatedResponse<ProductListItem>>(
+      '/api/v1/products/',
+      { params: { categories: id, page_size: 50, ...params } },
+    );
+    return response.data;
+  }
+
+  /**
    * Get category tree (hierarchical structure)
    */
   async getCategoryTree(): Promise<CategoryTree[]> {
@@ -124,17 +140,18 @@ class CategoryService {
   /**
    * Create new category
    */
-  async createCategory(data: CreateCategoryRequest): Promise<Category> {
+  async createCategory(data: CreateCategoryRequest | FormData): Promise<Category> {
+    // FormData (image upload) → axios sets the multipart boundary itself.
     const response = await apiClient.post<Category>(CATEGORY_ENDPOINT, data);
     return response.data;
   }
 
   /**
-   * Update category (full update)
+   * Update category (full update). Accepts FormData for image uploads.
    */
   async updateCategory(
     id: number,
-    data: UpdateCategoryRequest
+    data: UpdateCategoryRequest | FormData
   ): Promise<Category> {
     const response = await apiClient.put<Category>(
       `${CATEGORY_ENDPOINT}${id}/`,

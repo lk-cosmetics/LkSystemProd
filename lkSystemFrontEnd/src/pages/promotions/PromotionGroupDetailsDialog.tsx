@@ -54,6 +54,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 
 import { useIsMobile } from '@/hooks/use-mobile';
+import { TUNIS_TZ } from '@/lib/tunisTime';
 import {
   useDeletePromotion,
   useDeletePromotionGroup,
@@ -78,7 +79,10 @@ function formatDateTime(iso: string | null | undefined) {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
+  // Promotion windows are Tunisia time — render in `Africa/Tunis` regardless
+  // of the viewer's machine timezone.
   return d.toLocaleString(undefined, {
+    timeZone: TUNIS_TZ,
     year: 'numeric',
     month: 'short',
     day: 'numeric',

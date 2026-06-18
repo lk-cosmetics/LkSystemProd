@@ -85,8 +85,8 @@ urlpatterns = [
     # Root endpoint
     path('', root_view, name='root'),
     
-    # Django Admin (SuperAdmin only)
-    path('admin/', admin.site.urls),
+    # Django Admin (SuperAdmin only) — served at an obscured path.
+    path('secure-access-lk/', admin.site.urls),
     
     # API Schema Endpoint (Public - for tools like clients to fetch schema)
     path('api/schema/', PublicSpectacularAPIView.as_view(), name='schema'),
@@ -130,3 +130,20 @@ if settings.DEBUG:
 admin.site.site_header = 'LkSystem Administration'
 admin.site.site_title = 'LkSystem Admin'
 admin.site.index_title = 'Welcome to LkSystem ERP'
+
+# ── Full-coverage admin ───────────────────────────────────────────────────────
+# Make EVERY model reachable in the admin so a superuser can inspect and manage
+# all tables (view / add / change / delete). Apps that ship their own
+# ModelAdmin keep precedence — autodiscover registers those first; this loop
+# only fills the gaps for models that have no explicit admin. autodiscover() is
+# idempotent and guarantees every app's admin.py has been imported before we
+# enumerate the gaps.
+admin.autodiscover()
+from django.apps import apps as _django_apps  # noqa: E402
+from django.contrib.admin.sites import AlreadyRegistered  # noqa: E402
+
+for _model in _django_apps.get_models():
+    try:
+        admin.site.register(_model)
+    except AlreadyRegistered:
+        pass

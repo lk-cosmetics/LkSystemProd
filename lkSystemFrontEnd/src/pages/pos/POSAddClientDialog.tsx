@@ -5,6 +5,7 @@
  */
 import { useState, useCallback } from 'react';
 import { AlertTriangle, Loader2, UserPlus } from 'lucide-react';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -26,6 +27,23 @@ interface POSAddClientDialogProps {
   onOpenChange: (open: boolean) => void;
   channel: SalesChannel | undefined;
   onClientCreated: (client: Client) => void;
+}
+
+/** Turn an API error into the backend's clear message (not "Request failed with
+ *  status code 400"): reads DRF {detail}/{message} + field-error dicts. */
+function extractClientError(err: unknown): string {
+  const data = (err as { response?: { data?: unknown } } | null)?.response?.data;
+  if (typeof data === 'string' && data) return data;
+  if (data && typeof data === 'object') {
+    const d = data as Record<string, unknown>;
+    const direct = d.detail ?? d.message ?? d.error;
+    if (typeof direct === 'string' && direct) return direct;
+    for (const value of Object.values(d)) {
+      if (typeof value === 'string' && value) return value;
+      if (Array.isArray(value) && typeof value[0] === 'string') return value[0] as string;
+    }
+  }
+  return err instanceof Error ? err.message : 'Failed to create client.';
 }
 
 export function POSAddClientDialog({
@@ -92,11 +110,16 @@ export function POSAddClientDialog({
         setError('Client is blocked because they reached the return threshold.');
         return;
       }
+      // If the customer was already on file, the backend returns the existing
+      // record (no duplicate) — tell the cashier we selected it for them.
+      toast[created.existing ? 'info' : 'success'](
+        created.existing
+          ? 'This client already exists — selected for this order.'
+          : 'Client added and selected.',
+      );
       handleClose(false);
     } catch (err: unknown) {
-      const msg =
-        err instanceof Error ? err.message : 'Failed to create client';
-      setError(msg);
+      setError(extractClientError(err));
     } finally {
       setSaving(false);
     }

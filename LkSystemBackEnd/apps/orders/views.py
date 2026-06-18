@@ -18,11 +18,10 @@ import re
 import uuid
 from datetime import timedelta
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 from django.db import transaction
-from django.db.models import Case, Count, F, IntegerField, Q, Value, When
-from django.db.models.functions import Replace
+from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -35,10 +34,9 @@ from woocommerce import API as WooCommerceAPI
 from requests import exceptions as requests_exceptions
 
 from apps.rbac.services import PermissionService
-from apps.rbac.models import UserRole
 from apps.sales_channels.models import SalesChannel
 from apps.clients.models import Client
-from .models import Order, OrderLog, OrderSyncEvent
+from .models import Order, OrderLog, OrderSyncEvent, OrderAutoAssignmentSetting
 from .serializers import (
     OrderListSerializer,
     OrderDetailSerializer,
@@ -62,8 +60,15 @@ from .serializers import (
     OrderSyncEventSerializer,
     InvoiceListSerializer,
     InvoiceMutationSerializer,
+    OrderAssignSerializer,
+    AssignableEmployeeSerializer,
+    AutoAssignmentSettingsUpdateSerializer,
 )
 from .filters import OrderFilterSet
+from . import selectors
+from . import validators
+from . import permissions as order_permissions
+from .invoice_service import InvoiceService, InvoiceError
 from .order_management_service import OrderManagementService
 from .service import OrderIngestionService, OrderIngestionError
 from .lifecycle_service import OrderLifecycleService, LifecycleError
@@ -71,6 +76,7 @@ from .woocommerce_sync_service import WooCommerceSyncService
 from .kpi_service import OrderKPIService
 from .delivery_service import DeliveryError
 from .logging_service import OrderLoggingService
+from .assignment_service import OrderAssignmentService, OPEN_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -101,207 +107,29 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
     # ── helpers ──────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _safe_int(value, default):
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return default
-
+    # Request-param coercion lives in ``validators.py``; thin wrappers keep the
+    # ``self._safe_*`` call sites in the sync/preview actions working.
     @staticmethod
     def _safe_positive_int(value, default: int, *, maximum: int | None = None) -> int:
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            parsed = default
-        parsed = max(1, parsed)
-        return min(parsed, maximum) if maximum else parsed
+        return validators.safe_positive_int(value, default, maximum=maximum)
 
     @staticmethod
     def _safe_bool(value, default: bool = False) -> bool:
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+        return validators.safe_bool(value, default)
 
-    @staticmethod
-    def _with_queue_annotations(qs):
-        """
-        Attach computed order-queue fields used by serializers and default
-        ordering. DRF applies OrderingFilter to retrieve/action queries too,
-        so these annotations must be available for every Order queryset.
-        """
-        today = timezone.localdate()
-        S = Order.Status
-        return qs.annotate(
-            line_count=Count('lines', filter=Q(lines__is_deleted=False)),
-            business_priority_rank=Case(
-                When(priority_level=Order.PriorityLevel.HIGH, then=Value(0)),
-                When(priority_level=Order.PriorityLevel.MEDIUM, then=Value(1)),
-                default=Value(2),
-                output_field=IntegerField(),
-            ),
-            # Action urgency, ranked from the canonical six-state lifecycle:
-            # due delayed orders first, then the confirmation queue (new /
-            # not_answered), then fulfilment (POS routing waits, confirmed
-            # ready to ship, packaging in flight). Deleted rows always sink.
-            lifecycle_priority=Case(
-                When(is_deleted=True, then=Value(99)),
-                When(
-                    Q(status=S.DELAYED) & Q(delay_date__lte=today),
-                    then=Value(0),
-                ),
-                When(
-                    Q(status=S.NEW) & ~Q(source=Order.Source.POS),
-                    then=Value(1),
-                ),
-                When(status=S.NOT_ANSWERED, then=Value(2)),
-                When(status=S.DELAYED, then=Value(3)),
-                When(
-                    in_store_pickup=True,
-                    sent_to_pos_at__isnull=False,
-                    pos_validated_at__isnull=True,
-                    then=Value(4),
-                ),
-                When(
-                    Q(status=S.CONFIRMED) & ~Q(source=Order.Source.POS),
-                    then=Value(5),
-                ),
-                When(status=S.PACKAGING, then=Value(6)),
-                default=Value(10),
-                output_field=IntegerField(),
-            ),
-        )
-
-    @staticmethod
-    def _phone_digits(field: str):
-        """Expression that strips common separators from a phone column so it
-        can be compared digit-to-digit ("+216 24-512 995" -> "21624512995")."""
-        expr = F(field)
-        for ch in (' ', '-', '+', '(', ')', '.'):
-            expr = Replace(expr, Value(ch), Value(''))
-        return expr
-
+    # Query construction lives in ``selectors.py``; these thin wrappers keep the
+    # established ``self._x(...)`` call sites working across the viewset.
     @staticmethod
     def _apply_search(qs, term: str | None):
-        """
-        Single operational search box for staff.
-
-        Searches order references (id / number / ticket / WooCommerce keys) and
-        the DELIVERY contact stored on the order itself: the shipping
-        (recipient) block first-class, plus the order's billing snapshot — the
-        recipient fallback for orders that never had a separate shipping block
-        (POS / manual orders). The linked Client record is deliberately NOT
-        searched: customers change the recipient name/phone/address per order,
-        so client-record matches surface the wrong orders.
-
-        Phone-looking terms are also compared digit-to-digit (separators and
-        the +216 country code stripped) so "+216 24 512 995", "24-512-995" and
-        "24512995" all find the same order. Numeric terms also match the PK.
-        """
-        search = (term or '').strip()
-        if not search:
-            return qs
-
-        query = (
-            Q(order_number__icontains=search) |
-            Q(ticket_id__icontains=search) |
-            Q(client_ticket_uuid__icontains=search) |
-            Q(external_order_id__icontains=search) |
-            Q(wc_order_key__icontains=search) |
-            # Delivery recipient (shipping block)
-            Q(shipping_first_name__icontains=search) |
-            Q(shipping_last_name__icontains=search) |
-            Q(shipping_phone__icontains=search) |
-            Q(shipping_address_1__icontains=search) |
-            Q(shipping_city__icontains=search) |
-            # Billing snapshot — the recipient fallback (POS / manual orders)
-            Q(billing_first_name__icontains=search) |
-            Q(billing_last_name__icontains=search) |
-            Q(billing_email__icontains=search) |
-            Q(billing_phone__icontains=search) |
-            Q(billing_address_1__icontains=search) |
-            Q(billing_city__icontains=search)
-        )
-
-        # "first last" matches the recipient name across both blocks.
-        parts = search.split()
-        if len(parts) >= 2:
-            first, last = parts[0], parts[-1]
-            query |= (
-                Q(shipping_first_name__icontains=first, shipping_last_name__icontains=last) |
-                Q(billing_first_name__icontains=first, billing_last_name__icontains=last)
-            )
-
-        # Digit-to-digit phone matching, tolerant of separators and the
-        # Tunisian country code on either side.
-        digits = re.sub(r'\D', '', search)
-        if len(digits) >= 6:
-            candidates = {digits}
-            if digits.startswith('216') and len(digits) > 8:
-                candidates.add(digits[3:])
-            qs = qs.annotate(
-                _shipping_phone_digits=OrderViewSet._phone_digits('shipping_phone'),
-                _billing_phone_digits=OrderViewSet._phone_digits('billing_phone'),
-            )
-            for cand in candidates:
-                query |= (
-                    Q(_shipping_phone_digits__contains=cand) |
-                    Q(_billing_phone_digits__contains=cand)
-                )
-
-        if search.isdigit():
-            query |= Q(pk=int(search))
-
-        return qs.filter(query)
+        return selectors.apply_search(qs, term)
 
     @staticmethod
     def _return_lookup_candidates(raw_query: str) -> set[str]:
-        """Extract likely order identifiers from typed text, barcode, or QR URL."""
-        query = (raw_query or '').strip()
-        candidates = {query} if query else set()
-        if not query:
-            return candidates
-
-        parsed = urlparse(query)
-        if parsed.scheme and parsed.netloc:
-            for part in parsed.path.split('/'):
-                cleaned = part.strip()
-                if cleaned:
-                    candidates.add(cleaned)
-            for values in parse_qs(parsed.query).values():
-                for value in values:
-                    if value:
-                        candidates.add(value.strip())
-
-        for separator in ['|', ';', ',', '\n', '\t']:
-            if separator in query:
-                candidates.update(part.strip() for part in query.split(separator) if part.strip())
-        return {candidate for candidate in candidates if candidate}
+        return selectors.return_lookup_candidates(raw_query)
 
     @staticmethod
     def _return_lookup_q(candidates: set[str]) -> Q:
-        lookup_q = Q(pk__in=[])
-        numeric_ids = []
-        for candidate in candidates:
-            lookup_q |= (
-                Q(order_number__iexact=candidate) |
-                Q(ticket_id__iexact=candidate) |
-                Q(client_ticket_uuid__iexact=candidate) |
-                Q(external_order_id__iexact=candidate) |
-                Q(wc_order_key__iexact=candidate) |
-                Q(delivery_reference__iexact=candidate) |
-                Q(delivery_code__iexact=candidate) |
-                Q(delivery_external_reference__iexact=candidate)
-            )
-            if candidate.isdigit():
-                numeric = int(candidate)
-                numeric_ids.append(numeric)
-                lookup_q |= Q(delivery_order_id=numeric)
-        if numeric_ids:
-            lookup_q |= Q(pk__in=numeric_ids)
-        return lookup_q
+        return selectors.return_lookup_q(candidates)
 
     queryset = Order.objects.select_related(
         'company', 'sales_channel', 'pos_sales_channel', 'client', 'created_by',
@@ -374,67 +202,30 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         include_deleted = (
             self.request.query_params.get('include_deleted', '').lower() == 'true'
         )
-        base_qs = Order.all_objects if include_deleted else Order.objects
-        # Every FK the list serializer reads must be joined here — a missing
-        # one (e.g. brand_name) silently costs one query PER ROW on every page.
-        qs = base_qs.select_related(
-            'company', 'brand', 'sales_channel', 'pos_sales_channel', 'client',
-            'created_by', 'deleted_by', 'packaged_by', 'edit_locked_by',
-        )
-        qs = self._with_queue_annotations(qs)
+        qs = selectors.base_list_queryset(include_deleted=include_deleted)
+        qs = selectors.with_queue_annotations(qs)
 
         if self.action == 'retrieve':
             qs = qs.prefetch_related('lines', 'lines__product')
 
-        qs = self._scope_queryset(qs, self.request.user, 'view_orders')
+        qs = selectors.scope_orders_to_user(qs, self.request.user, 'view_orders')
         if include_deleted:
-            self._require_permission(self.request.user, 'view_soft_deleted_orders')
-        return self._apply_search(qs, self.request.query_params.get('search'))
+            order_permissions.require_order_permission(
+                self.request.user, 'view_soft_deleted_orders'
+            )
+        return selectors.apply_search(qs, self.request.query_params.get('search'))
 
     @action(detail=False, methods=['get'], url_path='invoices')
     def invoices(self, request):
         """Invoice registry backed by orders that have an invoice number."""
         self._require_permission(request.user, 'view_invoices')
-        qs = Order.all_objects.exclude(invoice_number='').select_related(
-            'company', 'brand', 'client',
+        qs = InvoiceService.registry_queryset(
+            request.user,
+            search=request.query_params.get('search') or '',
+            date_from=request.query_params.get('date_from'),
+            date_to=request.query_params.get('date_to'),
+            ordering=request.query_params.get('ordering', '-date'),
         )
-        qs = self._scope_queryset(qs, request.user, 'view_invoices')
-
-        search = (request.query_params.get('search') or '').strip()
-        if search:
-            query = (
-                Q(invoice_number__icontains=search)
-                | Q(order_number__icontains=search)
-                | Q(invoice_client_name__icontains=search)
-                | Q(invoice_client_phone__icontains=search)
-                | Q(invoice_client_email__icontains=search)
-                | Q(invoice_client_matricule_fiscale__icontains=search)
-            )
-            qs = qs.filter(query)
-
-        date_from = request.query_params.get('date_from')
-        date_to = request.query_params.get('date_to')
-        if date_from:
-            qs = qs.filter(invoice_date__gte=date_from)
-        if date_to:
-            qs = qs.filter(invoice_date__lte=date_to)
-
-        allowed_ordering = {
-            'invoice_number': 'invoice_number',
-            '-invoice_number': '-invoice_number',
-            'date': 'invoice_date',
-            '-date': '-invoice_date',
-            'total': 'total',
-            '-total': '-total',
-            'client': 'invoice_client_name',
-            '-client': '-invoice_client_name',
-        }
-        ordering = allowed_ordering.get(
-            request.query_params.get('ordering', '-date'),
-            '-invoice_date',
-        )
-        qs = qs.order_by(ordering, '-id')
-
         page = self.paginate_queryset(qs)
         serializer = InvoiceListSerializer(page if page is not None else qs, many=True)
         if page is not None:
@@ -445,38 +236,27 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
     def invoice_settings(self, request):
         """Expose the next automatic number for the active company workspace."""
         self._require_permission(request.user, 'view_invoices')
-        company_id = getattr(request.user, 'current_company_id', None)
-        if not company_id:
-            visible = self._scope_queryset(
-                Order.all_objects.all(),
-                request.user,
-                'view_invoices',
-            )
-            company_ids = list(
-                visible.order_by().values_list('company_id', flat=True).distinct()[:2]
-            )
-            if len(company_ids) == 1:
-                company_id = company_ids[0]
+        return Response(InvoiceService.next_number_preview(request.user))
 
-        if not company_id:
-            return Response({
-                'company': None,
-                'year': timezone.localdate().year,
-                'next_invoice_number': None,
-                'detail': 'Select a company workspace to preview its next invoice number.',
-            })
-
-        return Response({
-            'company': company_id,
-            'year': timezone.localdate().year,
-            'next_invoice_number': Order.next_invoice_number(company_id),
-        })
-
-    @action(detail=True, methods=['post', 'patch'], url_path='invoice')
+    @action(detail=True, methods=['post', 'patch', 'delete'], url_path='invoice')
     def manage_invoice(self, request, pk=None):
-        """Explicitly issue or edit the invoice snapshot stored on an order."""
+        """Issue, edit, or delete the invoice snapshot stored on an order.
+
+        DELETE removes the invoice from the registry by clearing the order's
+        invoice fields — it never touches the order itself (status, lines,
+        stock). The order simply no longer has an invoice. The invoice business
+        rules live in :class:`InvoiceService`; this action handles request flow.
+        """
         order = self.get_object()
         self._require_permission(request.user, 'edit_invoice_numbers', order)
+
+        if request.method == 'DELETE':
+            try:
+                InvoiceService.delete(order, actor=request.user)
+            except InvoiceError as exc:
+                return Response(exc.payload, status=exc.status_code)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
         creating = request.method == 'POST'
         if creating and order.invoice_number:
             return Response(
@@ -495,181 +275,32 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             context={'order': order},
         )
         serializer.is_valid(raise_exception=True)
-        values = serializer.validated_data
-
-        from apps.company.models import Company
-
-        with transaction.atomic():
-            Company.objects.select_for_update().get(pk=order.company_id)
-            invoice_date = values.get('invoice_date') or order.invoice_date or timezone.localdate()
-            invoice_number = (
-                values.get('invoice_number')
-                or order.invoice_number
-                or Order.next_invoice_number(order.company_id, invoice_date.year)
+        try:
+            InvoiceService.issue_or_update(
+                order,
+                values=serializer.validated_data,
+                actor=request.user,
+                creating=creating,
             )
-            duplicate = Order.all_objects.filter(
-                company_id=order.company_id,
-                invoice_number=invoice_number,
-            ).exclude(pk=order.pk).exists()
-            if duplicate:
-                return Response(
-                    {'invoice_number': ['This invoice number is already used by another order.']},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            if creating:
-                client_type = (
-                    getattr(order.client, 'client_type', '')
-                    if order.client else ''
-                ) or ('COMPANY' if order.billing_company else 'PERSON')
-                contact_name = f'{order.billing_first_name} {order.billing_last_name}'.strip()
-                client_name = (
-                    (order.billing_company or contact_name)
-                    if client_type == 'COMPANY'
-                    else contact_name
-                ) or (order.client.full_name if order.client else '')
-                defaults = {
-                    'invoice_client_name': client_name,
-                    'invoice_client_type': client_type,
-                    'invoice_client_matricule_fiscale': (
-                        getattr(order.client, 'matricule_fiscale', '') if client_type == 'COMPANY' else ''
-                    ),
-                    'invoice_client_phone': (
-                        order.billing_phone
-                        or order.shipping_phone
-                        or (order.client.phone if order.client else '')
-                    ),
-                    'invoice_client_email': (
-                        order.billing_email or (order.client.email if order.client else '')
-                    ),
-                    'invoice_client_address': order.billing_address_1,
-                    'invoice_client_city': order.billing_city,
-                }
-            else:
-                defaults = {}
-
-            editable_fields = [
-                'invoice_client_name', 'invoice_client_type',
-                'invoice_client_matricule_fiscale', 'invoice_client_phone',
-                'invoice_client_email', 'invoice_client_address', 'invoice_client_city',
-            ]
-            order.invoice_number = invoice_number
-            order.invoice_date = invoice_date
-            for field in editable_fields:
-                if field in values:
-                    setattr(order, field, values[field])
-                elif creating:
-                    setattr(order, field, defaults[field])
-            if creating:
-                order.invoice_issued_at = timezone.now()
-                order.invoice_issued_by = request.user
-            order._actor = request.user
-            update_fields = [
-                'invoice_number', 'invoice_date', *editable_fields, 'updated_at',
-            ]
-            if creating:
-                update_fields.extend(['invoice_issued_at', 'invoice_issued_by'])
-            order.save(update_fields=update_fields)
-
-            OrderLoggingService.log(
-                order=order,
-                action=OrderLog.Action.UPDATED,
-                user=request.user,
-                details={
-                    'event': 'invoice_issued' if creating else 'invoice_updated',
-                    'invoice_number': order.invoice_number,
-                    'invoice_date': order.invoice_date,
-                },
-            )
+        except InvoiceError as exc:
+            return Response(exc.payload, status=exc.status_code)
 
         return Response(OrderDetailSerializer(order, context={'request': request}).data)
 
-    @staticmethod
-    def _permission_scope_q(user, codename: str) -> Q | None:
-        """
-        Return a Q object limiting rows to scopes where the user has codename.
-        None means platform-wide access; empty Q matching nothing is handled by caller.
-        """
-        if user.is_superuser:
-            return None
-
-        assignments = (
-            UserRole.objects
-            .filter(user=user, role__permissions__codename=codename)
-            .select_related('company', 'brand', 'sales_channel')
-            .distinct()
-        )
-
-        scope_q = Q(pk__in=[])
-        for assignment in assignments:
-            if not assignment.company_id and not assignment.brand_id and not assignment.sales_channel_id:
-                return None
-            if assignment.sales_channel_id:
-                scope_q |= Q(sales_channel_id=assignment.sales_channel_id)
-            elif assignment.brand_id:
-                scope_q |= Q(brand_id=assignment.brand_id) | Q(sales_channel__brand_id=assignment.brand_id)
-            elif assignment.company_id:
-                scope_q |= Q(company_id=assignment.company_id)
-        return scope_q
-
+    # RBAC row scoping lives in ``selectors.py`` and permission gates in
+    # ``permissions.py``; these thin wrappers preserve the ``self._x(...)`` call
+    # sites used throughout the action methods below.
     @classmethod
     def _scope_queryset(cls, qs, user, codename: str):
-        # Operational accounts pinned to a sales point (Employee / Cashier) see
-        # ONLY that channel's orders — web orders on the channel or POS orders
-        # rung on it — regardless of any wider role scope.
-        asc_id = getattr(user, 'assigned_sales_channel_id', None)
-        if asc_id:
-            return qs.filter(
-                Q(sales_channel_id=asc_id) | Q(pos_sales_channel_id=asc_id)
-            )
-
-        # Active-brand workspace focus narrows orders for EVERYONE (including
-        # superusers). An order belongs to a brand directly or through its
-        # sales channel. NULL current_brand = whole-company (no narrowing).
-        brand_id = getattr(user, 'current_brand_id', None)
-        if brand_id:
-            qs = qs.filter(
-                Q(brand_id=brand_id) | Q(sales_channel__brand_id=brand_id)
-            )
-
-        if user.is_superuser:
-            # Super Admin scoped to the selected company (workspace context);
-            # with no company selected they see every order (global mode).
-            company_id = getattr(user, 'current_company_id', None)
-            if company_id and not brand_id:
-                qs = qs.filter(company_id=company_id)
-            return qs
-        scope_q = cls._permission_scope_q(user, codename)
-        if scope_q is None:
-            return qs
-        return qs.filter(scope_q).distinct()
+        return selectors.scope_orders_to_user(qs, user, codename)
 
     @staticmethod
     def _require_permission(user, codename: str, order: Order | None = None):
-        if user.is_superuser:
-            return
-        if order is not None:
-            has_perm = PermissionService.has_permission(
-                user,
-                codename,
-                company=order.company,
-                brand=order.sales_channel.brand,
-                sales_channel=order.sales_channel,
-            )
-        else:
-            has_perm = PermissionService.has_permission(user, codename)
-        if not has_perm:
-            raise PermissionDenied('You do not have permission to perform this action.')
+        order_permissions.require_order_permission(user, codename, order)
 
     @staticmethod
     def _permission_for_edit(order: Order) -> str:
-        return (
-            'update_confirmed_orders'
-            if order.status in (
-                Order.Status.CONFIRMED, Order.Status.PACKAGING, Order.Status.DONE,
-            )
-            else 'update_unconfirmed_orders'
-        )
+        return order_permissions.permission_for_edit(order)
 
     def _transition_response(self, order: Order, request) -> Response:
         """Serialize a mutated order and schedule any pending WooCommerce push.
@@ -875,6 +506,124 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             order.save(update_fields=['order_source', 'updated_at'])
 
         return Response(OrderDetailSerializer(order).data, status=status.HTTP_201_CREATED)
+
+    # ── Assignment (manual (re)assignment + auto-assignment pool) ─────────
+
+    @staticmethod
+    def _assignable_employees_payload(company):
+        """Active employees of ``company`` with auto-assignment eligibility and
+        current open workload — powers the settings modal and assign dropdown."""
+        open_filter = Q(
+            assigned_orders__company=company,
+            assigned_orders__is_deleted=False,
+            assigned_orders__status__in=OPEN_STATUSES,
+        )
+        employees = (
+            company.employees
+            .filter(is_active=True)
+            .annotate(open_orders=Count('assigned_orders', filter=open_filter, distinct=True))
+            .order_by('first_name', 'last_name', 'matricule')
+        )
+        enabled_ids = set(
+            OrderAutoAssignmentSetting.objects
+            .filter(company=company, enabled=True)
+            .values_list('employee_id', flat=True)
+        )
+        rows = []
+        for emp in employees:
+            roles = PermissionService.get_user_role_names(emp)
+            rows.append({
+                'id': emp.id,
+                'name': emp.get_full_name() or emp.matricule,
+                'matricule': emp.matricule,
+                'email': emp.email,
+                'role': roles[0] if roles else None,
+                'enabled': emp.id in enabled_ids,
+                'open_orders': emp.open_orders,
+            })
+        return rows
+
+    @action(detail=True, methods=['post'], url_path='assign')
+    def assign(self, request, pk=None):
+        """POST /orders/{id}/assign/ — body: {"employee_id": <id|null>}.
+
+        Manager-only manual (re)assignment. ``employee_id`` null/omitted clears
+        the assignment. Every (re)assignment is audited by the service.
+        """
+        order = self.get_object()
+        self._require_permission(request.user, 'assign_orders', order)
+
+        serializer = OrderAssignSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        employee_id = serializer.validated_data.get('employee_id')
+
+        if employee_id is None:
+            OrderAssignmentService.unassign(order, actor=request.user)
+            return Response(OrderDetailSerializer(order).data)
+
+        employee = order.company.employees.filter(id=employee_id, is_active=True).first()
+        if employee is None:
+            return Response(
+                {'employee_id': ['No active employee with this id in this company.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        OrderAssignmentService.manual_assign(order, employee, actor=request.user)
+        return Response(OrderDetailSerializer(order).data)
+
+    @action(detail=False, methods=['get', 'put'], url_path='assignment-settings')
+    def assignment_settings(self, request):
+        """GET/PUT /orders/assignment-settings/ — the auto-assignment pool.
+
+        GET  → every active company employee with their auto-assignment
+               eligibility and current open workload.
+        PUT  → body {"employee_ids": [...]} sets the COMPLETE eligible set
+               (employees omitted are disabled).
+        Both require the ``assign_orders`` permission.
+        """
+        self._require_permission(request.user, 'assign_orders')
+        company = getattr(request.user, 'current_company', None)
+        if company is None:
+            return Response(
+                {'detail': 'No active company. Select a company first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if request.method == 'PUT':
+            serializer = AutoAssignmentSettingsUpdateSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            desired = set(serializer.validated_data['employee_ids'])
+            valid_ids = set(
+                company.employees
+                .filter(id__in=desired, is_active=True)
+                .values_list('id', flat=True)
+            )
+            invalid = desired - valid_ids
+            if invalid:
+                return Response(
+                    {'employee_ids': [f'Not active employees of this company: {sorted(invalid)}.']},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            with transaction.atomic():
+                for emp_id in valid_ids:
+                    obj, created = OrderAutoAssignmentSetting.objects.get_or_create(
+                        company=company, employee_id=emp_id,
+                        defaults={
+                            'enabled': True,
+                            'created_by': request.user,
+                            'updated_by': request.user,
+                        },
+                    )
+                    if not created and not obj.enabled:
+                        obj.enabled = True
+                        obj.updated_by = request.user
+                        obj.save(update_fields=['enabled', 'updated_by', 'updated_at'])
+                # Disable everyone no longer in the eligible set.
+                OrderAutoAssignmentSetting.objects.filter(company=company).exclude(
+                    employee_id__in=valid_ids,
+                ).update(enabled=False, updated_by=request.user)
+
+        payload = self._assignable_employees_payload(company)
+        return Response({'employees': AssignableEmployeeSerializer(payload, many=True).data})
 
     # ── Canonical lifecycle transition ───────────────────────────────────
 
@@ -1082,6 +831,9 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             'submit_delivery': 'send_to_delivery_orders',
             'cancel': 'cancel_orders_lifecycle',
             'delete': 'soft_delete_orders',
+            'assign': 'assign_orders',
+            'auto_assign': 'assign_orders',
+            'unassign': 'assign_orders',
         }
         if action_name not in perm_by_action:
             return Response(
@@ -1098,6 +850,30 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
             if pos_channel is None:
                 return Response(
                     {'detail': 'pos_sales_channel is required to send orders to POS.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Resolve / validate the assignment target up front (mirrors pos_channel).
+        assign_employee = None
+        if action_name in ('assign', 'auto_assign'):
+            company = getattr(request.user, 'current_company', None)
+            if company is None:
+                return Response(
+                    {'detail': 'No active company. Select a company first.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if action_name == 'assign':
+                assign_employee = company.employees.filter(
+                    id=request.data.get('employee_id') or 0, is_active=True,
+                ).first()
+                if assign_employee is None:
+                    return Response(
+                        {'detail': 'employee_id is required and must be an active employee of this company.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            elif not OrderAssignmentService.eligible_employee_ids(company):
+                return Response(
+                    {'detail': 'No employees are in the auto-assignment pool. Configure it first.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -1124,6 +900,12 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                     OrderLifecycleService.cancel(
                         order, actor=request.user, reason=reason or 'Bulk cancellation',
                     )
+                elif action_name == 'assign':
+                    OrderAssignmentService.manual_assign(order, assign_employee, actor=request.user)
+                elif action_name == 'auto_assign':
+                    OrderAssignmentService.auto_assign_now(order, actor=request.user)
+                elif action_name == 'unassign':
+                    OrderAssignmentService.unassign(order, actor=request.user)
                 else:  # delete
                     OrderManagementService.soft_delete_order(
                         order=order, actor=request.user, reason=reason or 'Bulk delete',

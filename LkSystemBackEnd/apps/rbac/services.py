@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from django.db.models import Q
 
-from .models import AppPermission, UserRole
+from .models import AppPermission, Role, UserRole
 
 
 def scope_kwargs_for_role(role, *, company=None, brands=None, sales_channel=None):
@@ -384,6 +384,50 @@ class PermissionService:
             return True
         perms = PermissionService.get_user_permissions(user, **scope_kwargs)
         return set(codenames) <= perms
+
+    # ── Page access (navigation only) ───────────────────────────────────
+
+    @staticmethod
+    def hidden_page_keys(user) -> list[str]:
+        """Page keys the user may NOT navigate to.
+
+        Page access is a navigation control layered on top of capability
+        permissions — it never changes what a user *can do* (their API
+        permissions), only which pages appear in the nav / are openable.
+
+        A page is hidden for the user only when **every** role that would
+        otherwise grant access to it (i.e. holds the page's view permission)
+        also lists the page in its ``hidden_pages``. That keeps the resolution
+        permissive across multiple roles: if any role still exposes the page,
+        the user keeps it. Superusers / platform admins never have hidden pages.
+        """
+        if not getattr(user, 'is_authenticated', False):
+            return []
+        if user.is_superuser or PermissionService.is_platform_admin(user):
+            return []
+
+        from .constants import get_page_definitions
+
+        roles = list(
+            Role.objects.filter(assignments__user=user)
+            .distinct()
+            .prefetch_related('permissions')
+        )
+        if not roles:
+            return []
+
+        role_codes = {
+            r.id: set(r.permissions.values_list('codename', flat=True))
+            for r in roles
+        }
+        hidden: list[str] = []
+        for page in get_page_definitions():
+            view_codename = page['view_codename']
+            key = page['key']
+            granting = [r for r in roles if view_codename in role_codes[r.id]]
+            if granting and all(key in (r.hidden_pages or []) for r in granting):
+                hidden.append(key)
+        return hidden
 
     # ── Role queries ────────────────────────────────────────────────────
 
