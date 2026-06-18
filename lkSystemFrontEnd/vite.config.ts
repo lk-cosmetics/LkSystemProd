@@ -1,5 +1,6 @@
 import path from 'path';
 import tailwindcss from '@tailwindcss/vite';
+import legacy from '@vitejs/plugin-legacy';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -9,6 +10,16 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
+    legacy({
+      // Keep a realistic legacy floor for POS/customer devices. Very old
+      // browsers such as IE or pre-iOS-12 Safari are not reliable targets for
+      // React 19 + modern CSS, but these targets cover older Windows 7 Chrome
+      // installs and older iPads/iPhones much better than Vite's modern-only
+      // default output.
+      targets: ['Chrome >= 64', 'Edge >= 79', 'Firefox >= 67', 'Safari >= 12', 'iOS >= 12'],
+      renderLegacyChunks: true,
+      modernPolyfills: false,
+    }),
     // ── Progressive Web App / offline ──────────────────────────────────────
     // Precaches the app shell + every hashed build asset so the POS keeps
     // working through a network drop AND across a full reload / cold start
@@ -86,6 +97,13 @@ export default defineConfig({
     host: '0.0.0.0',
   },
   build: {
+    // Vite 7 defaults to a very modern browser baseline. Lowering this target
+    // prevents syntax such as modern class fields / newer JS features from
+    // reaching browsers that still support ESM but are older than the current
+    // baseline. The legacy plugin above emits a nomodule fallback for older
+    // browsers.
+    target: ['chrome64', 'edge79', 'firefox67', 'safari12'],
+    cssTarget: ['chrome64', 'edge79', 'firefox67', 'safari12'],
     // Page chunks are split at the route level via React.lazy (see
     // src/app/router.tsx) — that is the main payload win and keeps heavy,
     // route-specific deps (recharts on the BI pages, html5-qrcode behind the
