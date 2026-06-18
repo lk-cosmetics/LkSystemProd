@@ -49,28 +49,29 @@ export function LoginForm({
   };
 
   return (
-    <div className={cn('flex flex-col gap-6', className)} {...props}>
-      <Card>
-        <CardHeader>
-          <CardTitle>Login to your account</CardTitle>
-          <CardDescription>
+    <div className={cn('login-form flex flex-col gap-6', className)} {...props}>
+      <Card className="login-card">
+        <CardHeader className="login-card-header">
+          <CardTitle className="login-card-title">Login to your account</CardTitle>
+          <CardDescription className="login-card-description">
             Enter your matricule and password to access your account
           </CardDescription>
         </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit}>
-            <FieldGroup>
+        <CardContent className="login-card-content">
+          <form onSubmit={handleSubmit} className="login-form-inner">
+            <FieldGroup className="login-field-group">
               {error && (
-                <div className="rounded-md bg-red-50 p-4 dark:bg-red-900/20">
-                  <p className="text-sm text-red-800 dark:text-red-200">
+                <div className="login-error rounded-md bg-red-50 p-4 dark:bg-red-900/20">
+                  <p className="login-error-text text-sm text-red-800 dark:text-red-200">
                     {error}
                   </p>
                 </div>
               )}
 
-              <Field>
+              <Field className="login-field">
                 <FieldLabel htmlFor="matricule">Matricule</FieldLabel>
                 <Input
+                  className="login-input"
                   id="matricule"
                   type="text"
                   placeholder="Enter your matricule"
@@ -81,17 +82,18 @@ export function LoginForm({
                 />
               </Field>
 
-              <Field>
-                <div className="flex items-center">
+              <Field className="login-field">
+                <div className="login-password-label-row flex items-center">
                   <FieldLabel htmlFor="password">Password</FieldLabel>
                   <Link
                     to="/forgot-password"
-                    className="ml-auto inline-block text-sm underline-offset-4 hover:underline"
+                    className="login-forgot-link ml-auto inline-block text-sm underline-offset-4 hover:underline"
                   >
                     Forgot your password?
                   </Link>
                 </div>
                 <Input
+                  className="login-input"
                   id="password"
                   type="password"
                   required
@@ -101,11 +103,11 @@ export function LoginForm({
                 />
               </Field>
 
-              <Field>
-                <Button type="submit" disabled={isLoading}>
+              <Field className="login-actions">
+                <Button className="login-submit" type="submit" disabled={isLoading}>
                   {isLoading ? 'Logging in...' : 'Login'}
                 </Button>
-                <FieldDescription className="text-center">
+                <FieldDescription className="login-help-text text-center">
                   Don&apos;t have an account? Contact your administrator
                 </FieldDescription>
               </Field>

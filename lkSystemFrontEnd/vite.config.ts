@@ -97,12 +97,8 @@ export default defineConfig({
     host: '0.0.0.0',
   },
   build: {
-    // Vite 7 defaults to a very modern browser baseline. Lowering this target
-    // prevents syntax such as modern class fields / newer JS features from
-    // reaching browsers that still support ESM but are older than the current
-    // baseline. The legacy plugin above emits a nomodule fallback for older
-    // browsers.
-    target: ['chrome64', 'edge79', 'firefox67', 'safari12'],
+    // Keep CSS output friendly for older POS/customer browsers. JavaScript
+    // targets are controlled by @vitejs/plugin-legacy above.
     cssTarget: ['chrome64', 'edge79', 'firefox67', 'safari12'],
     // Page chunks are split at the route level via React.lazy (see
     // src/app/router.tsx) — that is the main payload win and keeps heavy,
