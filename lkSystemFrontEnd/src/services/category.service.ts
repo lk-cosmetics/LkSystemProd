@@ -11,7 +11,7 @@ import type {
   CreateCategoryRequest,
   UpdateCategoryRequest,
   PaginatedResponse,
-  OrderListItem,
+  ProductListItem,
 } from '@/types';
 
 interface CategoryQueryParams {
@@ -113,17 +113,16 @@ class CategoryService {
   }
 
   /**
-   * Orders that contain at least one product in this category. The backend
-   * scopes the rows to the caller's visible orders and gates them by the
-   * view_orders permission, so this never leaks orders outside the user's reach.
+   * Products that belong to this category. Reuses the products list endpoint
+   * (already brand/RBAC-scoped and category-filterable via ?categories=).
    */
-  async getCategoryOrders(
+  async getCategoryProducts(
     id: number,
     params: { page?: number; page_size?: number } = {},
-  ): Promise<PaginatedResponse<OrderListItem>> {
-    const response = await apiClient.get<PaginatedResponse<OrderListItem>>(
-      `${CATEGORY_ENDPOINT}${id}/orders/`,
-      { params },
+  ): Promise<PaginatedResponse<ProductListItem>> {
+    const response = await apiClient.get<PaginatedResponse<ProductListItem>>(
+      '/api/v1/products/',
+      { params: { categories: id, page_size: 50, ...params } },
     );
     return response.data;
   }
@@ -141,17 +140,18 @@ class CategoryService {
   /**
    * Create new category
    */
-  async createCategory(data: CreateCategoryRequest): Promise<Category> {
+  async createCategory(data: CreateCategoryRequest | FormData): Promise<Category> {
+    // FormData (image upload) → axios sets the multipart boundary itself.
     const response = await apiClient.post<Category>(CATEGORY_ENDPOINT, data);
     return response.data;
   }
 
   /**
-   * Update category (full update)
+   * Update category (full update). Accepts FormData for image uploads.
    */
   async updateCategory(
     id: number,
-    data: UpdateCategoryRequest
+    data: UpdateCategoryRequest | FormData
   ): Promise<Category> {
     const response = await apiClient.put<Category>(
       `${CATEGORY_ENDPOINT}${id}/`,

@@ -76,6 +76,8 @@ function buildProductFormData(
     if (value === undefined) return;
     if (key === 'pack_items') {
       form.append('pack_items', JSON.stringify(value ?? null));
+    } else if (key === 'categories' && Array.isArray(value)) {
+      value.forEach(id => form.append('categories', String(id)));
     } else if (value === null) {
       return;
     } else if (typeof value === 'boolean') {

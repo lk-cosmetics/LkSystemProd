@@ -18,8 +18,11 @@ class Category(models.Model):
     
     # WooCommerce Reference
     wc_category_id = models.PositiveIntegerField(
+        null=True,
+        blank=True,
         verbose_name='WooCommerce Category ID',
-        help_text='Unique identifier from WooCommerce (unique per sales channel)'
+        help_text='Identifier from WooCommerce (unique per sales channel). '
+                  'NULL for categories created manually in-app.'
     )
     
     # Sales Channel Reference (for multi-store support)
@@ -64,7 +67,14 @@ class Category(models.Model):
         blank=True,
         default='',
         verbose_name='Image URL',
-        help_text='Category image URL from WooCommerce'
+        help_text='Category image URL (from WooCommerce, or mirrored from an upload).'
+    )
+    image = models.ImageField(
+        upload_to='categories/images/',
+        blank=True,
+        null=True,
+        verbose_name='Image',
+        help_text='Uploaded category image; its served URL is mirrored into image_url.'
     )
     
     # Display Order

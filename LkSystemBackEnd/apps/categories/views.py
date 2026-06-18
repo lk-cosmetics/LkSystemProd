@@ -70,12 +70,22 @@ class CategoryViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         role (CEO) sees every category of every brand in their company,
         not just the brand(s) on their ``allowed_brands`` M2M.
         """
+        from django.db.models import Count, Q
+        from apps.products.models import Product
+
         user = self.request.user
         queryset = Category.objects.select_related(
             'sales_channel',
             'sales_channel__brand',
             'parent',
-        ).prefetch_related('children')
+        ).prefetch_related('children').annotate(
+            products_count=Count('products', distinct=True),
+            resell_products_count=Count(
+                'products',
+                filter=Q(products__product_type=Product.ProductType.RESELL_PRODUCT),
+                distinct=True,
+            ),
+        )
 
         from apps.rbac.services import visible_brand_ids
         brand_ids = visible_brand_ids(user)
@@ -92,38 +102,6 @@ class CategoryViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     def perform_update(self, serializer):
         """Set updated_by on category update."""
         serializer.save(updated_by=self.request.user)
-
-    @action(detail=True, methods=['get'])
-    def orders(self, request, pk=None):
-        """Orders that contain at least one product in this category.
-
-        The category is brand-scoped by ``get_object`` (404 outside the user's
-        brands). The order list is independently narrowed through the orders
-        RBAC scoping helper and gated by ``view_orders`` — so a category-only
-        viewer can't use this drill-down to read orders they otherwise can't,
-        and the rows never leak across the user's tenant/brand scope.
-        """
-        from apps.orders import selectors as order_selectors
-        from apps.orders.permissions import require_order_permission
-        from apps.orders.serializers import OrderListSerializer
-
-        category = self.get_object()
-        require_order_permission(request.user, 'view_orders')
-
-        qs = order_selectors.base_list_queryset()
-        qs = order_selectors.with_queue_annotations(qs)
-        qs = order_selectors.scope_orders_to_user(qs, request.user, 'view_orders')
-        qs = qs.filter(
-            lines__is_deleted=False,
-            lines__product__categories=category.pk,
-        ).distinct().order_by('-created_at')
-
-        page = self.paginate_queryset(qs)
-        target = page if page is not None else qs
-        serializer = OrderListSerializer(target, many=True, context={'request': request})
-        if page is not None:
-            return self.get_paginated_response(serializer.data)
-        return Response(serializer.data)
 
     @action(detail=False, methods=['get'])
     def tree(self, request):

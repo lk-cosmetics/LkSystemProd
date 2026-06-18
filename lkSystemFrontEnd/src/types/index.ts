@@ -581,6 +581,9 @@ export interface ProductListItem {
   status: ProductStatus;
   purchase_price: string;
   sales_price: string;
+  /** Category ids + names this product belongs to (synced from WooCommerce or assigned). */
+  categories?: number[];
+  category_names?: string[];
   is_pack: boolean;
   pack_items: PackItem[] | null;
   created_at: string;
@@ -638,6 +641,7 @@ export interface CreateProductRequest {
   product_type?: ProductType;
   status?: ProductStatus;
   brand?: number;
+  categories?: number[];
   purchase_price?: string;
   sales_price?: string;
   image_url?: string;
@@ -652,6 +656,7 @@ export interface UpdateProductRequest {
   product_type?: ProductType;
   status?: ProductStatus;
   brand?: number | null;
+  categories?: number[];
   purchase_price?: string;
   sales_price?: string;
   image_url?: string;
@@ -680,6 +685,8 @@ export interface CategoryListItem {
   display_order: number;
   children_count: number;
   products_count: number;
+  /** Count of resell_product-type products in this category. */
+  resell_products_count: number;
   created_at: string;
   updated_at: string;
 }

@@ -82,21 +82,58 @@ import {
   useSyncCategoriesFromWooCommerce,
   usePreviewCategoriesFromWooCommerce,
   useSyncSelectedCategoriesFromWooCommerce,
-  useCategoryOrders,
+  useCategoryProducts,
 } from '@/hooks/queries';
-import type { CategoryListItem, OrderListItem } from '@/types';
+import type { CategoryListItem, ProductListItem } from '@/types';
 
-// Canonical 8-state lifecycle → pill colors (mirrors the Orders page palette).
-const ORDER_STATUS_PILL: Record<string, string> = {
-  new: 'bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300',
-  confirmed: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
-  not_answered: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
-  delayed: 'bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300',
-  packaging: 'bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300',
-  done: 'bg-green-100 text-green-700 dark:bg-green-500/15 dark:text-green-300',
-  returned: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
-  canceled: 'bg-slate-100 text-slate-600 dark:bg-slate-500/15 dark:text-slate-300',
-};
+/** Image upload + live preview for the category add/edit forms. */
+function CategoryImageUpload({
+  file,
+  onFile,
+  currentUrl,
+}: {
+  file: File | null;
+  onFile: (f: File | null) => void;
+  currentUrl?: string;
+}) {
+  const objectUrl = useMemo(() => (file ? URL.createObjectURL(file) : ''), [file]);
+  useEffect(() => () => { if (objectUrl) URL.revokeObjectURL(objectUrl); }, [objectUrl]);
+  const preview = objectUrl || (currentUrl ? getMediaUrl(currentUrl) || '' : '');
+
+  return (
+    <div className="space-y-2">
+      <Label>Category image</Label>
+      <div className="flex items-center gap-3">
+        <div className="size-16 shrink-0 rounded-lg overflow-hidden bg-l-bg-2 dark:bg-d-bg-2 border border-l-border dark:border-d-border flex items-center justify-center">
+          {preview ? (
+            <img src={preview} alt="Category" className="size-full object-cover" />
+          ) : (
+            <ImageIcon className="size-5 text-l-text-3 dark:text-d-text-3" />
+          )}
+        </div>
+        <div className="flex-1 space-y-1">
+          <Input
+            type="file"
+            accept="image/*"
+            onChange={(e) => onFile(e.target.files?.[0] ?? null)}
+            className="text-xs file:mr-2 file:rounded file:border-0 file:bg-primary/10 file:px-2 file:py-1 file:text-primary"
+          />
+          {file ? (
+            <button
+              type="button"
+              onClick={() => onFile(null)}
+              className="text-[11px] text-red-600 hover:underline"
+            >
+              Remove selected image
+            </button>
+          ) : (
+            <p className="text-[11px] text-l-text-3 dark:text-d-text-3">PNG/JPG. Replaces the current image on save.</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 import { getMediaUrl } from '@/utils/helpers';
 
 // Memoized Category Row Component to prevent unnecessary re-renders
@@ -206,12 +243,19 @@ const CategoryRow = memo(function CategoryRow({
         )}
       </TableCell>
 
-      {/* Products Count */}
+      {/* Products Count — resell products first (what's sellable), total as a hint */}
       <TableCell>
-        <Badge variant="secondary" className="gap-1">
-          <Package className="size-3" />
-          {category.products_count}
-        </Badge>
+        <div className="flex items-center gap-1.5">
+          <Badge variant="secondary" className="gap-1" title="Resell products in this category">
+            <Package className="size-3" />
+            {category.resell_products_count ?? 0}
+          </Badge>
+          {(category.products_count ?? 0) > (category.resell_products_count ?? 0) && (
+            <span className="text-[11px] text-l-text-3 dark:text-d-text-3">
+              / {category.products_count} total
+            </span>
+          )}
+        </div>
       </TableCell>
 
       {/* Children Count */}
@@ -324,9 +368,11 @@ export default function CategoriesPage() {
 
   // Form state
   const [formData, setFormData] = useState<CategoryFormData>(initialFormData);
+  // Selected image file for upload (add/edit). Sent as multipart when present.
+  const [imageFile, setImageFile] = useState<File | null>(null);
 
-  // Orders that contain a product in the open category (detail dialog only).
-  const { data: categoryOrders, isLoading: categoryOrdersLoading } = useCategoryOrders(
+  // Products for the open category (detail dialog only).
+  const { data: categoryProducts, isLoading: categoryProductsLoading } = useCategoryProducts(
     selectedCategory?.id,
     viewDialog && !!selectedCategory,
   );
@@ -443,6 +489,7 @@ export default function CategoriesPage() {
 
   const handleAdd = useCallback(() => {
     setFormData(initialFormData);
+    setImageFile(null);
     setAddDialog(true);
   }, []);
 
@@ -457,6 +504,7 @@ export default function CategoriesPage() {
       display_order: category.display_order,
       image_url: category.image_url || '',
     });
+    setImageFile(null);
     setEditDialog(true);
   }, []);
 
@@ -500,20 +548,36 @@ export default function CategoriesPage() {
     }
 
     try {
-      await createCategoryMutation.mutateAsync({
-        wc_category_id: 0,
-        sales_channel: Number(formData.sales_channel),
-        name: formData.name.trim(),
-        slug: formData.slug || generateSlug(formData.name),
-        description: formData.description,
-        parent: formData.parent && formData.parent !== 'none' ? Number(formData.parent) : null,
-        display_order: formData.display_order,
-        image_url: formData.image_url || undefined,
-      });
+      const parentId = formData.parent && formData.parent !== 'none' ? Number(formData.parent) : null;
+      if (imageFile) {
+        // Multipart: send every field as a string + the image file.
+        const fd = new FormData();
+        fd.append('wc_category_id', '0');
+        fd.append('sales_channel', String(Number(formData.sales_channel)));
+        fd.append('name', formData.name.trim());
+        fd.append('slug', formData.slug || generateSlug(formData.name));
+        fd.append('description', formData.description || '');
+        if (parentId !== null) fd.append('parent', String(parentId));
+        fd.append('display_order', String(formData.display_order ?? 0));
+        fd.append('image', imageFile);
+        await createCategoryMutation.mutateAsync(fd);
+      } else {
+        await createCategoryMutation.mutateAsync({
+          wc_category_id: 0,
+          sales_channel: Number(formData.sales_channel),
+          name: formData.name.trim(),
+          slug: formData.slug || generateSlug(formData.name),
+          description: formData.description,
+          parent: parentId,
+          display_order: formData.display_order,
+          image_url: formData.image_url || undefined,
+        });
+      }
       setSuccessMessage('Category created successfully!');
       setSuccessDialog(true);
       setAddDialog(false);
       setFormData(initialFormData);
+      setImageFile(null);
     } catch (err) {
       console.error('Error creating category:', err);
       setAddDialog(false);
@@ -530,20 +594,35 @@ export default function CategoriesPage() {
     }
 
     try {
-      await updateCategoryMutation.mutateAsync({
-        id: formData.id,
-        data: {
-          name: formData.name.trim(),
-          slug: formData.slug,
-          description: formData.description,
-          parent: formData.parent && formData.parent !== 'none' ? Number(formData.parent) : null,
-          display_order: formData.display_order,
-          image_url: formData.image_url || undefined,
-        },
-      });
+      const parentId = formData.parent && formData.parent !== 'none' ? Number(formData.parent) : null;
+      if (imageFile) {
+        // Multipart PUT: include the full record (incl. sales_channel) + image.
+        const fd = new FormData();
+        fd.append('sales_channel', String(Number(formData.sales_channel)));
+        fd.append('name', formData.name.trim());
+        fd.append('slug', formData.slug || generateSlug(formData.name));
+        fd.append('description', formData.description || '');
+        if (parentId !== null) fd.append('parent', String(parentId));
+        fd.append('display_order', String(formData.display_order ?? 0));
+        fd.append('image', imageFile);
+        await updateCategoryMutation.mutateAsync({ id: formData.id, data: fd });
+      } else {
+        await updateCategoryMutation.mutateAsync({
+          id: formData.id,
+          data: {
+            name: formData.name.trim(),
+            slug: formData.slug,
+            description: formData.description,
+            parent: parentId,
+            display_order: formData.display_order,
+            image_url: formData.image_url || undefined,
+          },
+        });
+      }
       setSuccessMessage('Category updated successfully!');
       setSuccessDialog(true);
       setEditDialog(false);
+      setImageFile(null);
     } catch (err) {
       console.error('Error updating category:', err);
       setEditDialog(false);
@@ -1019,28 +1098,33 @@ export default function CategoriesPage() {
                   <Layers className="size-4" />
                   Statistics
                 </h4>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-3 gap-3">
                   <div className="p-4 bg-primary/5 rounded-xl text-center border border-primary/20">
                     <Package className="size-6 text-primary mx-auto mb-2" />
-                    <p className="text-xs text-l-text-3 dark:text-d-text-3 mb-1">Products</p>
-                    <p className="text-2xl font-bold text-primary">{selectedCategory.products_count}</p>
+                    <p className="text-xs text-l-text-3 dark:text-d-text-3 mb-1">Resell products</p>
+                    <p className="text-2xl font-bold text-primary">{selectedCategory.resell_products_count ?? 0}</p>
+                  </div>
+                  <div className="p-4 bg-l-bg-2 dark:bg-d-bg-2 rounded-xl text-center border border-l-border dark:border-d-border">
+                    <Package className="size-6 text-l-text-2 dark:text-d-text-2 mx-auto mb-2" />
+                    <p className="text-xs text-l-text-3 dark:text-d-text-3 mb-1">All products</p>
+                    <p className="text-2xl font-bold">{selectedCategory.products_count ?? 0}</p>
                   </div>
                   <div className="p-4 bg-l-bg-2 dark:bg-d-bg-2 rounded-xl text-center border border-l-border dark:border-d-border">
                     <FolderTree className="size-6 text-l-text-2 dark:text-d-text-2 mx-auto mb-2" />
                     <p className="text-xs text-l-text-3 dark:text-d-text-3 mb-1">Subcategories</p>
-                    <p className="text-2xl font-bold">{selectedCategory.children_count}</p>
+                    <p className="text-2xl font-bold">{selectedCategory.children_count ?? 0}</p>
                   </div>
                 </div>
               </div>
 
-              {/* Orders in this category */}
+              {/* Products in this category */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between gap-2">
                   <h4 className="font-semibold flex items-center gap-2 text-sm text-l-text-2 dark:text-d-text-2">
-                    <ListOrdered className="size-4" />
-                    Orders in this category
-                    {categoryOrders && (
-                      <Badge variant="secondary" className="tabular-nums">{categoryOrders.count}</Badge>
+                    <Package className="size-4" />
+                    Products in this category
+                    {categoryProducts && (
+                      <Badge variant="secondary" className="tabular-nums">{categoryProducts.count}</Badge>
                     )}
                   </h4>
                   <Button
@@ -1052,52 +1136,61 @@ export default function CategoriesPage() {
                       navigate(`/dashboard/products?category=${selectedCategory.id}`);
                     }}
                   >
-                    View products <ChevronRight className="size-3.5" />
+                    Open in Products <ChevronRight className="size-3.5" />
                   </Button>
                 </div>
 
-                {categoryOrdersLoading ? (
+                {categoryProductsLoading ? (
                   <div className="space-y-2">
                     {[0, 1, 2].map((i) => (
                       <div key={i} className="h-12 rounded-lg bg-l-bg-2/60 dark:bg-d-bg-2/60 animate-pulse" />
                     ))}
                   </div>
-                ) : !categoryOrders || categoryOrders.results.length === 0 ? (
+                ) : !categoryProducts || categoryProducts.results.length === 0 ? (
                   <div className="flex flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-l-border dark:border-d-border py-8 text-center">
-                    <ListOrdered className="size-6 text-l-text-3 dark:text-d-text-3" />
-                    <p className="text-sm text-l-text-2 dark:text-d-text-2">No orders yet for this category</p>
+                    <Package className="size-6 text-l-text-3 dark:text-d-text-3" />
+                    <p className="text-sm text-l-text-2 dark:text-d-text-2">No products linked to this category yet</p>
                     <p className="text-xs text-l-text-3 dark:text-d-text-3 max-w-xs">
-                      Orders show up here once a customer buys a product linked to this category.
+                      Link products to this category from the product page (or a WooCommerce sync) and they'll appear here.
                     </p>
                   </div>
                 ) : (
                   <div className="rounded-xl border border-l-border dark:border-d-border divide-y divide-l-border dark:divide-d-border max-h-72 overflow-y-auto">
-                    {categoryOrders.results.map((o: OrderListItem) => (
+                    {categoryProducts.results.map((p: ProductListItem) => (
                       <div
-                        key={o.id}
+                        key={p.id}
                         className="flex items-center gap-3 px-3 py-2.5 hover:bg-l-bg-2/50 dark:hover:bg-d-bg-2/50 transition-colors"
                       >
+                        <div className="size-9 shrink-0 rounded-lg overflow-hidden bg-l-bg-2 dark:bg-d-bg-2 flex items-center justify-center border border-l-border dark:border-d-border">
+                          {(p.image || p.image_url) ? (
+                            <img src={p.image || p.image_url} alt={p.name} className="size-full object-cover" />
+                          ) : (
+                            <Package className="size-4 text-l-text-3 dark:text-d-text-3" />
+                          )}
+                        </div>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
-                            <span className="font-mono text-xs font-semibold truncate">{o.order_number}</span>
+                            <span className="truncate text-sm font-medium">{p.name}</span>
                             <span
-                              className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${ORDER_STATUS_PILL[o.status] ?? 'bg-slate-100 text-slate-600'}`}
+                              className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                                p.product_type === 'resell_product'
+                                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
+                                  : 'bg-slate-100 text-slate-600 dark:bg-slate-500/15 dark:text-slate-300'
+                              }`}
                             >
-                              {o.status_display}
+                              {p.product_type === 'resell_product' ? 'Resell' : p.product_type.replace('_', ' ')}
                             </span>
                           </div>
-                          <p className="truncate text-xs text-l-text-3 dark:text-d-text-3">
-                            {o.delivery_name || o.client_name || 'Walk-in'} · {new Date(o.created_at).toLocaleDateString()}
-                          </p>
+                          <p className="truncate text-xs text-l-text-3 dark:text-d-text-3">{p.barcode || 'No barcode'}</p>
                         </div>
                         <p className="shrink-0 text-sm font-semibold tabular-nums">
-                          {Number(o.total || 0).toFixed(3)}
+                          {Number(p.sales_price || 0).toFixed(3)}
                         </p>
                       </div>
                     ))}
-                    {categoryOrders.count > categoryOrders.results.length && (
+                    {categoryProducts.count > categoryProducts.results.length && (
                       <div className="px-3 py-2 text-center text-[11px] text-l-text-3 dark:text-d-text-3">
-                        Showing {categoryOrders.results.length} of {categoryOrders.count}
+                        Showing {categoryProducts.results.length} of {categoryProducts.count}
                       </div>
                     )}
                   </div>
@@ -1244,6 +1337,8 @@ export default function CategoriesPage() {
                 />
               </div>
             </div>
+
+            <CategoryImageUpload file={imageFile} onFile={setImageFile} />
           </div>
           <div className="flex gap-3 pt-4 border-t">
             <Button onClick={handleAddCategory} disabled={createCategoryMutation.isPending} className="flex-1 gap-2">
@@ -1332,10 +1427,12 @@ export default function CategoriesPage() {
                   value={formData.image_url}
                   onChange={(e) => handleFormChange('image_url', e.target.value)}
                   className="pl-10"
-                  placeholder="https://..."
+                  placeholder="https://... (or upload below)"
                 />
               </div>
             </div>
+
+            <CategoryImageUpload file={imageFile} onFile={setImageFile} currentUrl={formData.image_url} />
 
             <div className="space-y-2">
               <Label htmlFor="edit-description">Description</Label>

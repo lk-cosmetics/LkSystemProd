@@ -263,6 +263,22 @@ const ProductRow = memo(function ProductRow({
         <Badge variant="outline" className="capitalize text-xs">{p.product_type}</Badge>
       </TableCell>
 
+      {/* Categories */}
+      <TableCell className="min-w-[150px]">
+        {p.category_names && p.category_names.length > 0 ? (
+          <div className="flex flex-wrap gap-1 max-w-[220px]">
+            {p.category_names.slice(0, 3).map((name) => (
+              <Badge key={name} variant="secondary" className="text-[10px] font-normal">{name}</Badge>
+            ))}
+            {p.category_names.length > 3 && (
+              <Badge variant="outline" className="text-[10px] font-normal">+{p.category_names.length - 3}</Badge>
+            )}
+          </div>
+        ) : (
+          <span className="text-xs text-muted-foreground">—</span>
+        )}
+      </TableCell>
+
       {/* Purchase price */}
       <TableCell className="text-right min-w-[120px] tabular-nums">{fmtPrice(p.purchase_price)}</TableCell>
 
@@ -358,6 +374,7 @@ interface FormData {
   name: string;
   barcode: string;
   brand: string;
+  categories: number[];
   product_type: string;
   status: string;
   purchase_price: string;
@@ -371,7 +388,7 @@ interface FormData {
 const EMPTY_FORM: FormData = {
   name: '', barcode: '', brand: '', product_type: 'resell_product', status: 'draft',
   purchase_price: '0.00', sales_price: '0.00', image_url: '', product_link: '',
-  is_pack: false, pack_items: [],
+  categories: [], is_pack: false, pack_items: [],
 };
 
 // ─── ResponsiveSheet (Dialog on desktop / Drawer on mobile) ───────────────────
@@ -775,6 +792,7 @@ export default function ProductsPage() {
   const { data: salesChannels = [] } = useSalesChannels();
   const { data: brands = [] } = useBrands();
   const { data: categories = [] } = useCategories();
+  const brandById = useMemo(() => new Map(brands.map(b => [b.id, b])), [brands]);
 
   // ── Mutations ──
   const deleteMut = useDeleteProduct();
@@ -802,6 +820,7 @@ export default function ProductsPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [form, setForm] = useState<FormData>(EMPTY_FORM);
+  const [categorySearch, setCategorySearch] = useState('');
   // Locally-picked image file for upload (null = keep existing image_url / none).
   const [imageFile, setImageFile] = useState<File | null>(null);
   // Object URL for previewing the chosen file; recomputed only when the file
@@ -895,6 +914,52 @@ export default function ProductsPage() {
   // platform-admin flag, so company-scoped users see the Sync button too.
   const canSyncProducts = isSuperAdmin || hasPermission(user, 'create_products');
   const wcCh = useMemo(() => salesChannels.filter(c => c.channel_type === 'WOOCOMMERCE'), [salesChannels]);
+
+  const formBrandId = activeBrandId ?? (form.brand ? Number(form.brand) : null);
+  const formBrandName = formBrandId ? brandById.get(formBrandId)?.name ?? null : null;
+  const selectedCategoryIds = useMemo(() => new Set(form.categories), [form.categories]);
+  const selectedFormCategories = useMemo(
+    () => categories.filter(c => selectedCategoryIds.has(c.id)),
+    [categories, selectedCategoryIds],
+  );
+  const categoryOptions = useMemo(() => {
+    const query = categorySearch.trim().toLowerCase();
+    return categories
+      .filter(c => !formBrandName || !c.brand_name || c.brand_name === formBrandName)
+      .filter(c => {
+        if (!query) return true;
+        return (
+          c.name.toLowerCase().includes(query) ||
+          c.slug.toLowerCase().includes(query) ||
+          c.sales_channel_name.toLowerCase().includes(query)
+        );
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [categories, categorySearch, formBrandName]);
+
+  const toggleFormCategory = useCallback((categoryId: number) => {
+    setForm(f => ({
+      ...f,
+      categories: f.categories.includes(categoryId)
+        ? f.categories.filter(id => id !== categoryId)
+        : [...f.categories, categoryId],
+    }));
+  }, []);
+
+  const handleFormBrandChange = useCallback((value: string) => {
+    const nextBrand = value === 'none' ? '' : value;
+    const nextBrandId = nextBrand ? Number(nextBrand) : null;
+    const nextBrandName = nextBrandId ? brandById.get(nextBrandId)?.name ?? null : null;
+    setForm(f => ({
+      ...f,
+      brand: nextBrand,
+      categories: f.categories.filter(id => {
+        if (!nextBrandName) return true;
+        const category = categories.find(c => c.id === id);
+        return !category || !category.brand_name || category.brand_name === nextBrandName;
+      }),
+    }));
+  }, [brandById, categories]);
 
   // ── Auto-clear toasts ──
   useEffect(() => {
@@ -1071,9 +1136,11 @@ export default function ProductsPage() {
       brand: p.brand ? String(p.brand) : '', product_type: p.product_type,
       status: p.status, purchase_price: p.purchase_price, sales_price: p.sales_price,
       image_url: p.image_url, product_link: p.product_link,
+      categories: p.categories ?? [],
       is_pack: p.is_pack, pack_items: p.pack_items ?? [],
     });
     setImageFile(null);
+    setCategorySearch('');
     setEditOpen(true);
   }, []);
 
@@ -1103,7 +1170,12 @@ export default function ProductsPage() {
     setBcUpdateOpen(true);
   }, []);
 
-  const handleAdd = () => { setForm(EMPTY_FORM); setImageFile(null); setAddOpen(true); };
+  const handleAdd = () => {
+    setForm({ ...EMPTY_FORM, categories: [], pack_items: [] });
+    setImageFile(null);
+    setCategorySearch('');
+    setAddOpen(true);
+  };
   const setF = (k: keyof FormData, v: string) => setForm(f => ({ ...f, [k]: v }));
 
   const submitCreate = async () => {
@@ -1114,6 +1186,7 @@ export default function ProductsPage() {
         name: form.name.trim(), barcode: form.barcode,
         product_type: form.product_type as ProductType, status: form.status as ProductStatus,
         brand: form.brand ? Number(form.brand) : undefined,
+        categories: form.categories,
         purchase_price: form.purchase_price, sales_price: form.sales_price,
         image_url: form.image_url, product_link: form.product_link,
         is_pack: form.is_pack,
@@ -1138,6 +1211,7 @@ export default function ProductsPage() {
           name: form.name.trim(), barcode: form.barcode,
           product_type: form.product_type as ProductType, status: form.status as ProductStatus,
           brand: form.brand ? Number(form.brand) : null,
+          categories: form.categories,
           purchase_price: form.purchase_price, sales_price: form.sales_price,
           image_url: form.image_url, product_link: form.product_link,
           is_pack: form.is_pack,
@@ -1432,7 +1506,7 @@ export default function ProductsPage() {
               another brand (the backend enforces this too). */}
           <Select
             value={activeBrandId ? String(activeBrandId) : (form.brand || 'none')}
-            onValueChange={v => setF('brand', v === 'none' ? '' : v)}
+            onValueChange={handleFormBrandChange}
             disabled={!!activeBrandId}
           >
             <SelectTrigger><SelectValue placeholder="Select brand" /></SelectTrigger>
@@ -1441,6 +1515,85 @@ export default function ProductsPage() {
               {brands.map(b => <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>)}
             </SelectContent>
           </Select>
+        </div>
+        <div className="space-y-2 sm:col-span-2">
+          <div className="flex items-center justify-between gap-3">
+            <Label>Categories</Label>
+            {form.categories.length > 0 && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={() => setForm(f => ({ ...f, categories: [] }))}
+              >
+                Clear
+              </Button>
+            )}
+          </div>
+
+          {selectedFormCategories.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {selectedFormCategories.map(category => (
+                <Badge key={category.id} variant="secondary" className="gap-1 rounded-full">
+                  <span className="max-w-[180px] truncate">{category.name}</span>
+                  <button
+                    type="button"
+                    className="rounded-full hover:bg-background/70"
+                    aria-label={`Remove ${category.name}`}
+                    onClick={() => toggleFormCategory(category.id)}
+                  >
+                    <X className="size-3" />
+                  </button>
+                </Badge>
+              ))}
+            </div>
+          )}
+
+          <div className="rounded-lg border bg-muted/20 p-2">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={categorySearch}
+                onChange={e => setCategorySearch(e.target.value)}
+                placeholder="Search categories by name, slug, or sales channel..."
+                className="h-8 pl-8 text-sm"
+              />
+            </div>
+            <div className="mt-2 max-h-44 space-y-1 overflow-y-auto pr-1">
+              {categoryOptions.length === 0 ? (
+                <div className="rounded-md border border-dashed bg-background/60 p-3 text-center text-xs text-muted-foreground">
+                  No categories found for this brand. Create or sync categories from the Categories page first.
+                </div>
+              ) : (
+                categoryOptions.map(category => {
+                  const checked = selectedCategoryIds.has(category.id);
+                  return (
+                    <button
+                      key={category.id}
+                      type="button"
+                      className={`flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition-colors ${
+                        checked ? 'bg-primary/10 text-primary' : 'hover:bg-background'
+                      }`}
+                      onClick={() => toggleFormCategory(category.id)}
+                    >
+                      <Checkbox checked={checked} className="pointer-events-none" />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-medium">{category.name}</p>
+                        <p className="truncate text-[11px] text-muted-foreground">
+                          {category.sales_channel_name}
+                          {category.parent_name ? ` · ${category.parent_name}` : ''}
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Categories are limited to the selected brand to avoid linking products to another workspace.
+          </p>
         </div>
         <div className="space-y-1.5">
           <Label>Type</Label>
@@ -1823,6 +1976,7 @@ export default function ProductsPage() {
                 <TableHead className="min-w-[180px]">Product</TableHead>
                 <TableHead className="min-w-[150px]">Barcode</TableHead>
                 <TableHead className="min-w-[110px]">Type</TableHead>
+                <TableHead className="min-w-[150px]">Categories</TableHead>
                 <TableHead className="text-right min-w-[120px]">Purchase</TableHead>
                 <TableHead className="text-right min-w-[120px]">Sales</TableHead>
                 <TableHead className="text-right min-w-[100px]">Stock</TableHead>

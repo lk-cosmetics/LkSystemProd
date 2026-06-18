@@ -242,6 +242,8 @@ class ProductListSerializer(serializers.ModelSerializer):
 
     brand_name = serializers.CharField(source='brand.name', read_only=True, allow_null=True)
     stock_total = serializers.SerializerMethodField(read_only=True)
+    categories = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
+    category_names = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Product
@@ -259,6 +261,8 @@ class ProductListSerializer(serializers.ModelSerializer):
             'sales_price',
             'brand',
             'brand_name',
+            'categories',
+            'category_names',
             'stock_total',
             'is_pack',
             'pack_items',
@@ -270,6 +274,10 @@ class ProductListSerializer(serializers.ModelSerializer):
 
     def get_stock_total(self, obj):
         return sum(inv.quantity for inv in obj.sales_channel_inventories.all())
+
+    def get_category_names(self, obj):
+        # The list queryset prefetches ``categories`` so this is N+1-free.
+        return [c.name for c in obj.categories.all()]
 
 
 class ProductAuditLogSerializer(serializers.ModelSerializer):

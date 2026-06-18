@@ -421,7 +421,12 @@ class BaseWooCommerceService(
         # Store audit users for use in upsert
         self._sync_created_by = created_by
         self._sync_updated_by = updated_by
-        
+        # Marks the per-item upsert/transform as running inside a BULK sync, so
+        # services can apply bulk-only optimizations (e.g. the products service
+        # skips re-downloading already-localized images). The webhook path never
+        # sets this, so single-product updates keep their full behavior.
+        self._bulk_sync_active = True
+
         wc_items = self.fetch_all(**fetch_params)
         
         created_count = 0

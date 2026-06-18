@@ -310,6 +310,23 @@ function EmptyTableRow({
   );
 }
 
+function MobileInfoRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: React.ReactNode;
+}) {
+  return (
+    <div className="min-w-0 rounded-md bg-muted/35 px-3 py-2">
+      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+        {label}
+      </p>
+      <div className="mt-1 min-w-0 text-sm font-medium text-foreground">{value}</div>
+    </div>
+  );
+}
+
 function ProductSearchSelect({
   products,
   value,
@@ -1009,8 +1026,8 @@ export default function ManufacturingPage() {
   }
 
   return (
-    <div className="space-y-5 p-3 sm:p-6">
-      <header className="flex flex-col gap-4 rounded-lg border bg-background p-4 sm:p-5 lg:flex-row lg:items-start lg:justify-between">
+    <div className="space-y-5 p-3 sm:p-5 lg:p-6">
+      <header className="flex flex-col gap-4 rounded-lg border bg-background p-4 shadow-sm sm:p-5 lg:flex-row lg:items-start lg:justify-between">
         <div className="max-w-3xl">
           <div className="mb-3 flex items-center gap-2">
             <div className="rounded-md border bg-muted/40 p-2">
@@ -1018,28 +1035,28 @@ export default function ManufacturingPage() {
             </div>
             <Badge variant="outline">Manufacturing</Badge>
           </div>
-          <h1 className="text-2xl font-bold tracking-tight">Manufacturing</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Manufacturing</h1>
+          <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
             Manage product recipes, component balances at the factory, and production orders from one clean workspace.
           </p>
         </div>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 lg:flex lg:flex-wrap">
-          <Button variant="outline" onClick={() => void fetchData()} className="justify-center">
+        <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-3 lg:w-auto lg:min-w-[520px]">
+          <Button variant="outline" onClick={() => void fetchData()} className="w-full justify-center">
             <RefreshCw className="mr-2 h-4 w-4" />
             Refresh
           </Button>
-          <Button variant="outline" onClick={() => void openBomDialog()} className="justify-center">
+          <Button variant="outline" onClick={() => void openBomDialog()} className="w-full justify-center">
             <PackagePlus className="mr-2 h-4 w-4" />
             New BOM
           </Button>
-          <Button onClick={() => openSendDialog()} className="justify-center">
+          <Button onClick={() => openSendDialog()} className="w-full justify-center">
             <Send className="mr-2 h-4 w-4" />
             New Production Order
           </Button>
         </div>
       </header>
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
           title="Bills of Materials"
           value={boms.length}
@@ -1066,19 +1083,31 @@ export default function ManufacturingPage() {
         />
       </div>
 
-      <Card className="rounded-lg py-4">
+      <Card className="rounded-lg py-4 shadow-sm">
         <CardContent className="space-y-4 px-3 sm:px-4">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <Tabs value={activeTab} onValueChange={value => setActiveTab(value as ManufacturingTab)} className="w-full lg:w-auto">
-              <TabsList className="grid h-auto w-full grid-cols-1 gap-1 sm:grid-cols-3 lg:w-auto">
-                <TabsTrigger value="boms" className="h-9">Bills of Materials</TabsTrigger>
-                <TabsTrigger value="factory-stock" className="h-9">In Factory Stock</TabsTrigger>
-                <TabsTrigger value="production-orders" className="h-9">Production Orders</TabsTrigger>
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+            <Tabs value={activeTab} onValueChange={value => setActiveTab(value as ManufacturingTab)} className="w-full xl:w-auto">
+              <TabsList className="flex h-auto w-full justify-start gap-1 overflow-x-auto p-1 xl:w-auto">
+                <TabsTrigger value="boms" className="h-9 min-w-max flex-1 whitespace-nowrap px-3 text-xs sm:flex-none sm:text-sm">
+                  Bills of Materials
+                </TabsTrigger>
+                <TabsTrigger value="factory-stock" className="h-9 min-w-max flex-1 whitespace-nowrap px-3 text-xs sm:flex-none sm:text-sm">
+                  In Factory Stock
+                </TabsTrigger>
+                <TabsTrigger value="production-orders" className="h-9 min-w-max flex-1 whitespace-nowrap px-3 text-xs sm:flex-none sm:text-sm">
+                  Production Orders
+                </TabsTrigger>
               </TabsList>
             </Tabs>
 
-            <div className="flex w-full flex-col gap-2 sm:flex-row lg:w-auto">
-              <div className="relative sm:min-w-80">
+            <div
+              className={`grid w-full grid-cols-1 gap-2 xl:w-[560px] ${
+                activeTab === 'production-orders'
+                  ? 'sm:grid-cols-[minmax(0,1fr)_220px]'
+                  : ''
+              }`}
+            >
+              <div className="relative min-w-0">
                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   className="pl-9"
@@ -1089,7 +1118,7 @@ export default function ManufacturingPage() {
               </div>
               {activeTab === 'production-orders' && (
                 <Select value={productionStatusFilter} onValueChange={setProductionStatusFilter}>
-                  <SelectTrigger className="sm:w-48">
+                  <SelectTrigger className="w-full">
                     <SelectValue placeholder="Status" />
                   </SelectTrigger>
                   <SelectContent>
@@ -1108,8 +1137,63 @@ export default function ManufacturingPage() {
 
           <Tabs value={activeTab} onValueChange={value => setActiveTab(value as ManufacturingTab)}>
             <TabsContent value="boms" className="mt-0">
-              <div className="overflow-x-auto rounded-lg border">
-                <Table>
+              <div className="grid gap-3 md:hidden">
+                {bomPages.pageRows.length === 0 ? (
+                  <Card className="rounded-lg border-dashed py-8">
+                    <CardContent className="flex flex-col items-center gap-2 text-center text-muted-foreground">
+                      <Package className="h-9 w-9 opacity-30" />
+                      <p className="text-sm font-medium text-foreground">No Bills of Materials</p>
+                      <p className="text-xs">Create a BOM to define which components are required for a finished product.</p>
+                    </CardContent>
+                  </Card>
+                ) : (
+                  bomPages.pageRows.map(bom => (
+                    <Card key={bom.id} className="rounded-lg py-0">
+                      <CardContent className="space-y-3 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="break-words text-sm font-semibold">{bom.finished_product_name}</p>
+                            <p className="mt-0.5 text-xs text-muted-foreground">{bom.name || 'Default BOM'}</p>
+                          </div>
+                          <Badge variant={bom.is_active ? 'default' : 'secondary'} className="shrink-0">
+                            {bom.is_active ? 'Active' : 'Inactive'}
+                          </Badge>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <MobileInfoRow label="SKU" value={bom.finished_product_barcode || 'No SKU'} />
+                          <MobileInfoRow label="Components" value={`${bom.items_count} components`} />
+                          <MobileInfoRow label="Updated" value={formatDate(bom.updated_at)} />
+                          <MobileInfoRow
+                            label="Actions"
+                            value={
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button variant="outline" size="sm" className="h-8 w-full justify-center">
+                                    Manage
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem onClick={() => void openBomDialog(bom)}>
+                                    <Pencil className="mr-2 h-4 w-4" />
+                                    Edit BOM
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem onClick={() => openSendDialog(bom)}>
+                                    <Send className="mr-2 h-4 w-4" />
+                                    Create production order
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            }
+                          />
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))
+                )}
+              </div>
+
+              <div className="hidden overflow-x-auto rounded-lg border md:block">
+                <Table className="min-w-[760px]">
                   <TableHeader>
                     <TableRow>
                       <TableHead>BOM Name</TableHead>
@@ -1186,8 +1270,47 @@ export default function ManufacturingPage() {
             </TabsContent>
 
             <TabsContent value="factory-stock" className="mt-0">
-              <div className="overflow-x-auto rounded-lg border">
-                <Table>
+              <div className="grid gap-3 md:hidden">
+                {factoryPages.pageRows.length === 0 ? (
+                  <Card className="rounded-lg border-dashed py-8">
+                    <CardContent className="flex flex-col items-center gap-2 text-center text-muted-foreground">
+                      <Package className="h-9 w-9 opacity-30" />
+                      <p className="text-sm font-medium text-foreground">No factory stock</p>
+                      <p className="text-xs">Components sent to the factory will appear here until finished products are received.</p>
+                    </CardContent>
+                  </Card>
+                ) : (
+                  factoryPages.pageRows.map(row => (
+                    <Card key={row.component_id} className="rounded-lg py-0">
+                      <CardContent className="space-y-3 p-3">
+                        <div className="min-w-0">
+                          <p className="break-words text-sm font-semibold">{row.component_name}</p>
+                          <p className="mt-0.5 font-mono text-xs text-muted-foreground">
+                            {row.component_barcode || 'No SKU'}
+                          </p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <MobileInfoRow label="At factory" value={formatQty(row.in_factory_quantity)} />
+                          <MobileInfoRow label="Reserved" value="0" />
+                          <MobileInfoRow label="Sent" value={formatQty(row.quantity_sent)} />
+                          <MobileInfoRow label="Consumed" value={formatQty(row.quantity_consumed)} />
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setActiveTab('production-orders')}
+                          className="w-full"
+                        >
+                          View production orders
+                        </Button>
+                      </CardContent>
+                    </Card>
+                  ))
+                )}
+              </div>
+
+              <div className="hidden overflow-x-auto rounded-lg border md:block">
+                <Table className="min-w-[820px]">
                   <TableHeader>
                     <TableRow>
                       <TableHead>Item</TableHead>
@@ -1253,8 +1376,108 @@ export default function ManufacturingPage() {
             </TabsContent>
 
             <TabsContent value="production-orders" className="mt-0">
-              <div className="overflow-x-auto rounded-lg border">
-                <Table>
+              <div className="grid gap-3 md:hidden">
+                {productionPages.pageRows.length === 0 ? (
+                  <Card className="rounded-lg border-dashed py-8">
+                    <CardContent className="flex flex-col items-center gap-2 text-center text-muted-foreground">
+                      <Package className="h-9 w-9 opacity-30" />
+                      <p className="text-sm font-medium text-foreground">No production orders</p>
+                      <p className="text-xs">Create a production order to send BOM components to your factory or laboratory.</p>
+                    </CardContent>
+                  </Card>
+                ) : (
+                  productionPages.pageRows.map(order => {
+                    const receivedPercent =
+                      order.planned_quantity > 0
+                        ? Math.min(
+                            100,
+                            Math.round(
+                              (order.received_quantity / order.planned_quantity) * 100
+                            )
+                          )
+                        : 0;
+
+                    return (
+                      <Card key={order.id} className="rounded-lg py-0">
+                        <CardContent className="space-y-3 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="break-all font-mono text-sm font-semibold">{order.batch_number}</p>
+                              <p className="mt-1 break-words text-sm font-medium">{order.finished_product_name}</p>
+                              <p className="mt-0.5 text-xs text-muted-foreground">{order.sales_channel_name}</p>
+                            </div>
+                            <div className="shrink-0">{productionStatusBadge(order.status, order.status_display)}</div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2">
+                            <MobileInfoRow label="Planned" value={formatQty(order.planned_quantity)} />
+                            <MobileInfoRow label="Received" value={formatQty(order.received_quantity)} />
+                            <MobileInfoRow label="Start date" value={formatDate(order.sent_at || order.created_at)} />
+                            <MobileInfoRow label="At factory" value={formatQty(order.in_factory_quantity)} />
+                          </div>
+
+                          <div className="rounded-md bg-muted/35 px-3 py-2">
+                            <div className="mb-1 flex items-center justify-between text-xs">
+                              <span className="font-medium text-muted-foreground">Received progress</span>
+                              <span className="font-mono font-semibold">{receivedPercent}%</span>
+                            </div>
+                            <div className="h-2 overflow-hidden rounded-full bg-background">
+                              <div
+                                className={`h-full rounded-full ${
+                                  receivedPercent >= 100
+                                    ? 'bg-emerald-500'
+                                    : receivedPercent > 0
+                                      ? 'bg-amber-500'
+                                      : 'bg-muted-foreground/30'
+                                }`}
+                                style={{ width: `${receivedPercent}%` }}
+                              />
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void openProductionDetail(order)}
+                            >
+                              <Eye className="mr-2 h-4 w-4" />
+                              View
+                            </Button>
+                            {order.in_factory_quantity > 0 && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => void openReceiveDialog(order)}
+                              >
+                                <PackageCheck className="mr-2 h-4 w-4 text-emerald-600" />
+                                Receive
+                              </Button>
+                            )}
+                            {order.received_quantity === 0 && order.status !== 'CANCELLED' && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="text-destructive"
+                                onClick={() => {
+                                  setCancelTarget(order);
+                                  setCancelNotes('');
+                                }}
+                              >
+                                <Trash2 className="mr-2 h-4 w-4" />
+                                Cancel
+                              </Button>
+                            )}
+                          </div>
+                        </CardContent>
+                      </Card>
+                    );
+                  })
+                )}
+              </div>
+
+              <div className="hidden overflow-x-auto rounded-lg border md:block">
+                <Table className="min-w-[980px]">
                   <TableHeader>
                     <TableRow>
                       <TableHead>Order Number</TableHead>

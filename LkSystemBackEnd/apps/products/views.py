@@ -80,7 +80,7 @@ class ProductViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     default_write_permission = 'edit_products'
 
     permission_classes = [IsAuthenticated]
-    parser_classes = [JSONParser]
+    parser_classes = [JSONParser, MultiPartParser]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     # ``categories`` enables ?categories=<id> to filter products by category
     # (the category drill-down + the Products page category filter).

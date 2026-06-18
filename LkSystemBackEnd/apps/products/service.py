@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from decimal import Decimal, InvalidOperation
 
 import requests
+from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.utils import timezone
@@ -93,9 +94,8 @@ class ProductService(BaseWooCommerceService[Product], WebhookHandlerMixin):
 
         images = wc_data.get('images', [])
         remote_image = images[0].get('src', '') if images else ''
-        local_image = self._download_primary_image(remote_image, wc_data.get('id'))
 
-        return {
+        data = {
             'wc_product_id': wc_data['id'],
             'name': wc_data.get('name', ''),
             'barcode': wc_data.get('sku', ''),
@@ -107,7 +107,6 @@ class ProductService(BaseWooCommerceService[Product], WebhookHandlerMixin):
             'status': wc_data.get('status', 'publish'),
             'brand': self.sales_channel.brand,
             'sales_price': regular_price,
-            'image_url': local_image or remote_image,
             'product_link': wc_data.get('permalink', ''),
             'last_synced_at': timezone.now(),
             'wc_date_created': wc_data.get('date_created'),
@@ -118,6 +117,31 @@ class ProductService(BaseWooCommerceService[Product], WebhookHandlerMixin):
                 if category.get('id')
             ],
         }
+
+        # Image localization is the slow part of a BULK SYNC — one blocking HTTP
+        # download per product, repeated on every run. During a bulk sync, skip
+        # it when the product already has a locally stored image: re-syncs then
+        # touch no remote media (the common case the user hits). New /
+        # not-yet-localized products still download once. The per-product
+        # webhook path does NOT set the bulk flag, so a real product update in
+        # WooCommerce still re-localizes its image. When skipping we omit
+        # ``image_url`` so the upsert leaves the existing value intact.
+        skip_image = False
+        if getattr(self, '_bulk_sync_active', False):
+            media_url = getattr(settings, 'MEDIA_URL', '/media/') or '/media/'
+            existing_image_url = (
+                Product.all_objects
+                .filter(wc_product_id=wc_data.get('id'), brand=self.sales_channel.brand)
+                .values_list('image_url', flat=True)
+                .first()
+            )
+            skip_image = bool(existing_image_url) and existing_image_url.startswith(media_url)
+
+        if not skip_image:
+            local_image = self._download_primary_image(remote_image, wc_data.get('id'))
+            data['image_url'] = local_image or remote_image
+
+        return data
 
     def post_upsert_hook(
         self,

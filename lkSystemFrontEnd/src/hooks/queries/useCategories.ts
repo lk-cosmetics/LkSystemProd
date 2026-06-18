@@ -40,13 +40,13 @@ export function useCategory(id: number) {
 }
 
 /**
- * Orders containing a product in this category. Enabled-gated so it only fires
- * while the category detail panel is open.
+ * Products in this category. Enabled-gated so it only fires while the category
+ * detail panel is open.
  */
-export function useCategoryOrders(id: number | undefined, enabled = true) {
+export function useCategoryProducts(id: number | undefined, enabled = true) {
   return useQuery({
-    queryKey: [...categoriesKeys.detail(id ?? 0), 'orders'],
-    queryFn: () => categoryService.getCategoryOrders(id as number, { page_size: 50 }),
+    queryKey: [...categoriesKeys.detail(id ?? 0), 'products'],
+    queryFn: () => categoryService.getCategoryProducts(id as number, { page_size: 50 }),
     enabled: Boolean(id) && enabled,
     staleTime: 60 * 1000,
   });
@@ -86,7 +86,7 @@ export function useCreateCategory() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (data: CreateCategoryRequest) => categoryService.createCategory(data),
+    mutationFn: (data: CreateCategoryRequest | FormData) => categoryService.createCategory(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: categoriesKeys.lists() });
       queryClient.invalidateQueries({ queryKey: categoriesKeys.tree() });
@@ -101,7 +101,7 @@ export function useUpdateCategory() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ id, data }: { id: number; data: UpdateCategoryRequest }) =>
+    mutationFn: ({ id, data }: { id: number; data: UpdateCategoryRequest | FormData }) =>
       categoryService.updateCategory(id, data),
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: categoriesKeys.detail(variables.id) });
