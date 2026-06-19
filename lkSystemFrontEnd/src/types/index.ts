@@ -847,6 +847,8 @@ export interface PromotionGroupMember {
   product_name: string;
   product_image: string | null;
   product_barcode: string | null;
+  product_type?: ProductType;
+  is_pack?: boolean;
   discount_type: DiscountType;
   discount_value: string;
   is_active: boolean;

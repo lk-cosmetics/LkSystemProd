@@ -15,6 +15,7 @@ from rest_framework.parsers import JSONParser, MultiPartParser
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django.db import transaction
+from django.db.models import Q
 from django.http import HttpResponse
 from django.utils import timezone
 
@@ -338,13 +339,43 @@ class ProductViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        products = list(
+        sellable_products = list(
             Product.objects
             .filter(
                 brand=sales_channel.brand,
                 status=Product.ProductStatus.PUBLISH,
                 product_type__in=Product.SELLABLE_TYPES,  # POS only sells resell_product + pack
             )
+            .order_by('name')
+        )
+
+        # Include pack components in the offline cache so IndexedDB can validate
+        # and deduct component stock while offline. The React catalogue still
+        # filters the visible grid to SELLABLE_TYPES, so component/packaging rows
+        # stay hidden from the cashier.
+        component_ids = set()
+        for product in sellable_products:
+            if not product.is_pack or not product.pack_items:
+                continue
+            for item in product.pack_items:
+                product_id = item.get('product_id') if isinstance(item, dict) else None
+                if product_id:
+                    component_ids.add(product_id)
+
+        products = list(
+            Product.objects
+            .filter(
+                Q(
+                    brand=sales_channel.brand,
+                    status=Product.ProductStatus.PUBLISH,
+                    product_type__in=Product.SELLABLE_TYPES,
+                ) |
+                Q(
+                    id__in=component_ids,
+                    brand=sales_channel.brand,
+                )
+            )
+            .distinct()
             .order_by('name')
         )
         product_ids = [product.id for product in products]
