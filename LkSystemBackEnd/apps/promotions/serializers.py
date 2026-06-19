@@ -556,6 +556,8 @@ class PromotionGroupMemberSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_image = serializers.URLField(source='product.image_url', read_only=True, allow_null=True)
     product_barcode = serializers.CharField(source='product.barcode', read_only=True, allow_null=True)
+    product_type = serializers.CharField(source='product.product_type', read_only=True)
+    is_pack = serializers.BooleanField(source='product.is_pack', read_only=True)
     discount_value = serializers.DecimalField(
         source='default_discount_value', max_digits=10, decimal_places=2, read_only=True,
     )
@@ -568,6 +570,8 @@ class PromotionGroupMemberSerializer(serializers.ModelSerializer):
             'product_name',
             'product_image',
             'product_barcode',
+            'product_type',
+            'is_pack',
             'discount_type',
             'discount_value',
             'is_active',

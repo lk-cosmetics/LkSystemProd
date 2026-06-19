@@ -129,6 +129,9 @@ const normalizeSearch = (value: string) => value.trim().toLowerCase();
 const POS_CHANNEL_CACHE_KEY = 'lk-pos-channels-v1';
 const POS_SELECTED_CHANNEL_KEY = 'lk-pos-selected-channel';
 
+const getBrowserOnlineState = () =>
+  typeof navigator === 'undefined' ? true : navigator.onLine;
+
 const readCachedChannels = (): SalesChannel[] => {
   if (typeof window === 'undefined') return [];
   try {
@@ -215,6 +218,32 @@ const describeRequestError = (err: unknown, fallback: string): string => {
   return fallback;
 };
 
+const isConnectivityError = (err: unknown): boolean => {
+  const maybeAxios = err as {
+    code?: string;
+    message?: string;
+    request?: unknown;
+    response?: { status?: number };
+  };
+  const status = maybeAxios?.response?.status;
+  if (status && [0, 502, 503, 504].includes(status)) return true;
+  if (maybeAxios?.response) return false;
+
+  if (!getBrowserOnlineState()) return true;
+
+  const code = String(maybeAxios?.code ?? '').toUpperCase();
+  if (['ERR_NETWORK', 'ECONNABORTED', 'ETIMEDOUT'].includes(code)) return true;
+
+  const message = String(maybeAxios?.message ?? '').toLowerCase();
+  return (
+    Boolean(maybeAxios?.request) ||
+    message.includes('network error') ||
+    message.includes('timeout') ||
+    message.includes('failed to fetch') ||
+    message.includes('net::err')
+  );
+};
+
 export default function POSPage() {
   const isMobile = useIsMobile();
   const authUser = useAuthStore(s => s.user);
@@ -241,9 +270,7 @@ export default function POSPage() {
   const debouncedPOSHistorySearch = useDebounce(posHistorySearch, 350);
   const [posHistoryDateFrom, setPosHistoryDateFrom] = useState('');
   const [posHistoryDateTo, setPosHistoryDateTo] = useState('');
-  const [isOnlineMode, setIsOnlineMode] = useState(
-    typeof navigator === 'undefined' ? true : navigator.onLine,
-  );
+  const [isOnlineMode, setIsOnlineMode] = useState(getBrowserOnlineState);
   const [offlineProducts, setOfflineProducts] = useState<CachedPOSProduct[]>([]);
   const [offlinePromotions, setOfflinePromotions] = useState<CachedPOSPromotion[]>([]);
   const [promotionsLoading, setPromotionsLoading] = useState(false);
@@ -349,6 +376,9 @@ export default function POSPage() {
       });
     } catch (err) {
       console.error('Failed to load POS data:', err);
+      if (isConnectivityError(err)) {
+        setIsOnlineMode(false);
+      }
       const cachedChannels = readCachedChannels();
       if (cachedChannels.length > 0) {
         setChannels(cachedChannels);
@@ -506,17 +536,13 @@ export default function POSPage() {
     } catch (err) {
       console.warn('[POS] Product cache refresh failed, using IndexedDB snapshot:', err);
       await loadCachedPOSProducts(salesChannelId);
-      // Only drop into OFFLINE mode on real connectivity loss. A transient
-      // server/API error while the browser is still online must NOT strand the
-      // POS in offline mode — it would never recover (no 'online' event fires)
-      // and checkout would wrongly queue locally instead of hitting the server.
-      setIsOnlineMode(navigator.onLine);
+      setIsOnlineMode(!isConnectivityError(err));
       return false;
     }
   }, [channelId, selectedChannel, canViewPromotions, loadCachedPOSProducts]);
 
   useEffect(() => {
-    const update = () => setIsOnlineMode(navigator.onLine);
+    const update = () => setIsOnlineMode(getBrowserOnlineState());
     window.addEventListener('online', update);
     window.addEventListener('offline', update);
     return () => {
@@ -593,6 +619,10 @@ export default function POSPage() {
           await offlinePOSService.markTicketFailed(ticket, message);
           setErrorMsg(`Ticket ${ticket.ticket_id} could not sync: ${message}`);
           console.warn('[POS] Offline ticket sync failed:', ticket.ticket_id, err);
+          if (isConnectivityError(err)) {
+            setIsOnlineMode(false);
+            break;
+          }
           continue; // keep syncing the rest — one bad ticket must not strand the queue
         }
       }
@@ -1639,142 +1669,148 @@ export default function POSPage() {
       total: submitTotal.toFixed(2),
     };
 
+    const queueCurrentTicketOffline = async (notice?: string): Promise<boolean> => {
+      const stockCheck = await offlinePOSService.validateLocalStock(Number(channelId), cart);
+      if (!stockCheck.ok) {
+        setErrorMsg(stockCheck.message);
+        return false;
+      }
+
+      const queued: OfflineTicket = await offlinePOSService.queueTicketAndApplySale(
+        {
+          ...ticketIdentity,
+          sales_channel: Number(channelId),
+          payload,
+          created_at: new Date().toISOString(),
+        },
+        cart,
+      );
+
+      await loadCachedPOSProducts(Number(channelId));
+      await refreshPendingOfflineCount();
+
+      const localOrder = {
+        id: -Date.now(),
+        order_number: queued.ticket_id,
+        ticket_id: queued.ticket_id,
+        client_ticket_uuid: queued.client_ticket_uuid,
+        external_order_id: '',
+        company: currentChannel?.company_id ?? 0,
+        company_name: '',
+        sales_channel: Number(channelId),
+        sales_channel_name: currentChannel?.name ?? '',
+        brand: currentChannel?.brand ?? null,
+        brand_name: currentChannel?.brand_name ?? null,
+        client: selectedClient?.id ?? null,
+        client_id: selectedClient?.id ?? null,
+        client_email: selectedClient?.email ?? null,
+        client_phone: selectedClient?.phone ?? null,
+        client_name: selectedClient?.full_name ?? null,
+        client_points: selectedClient?.points ?? 0,
+        status: 'COMPLETED',
+        source: 'POS',
+        payment_status: 'PAID',
+        payment_method:
+          paymentMethod === 'cash'
+            ? 'Cash'
+            : paymentMethod === 'card'
+              ? 'Card'
+              : 'Bank Transfer',
+        billing_phone: selectedClient?.phone ?? '',
+        currency: 'TND',
+        subtotal: submitSubtotal.toFixed(2),
+        tax_total: '0.00',
+        shipping_total: '0.00',
+        discount_type: payload.discount_type,
+        discount_value: payload.discount_value,
+        discount_total: submitManualDiscount.toFixed(2),
+        total: submitTotal.toFixed(2),
+        is_deleted: false,
+        line_count: cart.length,
+        outcome: 'CONFIRMED',
+        confirmed_at: new Date().toISOString(),
+        delay_date: null,
+        delay_reason: '',
+        cancellation_reason: '',
+        outcome_note: 'Offline POS checkout',
+        outcome_changed_at: new Date().toISOString(),
+        delivery_reference: '',
+        delivery_code: '',
+        delivery_external_reference: '',
+        delivery_status_id: null,
+        delivery_order_id: null,
+        delivery_client_id: null,
+        delivery_cod_amount: null,
+        delivery_submitted_at: null,
+        delivery_submitted_by: null,
+        delivery_attempts: 0,
+        in_store_pickup: false,
+        pos_sales_channel: Number(channelId),
+        pos_sales_channel_name: currentChannel?.name ?? null,
+        pos_sales_channel_code: currentChannel?.code ?? null,
+        sent_to_pos_at: null,
+        sent_to_pos_by: null,
+        pos_validated_at: new Date().toISOString(),
+        pos_validated_by: null,
+        returned_at: null,
+        returned_by: null,
+        return_reason: '',
+        stock_restored_at: null,
+        stock_restored_by: null,
+        delete_reason: '',
+        lifecycle_priority: null,
+        created_at: queued.created_at,
+        updated_at: queued.created_at,
+        lines: cart.map((line, index) => {
+          const price = getSubmitPrice(line.product);
+          return {
+            id: -index - 1,
+            product: line.product.id,
+            product_id: line.product.id,
+            external_line_id: `${queued.client_ticket_uuid}:${line.product.id}`,
+            wc_product_id: line.product.wc_product_id,
+            product_name: line.product.name,
+            product_name_from_api: line.product.name,
+            product_status: line.product.status,
+            barcode: line.product.barcode ?? '',
+            product_image: line.product.image_url ?? '',
+            quantity: line.quantity,
+            unit_price: price.toFixed(2),
+            subtotal: (line.quantity * price).toFixed(2),
+            tax: '0.00',
+            total: (line.quantity * price).toFixed(2),
+          };
+        }),
+      } as unknown as OrderDetail;
+
+      setPrintData({
+        order: localOrder,
+        channel: currentChannel,
+        client: selectedClient ?? undefined,
+        paymentMethod,
+        amountReceived,
+        changeAmount,
+        cashierName,
+        discountTotal: Math.max(0, cartOriginalTotal - submitTotal),
+        ticketNumber: queued.ticket_id,
+        logoSrc: currentChannel?.brand_logo ?? undefined,
+      });
+      setCompletedOrder(localOrder);
+
+      setCart([]);
+      setCustomerNote('');
+      setManualDiscountValue('');
+      setSelectedClient(null);
+      setClientSkipped(false);
+      void customerDisplayService.showTotal(0);
+      if (isMobile) setCartDrawerOpen(false);
+      if (notice) toast.warning(notice);
+      return true;
+    };
+
     if (!isOnlineMode) {
       try {
-        const stockCheck = await offlinePOSService.validateLocalStock(Number(channelId), cart);
-        if (!stockCheck.ok) {
-          setErrorMsg(stockCheck.message);
-          return;
-        }
-
-        const queued: OfflineTicket = await offlinePOSService.queueTicketAndApplySale(
-          {
-            ...ticketIdentity,
-            sales_channel: Number(channelId),
-            payload,
-            created_at: new Date().toISOString(),
-          },
-          cart,
-        );
-
-        await loadCachedPOSProducts(Number(channelId));
-        await refreshPendingOfflineCount();
-
-        const localOrder = {
-          id: -Date.now(),
-          order_number: queued.ticket_id,
-          ticket_id: queued.ticket_id,
-          client_ticket_uuid: queued.client_ticket_uuid,
-          external_order_id: '',
-          company: currentChannel?.company_id ?? 0,
-          company_name: '',
-          sales_channel: Number(channelId),
-          sales_channel_name: currentChannel?.name ?? '',
-          brand: currentChannel?.brand ?? null,
-          brand_name: currentChannel?.brand_name ?? null,
-          client: selectedClient?.id ?? null,
-          client_id: selectedClient?.id ?? null,
-          client_email: selectedClient?.email ?? null,
-          client_phone: selectedClient?.phone ?? null,
-          client_name: selectedClient?.full_name ?? null,
-          client_points: selectedClient?.points ?? 0,
-          status: 'COMPLETED',
-          source: 'POS',
-          payment_status: 'PAID',
-          payment_method:
-            paymentMethod === 'cash'
-              ? 'Cash'
-              : paymentMethod === 'card'
-                ? 'Card'
-                : 'Bank Transfer',
-          billing_phone: selectedClient?.phone ?? '',
-          currency: 'TND',
-          subtotal: submitSubtotal.toFixed(2),
-          tax_total: '0.00',
-          shipping_total: '0.00',
-          discount_type: payload.discount_type,
-          discount_value: payload.discount_value,
-          discount_total: submitManualDiscount.toFixed(2),
-          total: submitTotal.toFixed(2),
-          is_deleted: false,
-          line_count: cart.length,
-          outcome: 'CONFIRMED',
-          confirmed_at: new Date().toISOString(),
-          delay_date: null,
-          delay_reason: '',
-          cancellation_reason: '',
-          outcome_note: 'Offline POS checkout',
-          outcome_changed_at: new Date().toISOString(),
-          delivery_reference: '',
-          delivery_code: '',
-          delivery_external_reference: '',
-          delivery_status_id: null,
-          delivery_order_id: null,
-          delivery_client_id: null,
-          delivery_cod_amount: null,
-          delivery_submitted_at: null,
-          delivery_submitted_by: null,
-          delivery_attempts: 0,
-          in_store_pickup: false,
-          pos_sales_channel: Number(channelId),
-          pos_sales_channel_name: currentChannel?.name ?? null,
-          pos_sales_channel_code: currentChannel?.code ?? null,
-          sent_to_pos_at: null,
-          sent_to_pos_by: null,
-          pos_validated_at: new Date().toISOString(),
-          pos_validated_by: null,
-          returned_at: null,
-          returned_by: null,
-          return_reason: '',
-          stock_restored_at: null,
-          stock_restored_by: null,
-          delete_reason: '',
-          lifecycle_priority: null,
-          created_at: queued.created_at,
-          updated_at: queued.created_at,
-          lines: cart.map((line, index) => {
-            const price = getSubmitPrice(line.product);
-            return {
-              id: -index - 1,
-              product: line.product.id,
-              product_id: line.product.id,
-              external_line_id: `${queued.client_ticket_uuid}:${line.product.id}`,
-              wc_product_id: line.product.wc_product_id,
-              product_name: line.product.name,
-              product_name_from_api: line.product.name,
-              product_status: line.product.status,
-              barcode: line.product.barcode ?? '',
-              product_image: line.product.image_url ?? '',
-              quantity: line.quantity,
-              unit_price: price.toFixed(2),
-              subtotal: (line.quantity * price).toFixed(2),
-              tax: '0.00',
-              total: (line.quantity * price).toFixed(2),
-            };
-          }),
-        } as unknown as OrderDetail;
-
-        setPrintData({
-          order: localOrder,
-          channel: currentChannel,
-          client: selectedClient ?? undefined,
-          paymentMethod,
-          amountReceived,
-          changeAmount,
-          cashierName,
-          discountTotal: Math.max(0, cartOriginalTotal - submitTotal),
-          ticketNumber: queued.ticket_id,
-          logoSrc: currentChannel?.brand_logo ?? undefined,
-        });
-        setCompletedOrder(localOrder);
-
-        setCart([]);
-        setCustomerNote('');
-        setManualDiscountValue('');
-        setSelectedClient(null);
-        setClientSkipped(false);
-        void customerDisplayService.showTotal(0);
-        if (isMobile) setCartDrawerOpen(false);
+        await queueCurrentTicketOffline();
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to save offline ticket.';
         setErrorMsg(msg);
@@ -1817,6 +1853,19 @@ export default function POSPage() {
       notifyCaisseStatsChanged();
       if (isMobile) setCartDrawerOpen(false);
     } catch (err: unknown) {
+      if (isConnectivityError(err)) {
+        setIsOnlineMode(false);
+        try {
+          await queueCurrentTicketOffline('Connexion perdue. Ticket enregistré en mode offline.');
+          return;
+        } catch (offlineErr: unknown) {
+          const msg = offlineErr instanceof Error
+            ? offlineErr.message
+            : 'Connexion perdue et sauvegarde offline impossible.';
+          setErrorMsg(msg);
+          return;
+        }
+      }
       setErrorMsg(describeRequestError(err, 'Could not place the order. Please try again.'));
     } finally {
       setSubmitting(false);

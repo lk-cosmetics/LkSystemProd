@@ -49,6 +49,7 @@ import {
   useBulkCreatePromotions,
   useUpdatePromotionGroup,
 } from '@/hooks/queries/usePromotions';
+import { useAuthStore } from '@/store/authStore';
 import { salesChannelService } from '@/services/salesChannel.service';
 import { isoToTunisLocal, nowTunisLocal, tunisLocalToIso } from '@/lib/tunisTime';
 import type {
@@ -144,9 +145,15 @@ export function PromotionWizardDialog({
   // wiping the user's in-progress edits when the React-Query data ref changes.
   const [hydratedGroupId, setHydratedGroupId] = useState<string | null>(null);
 
+  const activeWorkspaceBrandId = useAuthStore(
+    state => state.user?.current_brand_id ?? null,
+  );
   const { data: brands = [], isLoading: brandsLoading } = useBrands();
   const bulkCreate = useBulkCreatePromotions();
   const updateGroup = useUpdatePromotionGroup();
+  const workspaceBrandExists = activeWorkspaceBrandId != null
+    && brands.some(brand => brand.id === activeWorkspaceBrandId);
+  const shouldLockBrand = isEdit || workspaceBrandExists;
 
   /* Reset wizard on close, or hydrate from initialGroup on open. */
   useEffect(() => {
@@ -176,7 +183,8 @@ export function PromotionWizardDialog({
           name: m.product_name,
           barcode: m.product_barcode,
           image_url: m.product_image,
-          product_type: 'resell_product',
+          product_type: m.product_type ?? (m.is_pack ? 'pack' : 'resell_product'),
+          is_pack: Boolean(m.is_pack),
         },
         discount_type: m.discount_type,
         discount_value: String(m.discount_value ?? '0'),
@@ -200,6 +208,31 @@ export function PromotionWizardDialog({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, initialGroup]);
+
+  /* New campaigns inherit the current workspace brand automatically. */
+  useEffect(() => {
+    if (!open || isEdit || brandId || brandsLoading || brands.length === 0) {
+      return;
+    }
+
+    if (workspaceBrandExists && activeWorkspaceBrandId != null) {
+      setBrandId(activeWorkspaceBrandId);
+      return;
+    }
+
+    // If RBAC/workspace filtering leaves a single brand, remove the extra click.
+    if (brands.length === 1) {
+      setBrandId(brands[0].id);
+    }
+  }, [
+    activeWorkspaceBrandId,
+    brandId,
+    brands,
+    brandsLoading,
+    isEdit,
+    open,
+    workspaceBrandExists,
+  ]);
 
   /* Load promotable (POS + WooCommerce) channels for the selected brand. */
   useEffect(() => {
@@ -335,12 +368,12 @@ export function PromotionWizardDialog({
 
   return (
     <Dialog open={open} onOpenChange={v => !submitting && onOpenChange(v)}>
-      <DialogContent className="flex max-h-[92vh] w-[min(92vw,920px)] max-w-none flex-col gap-0 p-0 sm:max-w-none">
-        <DialogHeader className="space-y-1 px-4 pt-4 sm:px-6 sm:pt-6">
-          <DialogTitle className="text-lg">
+      <DialogContent className="flex max-h-[94vh] w-[min(98vw,1280px)] max-w-none flex-col gap-0 overflow-hidden p-0 sm:max-w-none">
+        <DialogHeader className="space-y-1 px-4 pt-4 sm:px-5 sm:pt-5">
+          <DialogTitle className="text-base sm:text-lg">
             {isEdit ? 'Edit promotion' : 'New promotion'}
           </DialogTitle>
-          <DialogDescription>
+          <DialogDescription className="text-xs sm:text-sm">
             {isEdit
               ? 'Update the campaign meta, channels, and per-product discounts. Add or remove products as needed.'
               : 'Apply one promotion to multiple products at once, each with its own discount.'}
@@ -348,7 +381,7 @@ export function PromotionWizardDialog({
         </DialogHeader>
 
         {/* Stepper */}
-        <div className="border-b px-4 py-3 sm:px-6">
+        <div className="border-b px-4 py-2 sm:px-5">
           <ol className="grid grid-cols-3 gap-2 text-[11px]">
             {STEPS.map((s, idx) => {
               const isActive = s.id === step;
@@ -356,7 +389,7 @@ export function PromotionWizardDialog({
               return (
                 <li
                   key={s.id}
-                  className={`flex items-center gap-2 rounded-md border px-2 py-1.5 ${
+                  className={`flex items-center gap-2 rounded-md border px-2 py-1 ${
                     isActive
                       ? 'border-primary/60 bg-primary/5'
                       : isDone
@@ -388,7 +421,7 @@ export function PromotionWizardDialog({
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
+        <div className="flex-1 overflow-y-auto px-4 py-3 sm:px-5">
           {isLoadingInitialGroup && !initialGroup ? (
             <div className="flex flex-col items-center justify-center gap-3 py-16 text-sm text-muted-foreground">
               <Loader2 className="size-6 animate-spin" />
@@ -396,7 +429,7 @@ export function PromotionWizardDialog({
             </div>
           ) : step === 'products' ? (
             <div className="space-y-3">
-              <div className="grid gap-2 sm:max-w-xs">
+              <div className="grid gap-2 sm:max-w-sm">
                 <Label className="text-xs font-medium">
                   Brand{isEdit ? <span className="ml-1 text-[10px] font-normal text-muted-foreground">(locked)</span> : null}
                 </Label>
@@ -405,7 +438,7 @@ export function PromotionWizardDialog({
                 ) : (
                   <Select
                     value={brandId ? String(brandId) : ''}
-                    disabled={isEdit}
+                    disabled={shouldLockBrand}
                     onValueChange={v => {
                       setBrandId(Number(v));
                       setSelected([]);
@@ -423,6 +456,11 @@ export function PromotionWizardDialog({
                     </SelectContent>
                   </Select>
                 )}
+                {workspaceBrandExists ? (
+                  <p className="text-[11px] text-muted-foreground">
+                    Brand selected from the active workspace.
+                  </p>
+                ) : null}
               </div>
               <PromotionProductPicker
                 brandId={brandId}

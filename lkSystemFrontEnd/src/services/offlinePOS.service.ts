@@ -237,8 +237,9 @@ export const createOfflineTicketIdentity = () => {
   localStorage.setItem(counterKey, String(next));
 
   const ticket_id = `${day}${month}${year}${String(next).padStart(4, '0')}`;
+  const browserCrypto = globalThis.crypto;
   const random =
-    crypto?.randomUUID?.() ??
+    browserCrypto?.randomUUID?.() ??
     `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   return {
@@ -469,7 +470,11 @@ export const offlinePOSService = {
   async getPendingTickets(): Promise<OfflineTicket[]> {
     const rows = await getAllFromStore<OfflineTicket>(TICKET_STORE);
     return rows
-      .filter(ticket => ticket.status === 'PENDING' || ticket.status === 'FAILED')
+      .filter(ticket =>
+        ticket.status === 'PENDING' ||
+        ticket.status === 'FAILED' ||
+        ticket.status === 'SYNCING'
+      )
       .sort((a, b) => a.created_at.localeCompare(b.created_at));
   },
 
