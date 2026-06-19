@@ -44,6 +44,8 @@ interface POSProductGridProps {
   onAddToCart: (product: ProductListItem) => void;
   onCameraScan: () => void;
   getPrice?: (product: ProductListItem) => number;
+  getAvailableQuantity?: (product: ProductListItem) => number | null;
+  isOfflineMode?: boolean;
   isLoading?: boolean;
   isFetchingNextPage?: boolean;
   hasNextPage?: boolean;
@@ -83,6 +85,8 @@ export function POSProductGrid({
   onAddToCart,
   onCameraScan,
   getPrice,
+  getAvailableQuantity,
+  isOfflineMode = false,
   isLoading,
   isFetchingNextPage,
   hasNextPage,
@@ -555,15 +559,21 @@ export function POSProductGrid({
             ) : (
               <div className="flex flex-col gap-4 px-2 pb-4 sm:px-3 lg:px-4">
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(132px,1fr))] gap-2.5 sm:grid-cols-[repeat(auto-fill,minmax(150px,1fr))] xl:grid-cols-[repeat(auto-fill,minmax(170px,1fr))]">
-                  {products.map(p => (
-                    <POSProductCard
-                      key={p.id}
-                      product={p}
-                      cartQuantity={cartQuantities.get(p.id) ?? 0}
-                      onAdd={() => onAddToCart(p)}
-                      price={getPrice ? getPrice(p) : undefined}
-                    />
-                  ))}
+                  {products.map(p => {
+                    const availableQuantity = getAvailableQuantity?.(p) ?? null;
+                    return (
+                      <POSProductCard
+                        key={p.id}
+                        product={p}
+                        cartQuantity={cartQuantities.get(p.id) ?? 0}
+                        onAdd={() => onAddToCart(p)}
+                        price={getPrice ? getPrice(p) : undefined}
+                        availableQuantity={availableQuantity}
+                        disabled={isOfflineMode && availableQuantity !== null && availableQuantity <= 0}
+                        stockMode={isOfflineMode ? 'offline' : 'cached'}
+                      />
+                    );
+                  })}
                 </div>
                 {hasNextPage && (
                   <div className="mt-2">

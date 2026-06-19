@@ -900,8 +900,16 @@ export default function POSPage() {
       return availableSets.length > 0 ? Math.max(0, Math.min(...availableSets)) : 0;
     }
     const cached = offlineProductById.get(product.id) || (product as CachedPOSProduct);
-    return cached.offline_stock?.available_quantity ?? Number.POSITIVE_INFINITY;
+    return cached.offline_stock?.available_quantity ?? 0;
   }, [offlineProductById]);
+
+  const getCachedAvailableQuantity = useCallback((product: ProductListItem) => {
+    if (offlineProducts.length === 0) {
+      return isOnlineMode ? null : 0;
+    }
+    const quantity = getOfflineAvailableQuantity(product);
+    return Number.isFinite(quantity) ? Math.max(0, quantity) : null;
+  }, [getOfflineAvailableQuantity, isOnlineMode, offlineProducts.length]);
 
   const releasePickupOrder = useCallback(() => {
     setActivePickupOrder(null);
@@ -2145,6 +2153,8 @@ export default function POSPage() {
                 hasNextPage={offlineProducts.length === 0 && hasNextPage}
                 fetchNextPage={fetchNextPage}
                 getPrice={getUnitPrice}
+                getAvailableQuantity={getCachedAvailableQuantity}
+                isOfflineMode={!isOnlineMode}
                 selectedChannel={selectedChannel}
                 waitingOrders={waitingPOSOrders}
                 waitingOrdersLoading={waitingPOSLoading || submitting}

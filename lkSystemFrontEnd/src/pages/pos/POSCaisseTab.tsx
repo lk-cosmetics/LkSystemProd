@@ -70,7 +70,10 @@ const MOVEMENT_BADGE: Record<string, string> = {
 // timeout) → safe to queue the write locally and replay it later. A response
 // (4xx/5xx) means the server rejected it → surface the error instead.
 const isNetworkError = (err: unknown): boolean => {
-  const e = err as { response?: unknown; code?: string };
+  const e = err as { response?: { status?: number }; code?: string };
+  const status = e?.response?.status;
+  if (status && [0, 502, 503, 504].includes(status)) return true;
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return true;
   return !e?.response || e?.code === 'ERR_NETWORK' || e?.code === 'ECONNABORTED';
 };
 

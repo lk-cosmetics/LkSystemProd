@@ -11,6 +11,9 @@ interface POSProductCardProps {
   cartQuantity: number;
   onAdd: () => void;
   price?: number;
+  availableQuantity?: number | null;
+  disabled?: boolean;
+  stockMode?: 'offline' | 'cached';
 }
 
 export const POSProductCard = memo(function POSProductCard({
@@ -18,6 +21,9 @@ export const POSProductCard = memo(function POSProductCard({
   cartQuantity,
   onAdd,
   price: priceOverride,
+  availableQuantity = null,
+  disabled = false,
+  stockMode = 'cached',
 }: POSProductCardProps) {
   const [imgError, setImgError] = useState(false);
 
@@ -30,16 +36,26 @@ export const POSProductCard = memo(function POSProductCard({
     typeof priceOverride === 'number' &&
     Number.isFinite(priceOverride) &&
     priceOverride < originalPrice;
+  const stockKnown =
+    typeof availableQuantity === 'number' && Number.isFinite(availableQuantity);
+  const outOfStock = stockKnown && availableQuantity <= 0;
+  const isDisabled = disabled || outOfStock;
 
   return (
     <Card
       role="button"
-      tabIndex={0}
+      tabIndex={isDisabled ? -1 : 0}
       aria-label={`Add ${product.name} — ${fmtTND(displayPrice)} TND`}
+      aria-disabled={isDisabled}
       className="group min-w-0 cursor-pointer overflow-hidden transition-all duration-150
-        hover:border-primary hover:shadow-md active:scale-[0.97] select-none"
-      onClick={onAdd}
+        hover:border-primary hover:shadow-md active:scale-[0.97] select-none
+        data-[disabled=true]:cursor-not-allowed data-[disabled=true]:opacity-60 data-[disabled=true]:hover:border-border data-[disabled=true]:hover:shadow-none"
+      data-disabled={isDisabled}
+      onClick={() => {
+        if (!isDisabled) onAdd();
+      }}
       onKeyDown={e => {
+        if (isDisabled) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           onAdd();
@@ -71,6 +87,16 @@ export const POSProductCard = memo(function POSProductCard({
         {hasDiscount && (
           <Badge className="absolute top-1.5 left-1.5 text-[10px] px-1.5 py-0 bg-rose-500 hover:bg-rose-500 text-white border-0">
             SALE
+          </Badge>
+        )}
+
+        {stockKnown && (
+          <Badge
+            variant={outOfStock ? 'destructive' : 'secondary'}
+            className="absolute bottom-1.5 left-1.5 max-w-[calc(100%-12px)] truncate text-[10px] px-1.5 py-0"
+          >
+            {outOfStock ? 'Rupture' : `Stock ${Math.floor(availableQuantity)}`}
+            {stockMode === 'offline' && !outOfStock ? ' offline' : ''}
           </Badge>
         )}
       </div>
