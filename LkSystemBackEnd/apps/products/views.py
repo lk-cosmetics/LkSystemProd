@@ -72,6 +72,7 @@ class ProductViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     # edit, delete, sync or import them.
     action_permissions = {
         'create': 'create_products',
+        'pos_cache': 'use_pos',
         'sync': 'create_products',
         'sync_selected': 'create_products',
         'import_csv': 'create_products',
@@ -372,7 +373,6 @@ class ProductViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 ) |
                 Q(
                     id__in=component_ids,
-                    brand=sales_channel.brand,
                 )
             )
             .distinct()

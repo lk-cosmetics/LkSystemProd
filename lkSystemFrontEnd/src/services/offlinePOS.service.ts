@@ -80,6 +80,28 @@ interface CartLikeLine {
   quantity: number;
 }
 
+const toFiniteNumber = (value: unknown, fallback = 0): number => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+const normalizeStockSnapshot = (
+  stock?: Partial<POSProductStockSnapshot> | null,
+): POSProductStockSnapshot => {
+  const quantity = toFiniteNumber(stock?.quantity, 0);
+  const reservedQuantity = toFiniteNumber(stock?.reserved_quantity, 0);
+  return {
+    inventory_id: stock?.inventory_id ?? null,
+    quantity,
+    reserved_quantity: reservedQuantity,
+    available_quantity: toFiniteNumber(
+      stock?.available_quantity,
+      Math.max(0, quantity - reservedQuantity),
+    ),
+    updated_at: stock?.updated_at ?? null,
+  };
+};
+
 function buildStockRequirements(cart: CartLikeLine[], productMap: Map<number, CachedPOSProduct>) {
   const requirements = new Map<number, {
     product: CachedPOSProduct | undefined;
@@ -270,7 +292,7 @@ export const offlinePOSService = {
           cache_key: makeProductCacheKey(snapshot.sales_channel, product.id),
           sales_channel: snapshot.sales_channel,
           sales_channel_name: snapshot.sales_channel_name,
-          offline_stock: product.stock,
+          offline_stock: normalizeStockSnapshot(product.stock),
           cached_at: snapshot.last_sync,
         };
         productStore.put(cached);
@@ -295,6 +317,10 @@ export const offlinePOSService = {
     const rows = await getAllFromStore<CachedPOSProduct>(PRODUCT_STORE);
     return rows
       .filter(product => product.sales_channel === salesChannelId)
+      .map(product => ({
+        ...product,
+        offline_stock: normalizeStockSnapshot(product.offline_stock),
+      }))
       .sort((a, b) => a.name.localeCompare(b.name));
   },
 
@@ -355,7 +381,7 @@ export const offlinePOSService = {
     const { requirements, problems } = buildStockRequirements(cart, productMap);
 
     requirements.forEach(({ product, quantity, packName }) => {
-      const available = product?.offline_stock.available_quantity ?? 0;
+      const available = product?.offline_stock?.available_quantity ?? 0;
       if (!product || quantity > available) {
         problems.push(
           packName
@@ -420,7 +446,8 @@ export const offlinePOSService = {
         if (!cached) {
           throw new Error('Impossible de vendre ce pack: composant manquant.');
         }
-        const available = cached.offline_stock.available_quantity;
+        const currentStock = normalizeStockSnapshot(cached.offline_stock);
+        const available = currentStock.available_quantity;
         if (quantity > available) {
           throw new Error(
             packName
@@ -429,16 +456,16 @@ export const offlinePOSService = {
           );
         }
 
-        const nextQuantity = Math.max(0, cached.offline_stock.quantity - quantity);
+        const nextQuantity = Math.max(0, currentStock.quantity - quantity);
         const nextAvailable = Math.max(
           0,
-          cached.offline_stock.available_quantity - quantity
+          currentStock.available_quantity - quantity
         );
 
         productStore.put({
           ...cached,
           offline_stock: {
-            ...cached.offline_stock,
+            ...currentStock,
             quantity: nextQuantity,
             available_quantity: nextAvailable,
             updated_at: new Date().toISOString(),
