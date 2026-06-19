@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { IconAlertTriangle, IconChartLine, IconRefresh } from '@tabler/icons-react';
 import { useIsFetching, useQueryClient } from '@tanstack/react-query';
 
@@ -17,8 +17,6 @@ import { Input } from '@/components/ui/input';
 import {
   biKeys,
   useBadProductsQuery,
-  useBrandsQuery,
-  useCompaniesQuery,
   useDashboardSummaryQuery,
   useSalesChannelChartQuery,
   useSalesChannelRevenueQuery,
@@ -39,8 +37,6 @@ import { BISalesChannelTable } from './BISalesChannelTable';
 import { BITrendingProducts } from './BITrendingProducts';
 import { PERIOD_OPTIONS, daysAgoInput, fmtLongDate, todayInput } from './utils';
 
-const ALL_VALUE = '__all__';
-
 // React.memo: charts have heavy series transforms; re-rendering them only
 // when their *data* props change (not every keystroke / pagination tick on
 // other sections) saves real CPU.
@@ -52,79 +48,19 @@ export function BIDashboardPage() {
 
   // ── Filters ──────────────────────────────────────────────────────────
   const [period, setPeriod] = useState<BIPeriod>('30d');
-  const [companyId, setCompanyId] = useState<number | null>(null);
-  const [brandId, setBrandId] = useState<number | null>(null);
   // Custom-range state — only sent when ``period === 'custom'``. Default to
   // the last 30 days so the calendar opens on a useful window.
   const [startDate, setStartDate] = useState<string>(() => daysAgoInput(29));
   const [endDate, setEndDate] = useState<string>(() => todayInput());
 
-  const companiesQuery = useCompaniesQuery();
-  const companies = companiesQuery.data ?? [];
-
-  /**
-   * Resolve the company this dashboard is scoped to.
-   *
-   * * Platform admin → whatever they picked in the company select.
-   * * Anyone else (CEO, manager…) → the company they're authenticated
-   *   against. The JWT token carries ``company_id`` directly, which is
-   *   the most authoritative source — that beats waiting on
-   *   ``/dashboard/companies/`` to resolve and beats the previous
-   *   ``companies[0]?.id`` heuristic (which silently returned ``null``
-   *   when the API hadn't responded yet and produced the
-   *   "no company assigned" empty state for CEOs).
-   */
-  const effectiveCompanyId = isPlatformAdmin
-    ? companyId
-    : (currentUser?.company_id ?? companies[0]?.id ?? null);
-
-  const brandsQuery = useBrandsQuery(effectiveCompanyId, !!effectiveCompanyId);
-  const brands = brandsQuery.data ?? [];
-
-  // CEOs land on their (single) company automatically. Prefer the JWT
-  // company_id (authoritative, available pre-fetch) and fall back to the
-  // companies query for legacy tokens that may not carry the field.
-  useEffect(() => {
-    if (isPlatformAdmin) return;
-    const tokenCompanyId = currentUser?.company_id;
-    if (tokenCompanyId && companyId !== tokenCompanyId) {
-      setCompanyId(tokenCompanyId);
-      return;
-    }
-    if (companies[0] && companyId !== companies[0].id) {
-      setCompanyId(companies[0].id);
-    }
-  }, [isPlatformAdmin, companies, companyId, currentUser?.company_id]);
-
-  // Reset brand selection whenever the company changes.
-  useEffect(() => {
-    setBrandId(null);
-  }, [effectiveCompanyId]);
-
-  /*
-   * Auto-select the only brand for a CEO with a single visible brand.
-   *
-   * For these users "All brands" and "their one brand" return the same
-   * data, but the dashboard's filter chip + chart titles read nicer when
-   * the brand is explicitly selected. We only ever auto-pick *once* per
-   * (company, brand-list) load via the ref — that way the user can still
-   * deliberately revert to "All brands" if they want and we won't fight
-   * them on every render.
-   *
-   * Skipped for platform admins on purpose: they should choose explicitly,
-   * and "All brands" across a company has a meaningful aggregate semantic.
-   */
-  const autoPickedFor = useRef<{ companyId: number | null; ids: string } | null>(null);
-  useEffect(() => {
-    if (isPlatformAdmin) return;
-    if (brandId !== null) return;
-    if (brands.length !== 1) return;
-    const signature = brands.map(b => b.id).sort().join(',');
-    const last = autoPickedFor.current;
-    if (last && last.companyId === effectiveCompanyId && last.ids === signature) return;
-    autoPickedFor.current = { companyId: effectiveCompanyId, ids: signature };
-    setBrandId(brands[0].id);
-  }, [isPlatformAdmin, brands, brandId, effectiveCompanyId]);
+  // Dashboard scope comes from the active workspace selected globally.
+  // The page no longer has company/brand selectors, so all BI queries follow
+  // the same company / brand focus shown in the app shell.
+  const effectiveCompanyId = currentUser?.company_id ?? null;
+  const effectiveBrandId = currentUser?.current_brand_id ?? null;
+  const workspaceLabel = currentUser?.company_name
+    ? `${currentUser.company_name}${effectiveBrandId ? ' - Active brand' : ' - All brands'}`
+    : effectiveBrandId ? 'Active brand workspace' : 'Current workspace';
 
   // Validate the custom range strictly. The backend silently falls back to
   // 30d when ``start_date`` / ``end_date`` don't parse as ``YYYY-MM-DD``,
@@ -145,12 +81,12 @@ export function BIDashboardPage() {
   const filters = useMemo(
     () => ({
       companyId: effectiveCompanyId,
-      brandId,
+      brandId: effectiveBrandId,
       period,
       startDate: period === 'custom' ? startDate : null,
       endDate: period === 'custom' ? endDate : null,
     }),
-    [effectiveCompanyId, brandId, period, startDate, endDate],
+    [effectiveCompanyId, effectiveBrandId, period, startDate, endDate],
   );
 
   // ── Pagination state — per table ────────────────────────────────────
@@ -171,18 +107,12 @@ export function BIDashboardPage() {
     setProductsPage(1);
     setTrendingPage(1);
     setBadPage(1);
-  }, [effectiveCompanyId, brandId, period, startDate, endDate]);
+  }, [effectiveCompanyId, effectiveBrandId, period, startDate, endDate]);
 
   // ── Data ─────────────────────────────────────────────────────────────
-  // ROOT FIX for the super-admin bug: a platform admin can query the BI
-  // endpoints with ``company_id=null`` (the backend aggregates across every
-  // company they're allowed to see). Gating ``enableQueries`` on the
-  // company being set blocked the dashboard from ever rendering for them.
-  // For a CEO / company-scoped user we still wait until their company has
-  // resolved — otherwise we'd hit the API with a null tenant which is a
-  // 200-with-empty-data on the backend and a confusing UX here.
-  // We also block the queries while the custom range is malformed to avoid
-  // a useless flicker of "no data" before the user picks valid bounds.
+  // BI follows the active workspace. Platform admins may intentionally have no
+  // current company selected, which the backend treats as global scope.
+  // Company-scoped users wait for their company from the auth identity.
   const enableQueries =
     (isPlatformAdmin || !!effectiveCompanyId) && customValid;
   const summaryQ      = useDashboardSummaryQuery(filters, enableQueries);
@@ -234,48 +164,14 @@ export function BIDashboardPage() {
               Near real-time view, refreshes every 30 s while the tab is active.
             </p>
           )}
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Badge variant="outline" className="h-6 rounded-md px-2 text-[11px] font-normal">
+              {workspaceLabel}
+            </Badge>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-end gap-2">
-          {isPlatformAdmin && (
-            <div className="flex flex-col gap-1">
-              <label className="text-[11px] font-medium text-muted-foreground">Company</label>
-              <Select
-                value={companyId ? String(companyId) : ALL_VALUE}
-                onValueChange={v => setCompanyId(v === ALL_VALUE ? null : Number(v))}
-              >
-                <SelectTrigger className="h-9 w-[200px]">
-                  <SelectValue placeholder="All companies" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={ALL_VALUE}>All companies</SelectItem>
-                  {companies.map(c => (
-                    <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground">Brand</label>
-            <Select
-              value={brandId ? String(brandId) : ALL_VALUE}
-              onValueChange={v => setBrandId(v === ALL_VALUE ? null : Number(v))}
-              disabled={!effectiveCompanyId}
-            >
-              <SelectTrigger className="h-9 w-[180px]">
-                <SelectValue placeholder="All brands" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL_VALUE}>All brands</SelectItem>
-                {brands.map(b => (
-                  <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
           <div className="flex flex-col gap-1">
             <label className="text-[11px] font-medium text-muted-foreground">Period</label>
             <Select value={period} onValueChange={v => setPeriod(v as BIPeriod)}>
@@ -336,10 +232,8 @@ export function BIDashboardPage() {
         Empty-state logic:
         - A CEO / company-scoped user without a tenant gets a "contact admin"
           message — this is a configuration problem, not a UX one.
-        - A platform admin with ``companyId=null`` is the "all companies"
-          mode (intentional and supported by the backend) and continues to
-          the dashboard — they no longer hit the dead-end empty state that
-          shipped before this fix.
+        - A platform admin may intentionally have no company in the active
+          workspace; the backend treats that as global BI scope.
         - When the user picks ``custom`` with an invalid range we tell them
           why nothing's rendering rather than firing useless requests.
       */}
