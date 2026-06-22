@@ -41,67 +41,78 @@ jobs:
             VITE_API_BASE_URL=
 
   deploy:
-    name: Deploy (self-hosted runner on the VPS)
-    # Runs on a self-hosted runner installed ON the production VPS, so the deploy
-    # no longer needs inbound SSH from GitHub's (rotating) cloud IPs — which is
-    # what made "Cannot reach SSH host/port" fail intermittently. Register a
-    # runner on the box with the `lksystem` label (see deploy/README.md).
-    runs-on: [self-hosted, lksystem]
+    name: Deploy over SSH
+    # Runs on a GitHub-hosted runner and connects to the VPS over SSH using the
+    # repository's SSH_* secrets — no self-hosted runner to install/maintain.
+    # If a connection ever fails ("Cannot reach SSH host/port"), it's almost
+    # always the VPS firewall: make sure the SSH port is reachable from GitHub
+    # Actions' egress IPs (open the port, or allow GitHub's IP ranges).
+    runs-on: ubuntu-latest
     needs: pre-deploy-checks
     environment:
       name: production
-      # NOTE: ``environment.url`` has no access to the ``secrets`` context
-      # (GitHub exposes only github/needs/vars/steps/env here) — referencing
-      # ``secrets.PRODUCTION_DOMAIN`` directly is what made the file invalid.
-      # We compose the URL in the step below and read its output here instead.
+      # ``environment.url`` cannot read ``secrets`` — compose the URL in a step
+      # below and reference its output here instead.
       url: ${{ steps.env_url.outputs.url }}
 
     steps:
+      - name: Validate required secrets
+        run: |
+          for v in SSH_HOST SSH_PORT SSH_USER SSH_PRIVATE_KEY VPS_PROJECT_PATH PRODUCTION_DOMAIN; do
+            if [ -z "${!v}" ]; then
+              echo "::error::Required secret $v is not set."
+              exit 1
+            fi
+          done
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          VPS_PROJECT_PATH: ${{ secrets.VPS_PROJECT_PATH }}
+          PRODUCTION_DOMAIN: ${{ secrets.PRODUCTION_DOMAIN }}
+
       - name: Resolve environment URL
-        # Builds the clickable deployment link shown on the GitHub "production"
-        # environment. PRODUCTION_DOMAIN stays a secret; only the composed URL
-        # is exposed as a step output, which ``environment.url`` *can* read.
+        # Composes the clickable deployment link for the GitHub "production"
+        # environment. PRODUCTION_DOMAIN stays secret; only the URL is exposed.
         id: env_url
         run: echo "url=https://${PRODUCTION_DOMAIN}" >> "$GITHUB_OUTPUT"
         env:
           PRODUCTION_DOMAIN: ${{ secrets.PRODUCTION_DOMAIN }}
 
-      - name: Validate required secrets
-        # No SSH secrets needed any more — the runner is already on the VPS.
-        run: |
-          for v in VPS_PROJECT_PATH PRODUCTION_DOMAIN; do
-            if [ -z "${!v}" ]; then
-              echo "::error::Required secret $v is not set in the 'production' environment."
-              exit 1
-            fi
-          done
+      - name: Deploy to the VPS over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          port: ${{ secrets.SSH_PORT }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          # The image build can take several minutes — don't reap it early.
+          command_timeout: 30m
+          # Abort on the first failing command in the remote script.
+          script_stop: true
+          # Forward these workflow env vars into the remote shell session.
+          envs: VPS_PROJECT_PATH,PRODUCTION_DOMAIN
+          script: |
+            set -euo pipefail
+            cd "$VPS_PROJECT_PATH"
+
+            echo "── Pulling latest main ───────────────────────────────────"
+            git fetch --all --prune
+            git reset --hard origin/main
+
+            echo "── Building & restarting containers ──────────────────────"
+            # deploy-production.sh skips its root-only TLS pre-flight when run by
+            # a non-root, docker-group user; nginx still gets the cert via the
+            # root Docker daemon's bind-mount of /etc/letsencrypt. DOMAIN feeds
+            # compose interpolation (cert path, ALLOWED_HOSTS, …).
+            DOMAIN="$PRODUCTION_DOMAIN" bash deploy/deploy-production.sh
+
+            echo "── Pruning dangling images ───────────────────────────────"
+            docker image prune -f
         env:
           VPS_PROJECT_PATH: ${{ secrets.VPS_PROJECT_PATH }}
           PRODUCTION_DOMAIN: ${{ secrets.PRODUCTION_DOMAIN }}
-
-      - name: Deploy
-        # Runs directly on the VPS (the self-hosted runner's host). No SSH.
-        env:
-          VPS_PROJECT_PATH: ${{ secrets.VPS_PROJECT_PATH }}
-          PRODUCTION_DOMAIN: ${{ secrets.PRODUCTION_DOMAIN }}
-        run: |
-          set -euo pipefail
-          cd "$VPS_PROJECT_PATH"
-
-          echo "── Pulling latest main ───────────────────────────────────"
-          git fetch --all --prune
-          git reset --hard origin/main
-
-          echo "── Building & restarting containers ──────────────────────"
-          # Runs as the self-hosted runner's user, which must be in the docker
-          # group. deploy-production.sh skips its root-only TLS pre-flight when
-          # not root; nginx still gets the cert via the root Docker daemon's
-          # bind-mount of /etc/letsencrypt (see docker-compose.prod.yml). DOMAIN
-          # feeds compose interpolation (cert path, ALLOWED_HOSTS, …).
-          DOMAIN="$PRODUCTION_DOMAIN" bash deploy/deploy-production.sh
-
-          echo "── Pruning dangling images ───────────────────────────────"
-          docker image prune -f
 
       - name: Health check
         # Probe the public domain over HTTPS. Retry a few times to ride out
