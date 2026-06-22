@@ -189,3 +189,57 @@ jobs:
             VITE_API_BASE_URL=
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
+
+  # ─── Auto-open PR: dev → main ───────────────────────────────────────────────
+  # When EVERY gate above is green on a push to ``dev``, open (or reuse) a Pull
+  # Request into ``main``. This keeps production one reviewed click away and
+  # guarantees ``main`` only ever receives CI-verified code. Merging the PR is
+  # what triggers ``deploy.yml``.
+  #
+  # ⚠️ One-time repo setting required for the bot to open PRs:
+  #    Settings → Actions → General → Workflow permissions →
+  #      ✅ "Allow GitHub Actions to create and approve pull requests"
+  open-pr:
+    name: Open PR to main
+    runs-on: ubuntu-latest
+    needs: [backend, frontend, docker]
+    # Only on a direct push to dev — never on the pull_request trigger.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need origin/main to diff dev against it
+
+      - name: Create or reuse PR (dev → main)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Nothing ahead of main? Don't open an empty PR.
+          if [ -z "$(git rev-list origin/main..origin/dev 2>/dev/null)" ]; then
+            echo "dev has no commits ahead of main — skipping PR."
+            exit 0
+          fi
+
+          # Reuse the open PR if one already exists (it tracks dev automatically).
+          existing=$(gh pr list --base main --head dev --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "PR #$existing already open (dev → main); new commits are added to it."
+            exit 0
+          fi
+
+          gh pr create --base main --head dev \
+            --title "Deploy: merge dev → main" \
+            --body "Automated PR opened by CI after all checks passed on \`dev\` (\`${GITHUB_SHA::7}\`).
+
+          Merging this PR triggers the production deploy (\`deploy.yml\`).
+
+          Gates passed on this commit:
+          - ✅ Django system check (\`--deploy\`) + migrations + test suite
+          - ✅ Frontend type-check + Vitest unit tests + Vite build
+          - ✅ Backend & frontend Docker images build"
