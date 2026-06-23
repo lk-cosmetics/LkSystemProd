@@ -347,6 +347,8 @@ export interface SalesChannel {
   wc_consumer_key: string;
   wc_consumer_secret: string;
   wc_webhook_token: string;
+  /** Absolute Delivery URL WooCommerce should POST webhooks to (WC channels only). */
+  webhook_url?: string;
   wc_push_status_enabled: boolean;
   created_at: string;
   updated_at: string;
@@ -382,6 +384,8 @@ export interface CreateSalesChannelRequest {
 export interface GenerateCredentialsResponse {
   message: string;
   webhook_token: string;
+  /** Absolute Delivery URL WooCommerce should POST webhooks to. */
+  webhook_url?: string;
   channel_id: number;
   channel_name: string;
   usage_hint?: string;

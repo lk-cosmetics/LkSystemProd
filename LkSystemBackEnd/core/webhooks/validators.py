@@ -71,12 +71,27 @@ class WebhookValidator:
         # Find sales channel
         sales_channel = self._find_sales_channel(headers['source'])
         
-        # Validate signature
-        self._validate_signature(
-            payload=request.body,
-            signature=headers['signature'],
-            secret=sales_channel.wc_webhook_token or ''
-        )
+        # Validate signature. Trim the stored token and the incoming header to
+        # tolerate stray whitespace/newlines from copy-paste — a secret mismatch
+        # (WooCommerce "Secret" != channel.wc_webhook_token) is the #1 cause of
+        # webhook 401s. On failure, log WHICH channel/source/topic was rejected
+        # so the cause is unambiguous from a single log line.
+        try:
+            self._validate_signature(
+                payload=request.body,
+                signature=(headers['signature'] or '').strip(),
+                secret=(sales_channel.wc_webhook_token or '').strip(),
+            )
+        except WebhookValidationError:
+            logger.warning(
+                "Webhook signature rejected: channel=%s (%s) source=%s topic=%s "
+                "sig_prefix=%s body_len=%s — verify the WooCommerce webhook 'Secret' "
+                "exactly equals this channel's wc_webhook_token.",
+                sales_channel.id, sales_channel.name, headers['source'],
+                headers['topic'], (headers['signature'] or '')[:12],
+                len(request.body or b''),
+            )
+            raise
         
         # Build context
         context = WebhookContext(

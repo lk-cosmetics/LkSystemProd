@@ -6,6 +6,22 @@ from rest_framework import serializers
 from .models import SalesChannel
 
 
+# Path WooCommerce delivers webhooks to (the "Delivery URL" in WC webhook setup).
+WC_WEBHOOK_PATH = '/api/v1/webhooks/woocommerce/'
+
+
+def woocommerce_webhook_url(obj, context):
+    """Absolute Delivery URL WooCommerce should POST webhooks to.
+
+    Empty for non-WooCommerce channels. Built from the request host so it
+    reflects the real public domain; falls back to the bare path when no
+    request is in context (e.g. nested serialization)."""
+    if getattr(obj, 'channel_type', None) != SalesChannel.ChannelType.WOOCOMMERCE:
+        return ''
+    request = (context or {}).get('request')
+    return request.build_absolute_uri(WC_WEBHOOK_PATH) if request else WC_WEBHOOK_PATH
+
+
 class SalesChannelSerializer(serializers.ModelSerializer):
     """
     Full serializer for SalesChannel model.
@@ -20,6 +36,7 @@ class SalesChannelSerializer(serializers.ModelSerializer):
     company_name = serializers.CharField(source='brand.company.name', read_only=True)
     brand_name = serializers.CharField(source='brand.name', read_only=True)
     brand_logo = serializers.SerializerMethodField()
+    webhook_url = serializers.SerializerMethodField()
 
     def get_brand_logo(self, obj):
         logo = getattr(getattr(obj, 'brand', None), 'logo', None)
@@ -31,7 +48,10 @@ class SalesChannelSerializer(serializers.ModelSerializer):
             return None
         request = self.context.get('request')
         return request.build_absolute_uri(url) if request else url
-    
+
+    def get_webhook_url(self, obj):
+        return woocommerce_webhook_url(obj, self.context)
+
     class Meta:
         model = SalesChannel
         fields = [
@@ -56,13 +76,14 @@ class SalesChannelSerializer(serializers.ModelSerializer):
             'wc_consumer_key',
             'wc_consumer_secret',
             'wc_webhook_token',
+            'webhook_url',
             'wc_push_status_enabled',
             'company_id',
             'company_name',
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'webhook_url']
 
     def validate(self, attrs):
         """Validate channel-type-specific required fields."""
@@ -153,6 +174,7 @@ class SalesChannelListSerializer(serializers.ModelSerializer):
     brand_logo = serializers.SerializerMethodField()
     company_name = serializers.CharField(source='brand.company.name', read_only=True)
     company_id = serializers.IntegerField(source='brand.company_id', read_only=True)
+    webhook_url = serializers.SerializerMethodField()
 
     def get_brand_logo(self, obj):
         logo = getattr(getattr(obj, 'brand', None), 'logo', None)
@@ -164,6 +186,9 @@ class SalesChannelListSerializer(serializers.ModelSerializer):
             return None
         request = self.context.get('request')
         return request.build_absolute_uri(url) if request else url
+
+    def get_webhook_url(self, obj):
+        return woocommerce_webhook_url(obj, self.context)
 
     class Meta:
         model = SalesChannel
@@ -191,6 +216,7 @@ class SalesChannelListSerializer(serializers.ModelSerializer):
             'wc_consumer_key',
             'wc_consumer_secret',
             'wc_webhook_token',
+            'webhook_url',
             'wc_push_status_enabled',
             'created_at',
             'updated_at',
