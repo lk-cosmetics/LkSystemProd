@@ -1237,6 +1237,10 @@ export interface Client {
   number_of_orders: number;
   number_of_returns: number;
   is_blocked: boolean;
+  blocked_reason?: string;
+  blocked_at?: string | null;
+  blocked_by?: number | null;
+  blocked_by_name?: string | null;
   notes: string;
   is_active: boolean;
   created_by: number | null;
@@ -1268,6 +1272,10 @@ export interface CreateClientRequest {
   number_of_orders?: number;
   number_of_returns?: number;
   is_blocked?: boolean;
+  blocked_reason?: string;
+  blocked_at?: string | null;
+  blocked_by?: number | null;
+  blocked_by_name?: string | null;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1404,6 +1412,8 @@ export interface OrderListItem {
   delivery_address: string;
   client_points: number;
   client_is_blocked: boolean;
+  /** Why the client is blocked (auto or manual); '' when not blocked. */
+  client_blocked_reason: string;
   client_return_count: number;
   /** Total orders this client has placed (history at-a-glance on the Customer tab). */
   client_order_count: number;

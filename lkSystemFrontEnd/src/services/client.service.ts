@@ -87,10 +87,10 @@ export const clientService = {
     await apiClient.delete(`/api/v1/clients/${id}/`);
   },
 
-  async setBlocked(id: number, is_blocked: boolean) {
+  async setBlocked(id: number, is_blocked: boolean, blocked_reason?: string) {
     const { data } = await apiClient.patch<Client>(
       `/api/v1/clients/${id}/block/`,
-      { is_blocked }
+      is_blocked ? { is_blocked, blocked_reason: blocked_reason ?? '' } : { is_blocked }
     );
     return data;
   },

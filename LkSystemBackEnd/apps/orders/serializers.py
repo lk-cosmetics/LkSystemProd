@@ -154,6 +154,7 @@ class OrderListSerializer(serializers.ModelSerializer):
     delivery_address  = serializers.ReadOnlyField()
     client_points     = serializers.IntegerField(source='client.points', read_only=True, default=0)
     client_is_blocked = serializers.BooleanField(source='client.is_blocked', read_only=True, default=False)
+    client_blocked_reason = serializers.CharField(source='client.blocked_reason', read_only=True, default='')
     client_return_count = serializers.IntegerField(source='client.number_of_returns', read_only=True, default=0)
     client_order_count = serializers.IntegerField(source='client.number_of_orders', read_only=True, default=0)
     line_count        = serializers.SerializerMethodField()
@@ -210,7 +211,7 @@ class OrderListSerializer(serializers.ModelSerializer):
             'client', 'client_id', 'client_email', 'client_phone', 'client_name',
             'client_type', 'client_matricule_fiscale',
             'delivery_name', 'delivery_phone', 'delivery_address',
-            'client_points', 'client_is_blocked', 'client_return_count',
+            'client_points', 'client_is_blocked', 'client_blocked_reason', 'client_return_count',
             'client_order_count',
             # THE canonical lifecycle status + audit
             'status', 'status_display', 'status_changed_at', 'status_changed_by',

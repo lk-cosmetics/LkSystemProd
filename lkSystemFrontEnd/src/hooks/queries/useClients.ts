@@ -107,8 +107,8 @@ export function useBlockClient() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ id, is_blocked }: { id: number; is_blocked: boolean }) =>
-      clientService.setBlocked(id, is_blocked),
+    mutationFn: ({ id, is_blocked, reason }: { id: number; is_blocked: boolean; reason?: string }) =>
+      clientService.setBlocked(id, is_blocked, reason),
     onSuccess: (data: Client) => {
       queryClient.setQueryData(clientsKeys.detail(data.id), data);
       queryClient.invalidateQueries({

@@ -360,6 +360,24 @@ function CustomerOverviewTab({
 
   return (
     <div className="space-y-3">
+      {/* ── Blocked-client warning ───────────────────────────────────── */}
+      {order.client_is_blocked && (
+        <div className="flex items-start gap-2.5 rounded-lg border border-red-300 bg-red-50 px-3.5 py-3 dark:border-red-500/40 dark:bg-red-500/10">
+          <ShieldAlert className="mt-0.5 size-4 shrink-0 text-red-600 dark:text-red-400" />
+          <div className="min-w-0 text-sm">
+            <p className="font-semibold text-red-800 dark:text-red-300">This client is blocked</p>
+            <p className="mt-0.5 break-words text-red-700/90 dark:text-red-300/80">
+              {order.client_blocked_reason || 'No reason provided.'}
+            </p>
+            {(order.client_return_count ?? 0) > 0 && (
+              <p className="mt-0.5 text-xs text-red-600/80 dark:text-red-400/70">
+                {order.client_return_count} returned order{order.client_return_count === 1 ? '' : 's'} on record.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ── Customer summary ─────────────────────────────────────────── */}
       <div className={`rounded-lg border p-3.5 ${order.client_is_blocked ? 'border-red-200 bg-red-50/60' : 'bg-card'}`}>
         <div className="flex items-start justify-between gap-3">
