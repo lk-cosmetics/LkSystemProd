@@ -24,6 +24,9 @@ class ClientListSerializer(serializers.ModelSerializer):
     points = serializers.SerializerMethodField()
     number_of_orders = serializers.SerializerMethodField()
     number_of_returns = serializers.SerializerMethodField()
+    blocked_by_name = serializers.CharField(
+        source='blocked_by.get_full_name', read_only=True, default=None,
+    )
 
     class Meta:
         model = Client
@@ -37,7 +40,8 @@ class ClientListSerializer(serializers.ModelSerializer):
             'governorate', 'state', 'city', 'country',
             'source', 'sales_channel', 'sales_channel_name',
             'wc_customer_id', 'is_active',
-            'points', 'number_of_orders', 'number_of_returns', 'is_blocked',
+            'points', 'number_of_orders', 'number_of_returns',
+            'is_blocked', 'blocked_reason', 'blocked_at', 'blocked_by', 'blocked_by_name',
             'created_at', 'updated_at',
         ]
 

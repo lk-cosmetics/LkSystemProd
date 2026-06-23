@@ -5,6 +5,7 @@ Client entity auto-registered from WooCommerce orders or POS transactions.
 
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 from .utils import normalize_tunisian_phone
 
@@ -16,8 +17,10 @@ class Client(models.Model):
     Auto-created when an order arrives with an unknown billing_email.
     """
 
-    # Default threshold for auto-blocking based on returns
-    RETURN_BLOCK_THRESHOLD = 5
+    # A client is auto-blocked once they reach this many returned orders.
+    RETURN_BLOCK_THRESHOLD = 4
+    # Reason stamped on a client that crosses the return threshold.
+    AUTO_BLOCK_REASON = 'Max returned orders reached.'
 
     class Source(models.TextChoices):
         WOOCOMMERCE = 'WOOCOMMERCE', 'WooCommerce'
@@ -144,7 +147,25 @@ class Client(models.Model):
     is_blocked = models.BooleanField(
         default=False,
         verbose_name='Blocked',
-        help_text='Automatically set to True when returns exceed threshold',
+        help_text='Set automatically when returns reach the threshold, or manually.',
+    )
+    blocked_reason = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        verbose_name='Block Reason',
+        help_text='Why the client is blocked (auto or manual). Empty when not blocked.',
+    )
+    blocked_at = models.DateTimeField(
+        null=True, blank=True,
+        verbose_name='Blocked At',
+    )
+    blocked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='clients_blocked',
+        help_text='User who blocked the client manually; NULL for an automatic block.',
     )
 
     # ── Metadata ─────────────────────────────────────────────────────────
@@ -230,7 +251,8 @@ class Client(models.Model):
         self.points = int(done_total * per_unit) if per_unit > 0 else 0
         self.number_of_orders = agg['order_count'] or 0
         self.number_of_returns = agg['return_count'] or 0
-        self.is_blocked = self.number_of_returns >= self.RETURN_BLOCK_THRESHOLD
+        # Auto-block is applied in save() — BLOCK-ONLY, so it never unblocks a
+        # client whose return count drops, and a manual block is preserved.
         if save:
             self.save(update_fields=[
                 'points', 'number_of_orders', 'number_of_returns',
@@ -238,9 +260,43 @@ class Client(models.Model):
             ])
         return self
 
-    def save(self, *args, **kwargs):
-        """Auto-block client when returns exceed the threshold."""
-        self.phone_normalized = normalize_tunisian_phone(self.phone)
+    def apply_auto_block(self) -> bool:
+        """Block the client (with the auto reason) once returns reach the
+        threshold. Idempotent and BLOCK-ONLY — it never unblocks, so a manual
+        block survives metric recalculations. Returns True if it just blocked."""
         if self.number_of_returns >= self.RETURN_BLOCK_THRESHOLD and not self.is_blocked:
             self.is_blocked = True
+            self.blocked_reason = self.blocked_reason or self.AUTO_BLOCK_REASON
+            self.blocked_at = self.blocked_at or timezone.now()
+            return True
+        return False
+
+    def block(self, *, reason: str = '', by=None):
+        """Manually block the client with a reason + audit stamp."""
+        self.is_blocked = True
+        self.blocked_reason = (reason or '').strip() or 'Blocked manually.'
+        self.blocked_at = timezone.now()
+        self.blocked_by = by
+
+    def unblock(self):
+        """Clear the block and its reason / audit fields."""
+        self.is_blocked = False
+        self.blocked_reason = ''
+        self.blocked_at = None
+        self.blocked_by = None
+
+    def save(self, *args, **kwargs):
+        """Normalise the phone and auto-block once returns reach the threshold.
+
+        When the auto-block flips fields, ensure the block columns persist even
+        for a restricted ``update_fields`` save (e.g. the returns-counter bump in
+        ``OrderLifecycleService.process_return``)."""
+        self.phone_normalized = normalize_tunisian_phone(self.phone)
+        newly_blocked = self.apply_auto_block()
+        if newly_blocked:
+            uf = kwargs.get('update_fields')
+            if uf is not None:
+                kwargs['update_fields'] = sorted(
+                    set(uf) | {'is_blocked', 'blocked_reason', 'blocked_at'}
+                )
         super().save(*args, **kwargs)

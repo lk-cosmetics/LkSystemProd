@@ -235,10 +235,19 @@ class ClientViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['patch'], url_path='block')
     def block(self, request, pk=None):
+        """Manually block / unblock a client, capturing the reason and actor.
+
+        Gated by ``edit_clients`` (ActionPermissionMixin default for writes) and
+        tenant-scoped via ``get_object`` → ``get_queryset``."""
         client = self.get_object()
-        blocked = request.data.get('is_blocked', True)
-        client.is_blocked = bool(blocked)
-        client.save(update_fields=['is_blocked', 'updated_at'])
+        blocked = bool(request.data.get('is_blocked', True))
+        if blocked:
+            client.block(reason=request.data.get('blocked_reason', ''), by=request.user)
+        else:
+            client.unblock()
+        client.save(update_fields=[
+            'is_blocked', 'blocked_reason', 'blocked_at', 'blocked_by', 'updated_at',
+        ])
         return Response(self.get_serializer(client).data)
 
     @action(detail=True, methods=['get'], url_path='orders')

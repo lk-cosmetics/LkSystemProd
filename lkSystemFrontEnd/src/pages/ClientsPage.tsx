@@ -553,6 +553,8 @@ export default function ClientsPage() {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editingClient, setEditingClient] = useState<Client | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Client | null>(null);
+  const [blockTarget, setBlockTarget] = useState<number | null>(null);
+  const [blockReason, setBlockReason] = useState('');
 
   const { data: brands = [] } = useBrands();
   const { data: clientsResponse, isLoading, error, refetch } = useClients({ page_size: 500 });
@@ -607,8 +609,26 @@ export default function ClientsPage() {
   };
 
   const handleBlock = async (id: number, blocked: boolean) => {
-    const updated = await blockMutation.mutateAsync({ id, is_blocked: blocked });
+    // Blocking asks for a reason first; unblocking is immediate.
+    if (blocked) {
+      setBlockTarget(id);
+      setBlockReason('');
+      return;
+    }
+    const updated = await blockMutation.mutateAsync({ id, is_blocked: false });
     if (viewClient?.id === id) setViewClient(prev => prev ? { ...prev, ...updated } : null);
+    void refetch();
+  };
+
+  const confirmBlock = async () => {
+    if (blockTarget == null) return;
+    const id = blockTarget;
+    const updated = await blockMutation.mutateAsync({
+      id, is_blocked: true, reason: blockReason.trim(),
+    });
+    if (viewClient?.id === id) setViewClient(prev => prev ? { ...prev, ...updated } : null);
+    setBlockTarget(null);
+    setBlockReason('');
     void refetch();
   };
 
@@ -855,6 +875,38 @@ export default function ClientsPage() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={handleDelete} className="bg-red-600 hover:bg-red-700">
               {deleteMutation.isPending ? 'Deleting...' : 'Delete'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Block client — capture a reason that surfaces on the order page. */}
+      <AlertDialog open={blockTarget != null} onOpenChange={(o) => { if (!o) setBlockTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2 text-red-700">
+              <ShieldAlert className="size-4" /> Block client
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              A blocked client shows a warning (with this reason) on every order they're on.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-1.5">
+            <Label htmlFor="block-reason" className="text-xs">Reason</Label>
+            <Textarea
+              id="block-reason"
+              value={blockReason}
+              onChange={(e) => setBlockReason(e.target.value)}
+              placeholder="e.g. Repeated returns, fraud suspicion…"
+              className="min-h-20 text-sm resize-none"
+              autoFocus
+            />
+            <p className="text-[11px] text-muted-foreground">Optional — defaults to “Blocked manually.”</p>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmBlock} className="bg-red-600 hover:bg-red-700">
+              {blockMutation.isPending ? 'Blocking…' : 'Block client'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
