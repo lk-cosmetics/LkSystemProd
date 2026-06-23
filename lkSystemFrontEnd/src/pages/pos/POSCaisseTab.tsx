@@ -134,13 +134,13 @@ export function CaisseStatsBanner({ stats, loading }: { stats: CaisseStats | nul
   return (
     <Card className="p-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Solde caisse (espèces)</p>
-          <p className={`text-3xl font-bold tabular-nums ${balColor}`}>
+          <p className={`text-2xl font-bold leading-tight tabular-nums break-all sm:text-3xl ${balColor}`}>
             {fmtTND(stats.cash_balance)} <span className="text-sm font-normal text-muted-foreground">TND</span>
           </p>
         </div>
-        <Wallet className={`size-8 ${balColor}`} />
+        <Wallet className={`size-7 shrink-0 sm:size-8 ${balColor}`} />
       </div>
 
       <Separator className="my-3" />
@@ -416,7 +416,7 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
       </div>
 
       {/* Forms: alimentation (in) + dépense (out) */}
-      <div className="grid gap-3 lg:grid-cols-2">
+      <div className="grid gap-3 md:grid-cols-2">
         {/* Alimentation de caisse */}
         <Card className="p-4 border-emerald-200">
           <p className="mb-3 flex items-center gap-1.5 text-sm font-medium text-emerald-800">
@@ -431,10 +431,10 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
                 placeholder="0.000" className="mt-1 h-9 tabular-nums"
               />
             </div>
-            <div>
+            <div className="min-w-0">
               <label className="text-[11px] text-muted-foreground">Type</label>
               <Select value={depKind} onValueChange={v => setDepKind(v as DepositCategory)}>
-                <SelectTrigger className="mt-1 h-9"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="mt-1 h-9 w-full min-w-0 [&>span]:truncate"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {DEPOSIT_CATEGORY_OPTIONS.map(opt => (
                     <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
@@ -468,10 +468,10 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
                 placeholder="0.000" className="mt-1 h-9 tabular-nums"
               />
             </div>
-            <div>
+            <div className="min-w-0">
               <label className="text-[11px] text-muted-foreground">Catégorie</label>
               <Select value={category} onValueChange={v => setCategory(v as ExpenseCategory)}>
-                <SelectTrigger className="mt-1 h-9"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="mt-1 h-9 w-full min-w-0 [&>span]:truncate"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {EXPENSE_CATEGORY_OPTIONS.map(opt => (
                     <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
@@ -496,7 +496,7 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
       {okMessage && <p className="text-xs text-emerald-700">{okMessage}</p>}
 
       {/* Today's movements */}
-      <div className="grid gap-3 lg:grid-cols-2">
+      <div className="grid gap-3 md:grid-cols-2">
         {/* Cash-ins */}
         <Card className="p-4">
           <div className="mb-3 flex items-center justify-between">
@@ -643,49 +643,88 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
               {journal.length === 0 ? (
                 <p className="py-6 text-center text-xs text-muted-foreground">Aucun mouvement de caisse.</p>
               ) : (
-                <div className="overflow-x-auto">
-            <table className="w-full min-w-[560px] text-sm">
-              <thead>
-                <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-                  <th className="py-2 font-medium">Date &amp; heure</th>
-                  <th className="py-2 font-medium">Type</th>
-                  <th className="py-2 font-medium">Détail</th>
-                  <th className="py-2 text-right font-medium">Montant</th>
-                </tr>
-              </thead>
-              <tbody>
-                {journal.map(m => {
-                  const isIn = m.direction === 'in';
-                  return (
-                    <tr key={m.id} className="border-b last:border-0">
-                      <td className="py-2 whitespace-nowrap text-xs text-muted-foreground">
-                        {new Date(m.occurred_at).toLocaleString('fr-FR', {
-                          day: '2-digit', month: '2-digit', year: 'numeric',
-                          hour: '2-digit', minute: '2-digit',
+                <div>
+                  {/* Mobile: card list — no horizontal scrolling on phones */}
+                  <ul className="divide-y sm:hidden">
+                    {journal.map(m => {
+                      const isIn = m.direction === 'in';
+                      return (
+                        <li key={m.id} className="flex items-start justify-between gap-3 py-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <Badge variant="outline" className={`text-[10px] ${MOVEMENT_BADGE[m.type] ?? ''}`}>
+                                {m.type_display}
+                              </Badge>
+                              <span className="whitespace-nowrap text-[11px] text-muted-foreground">
+                                {new Date(m.occurred_at).toLocaleString('fr-FR', {
+                                  day: '2-digit', month: '2-digit', year: 'numeric',
+                                  hour: '2-digit', minute: '2-digit',
+                                })}
+                              </span>
+                            </div>
+                            <p className="mt-1 break-words text-xs">
+                              {m.detail}
+                              {m.type === 'sale' && m.payment_method && (
+                                <span className="text-muted-foreground"> · {m.payment_method}</span>
+                              )}
+                              {m.created_by_name && (
+                                <span className="text-muted-foreground"> · {m.created_by_name}</span>
+                              )}
+                            </p>
+                          </div>
+                          <span className={`shrink-0 text-sm font-semibold tabular-nums ${isIn ? 'text-emerald-700' : 'text-red-700'}`}>
+                            {isIn ? '+' : '−'} {fmtTND(m.amount)}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+
+                  {/* Tablet / desktop: table */}
+                  <div className="hidden overflow-x-auto sm:block">
+                    <table className="w-full min-w-[560px] text-sm">
+                      <thead>
+                        <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                          <th className="py-2 font-medium">Date &amp; heure</th>
+                          <th className="py-2 font-medium">Type</th>
+                          <th className="py-2 font-medium">Détail</th>
+                          <th className="py-2 text-right font-medium">Montant</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {journal.map(m => {
+                          const isIn = m.direction === 'in';
+                          return (
+                            <tr key={m.id} className="border-b last:border-0">
+                              <td className="py-2 whitespace-nowrap text-xs text-muted-foreground">
+                                {new Date(m.occurred_at).toLocaleString('fr-FR', {
+                                  day: '2-digit', month: '2-digit', year: 'numeric',
+                                  hour: '2-digit', minute: '2-digit',
+                                })}
+                              </td>
+                              <td className="py-2">
+                                <Badge variant="outline" className={`text-[10px] ${MOVEMENT_BADGE[m.type] ?? ''}`}>
+                                  {m.type_display}
+                                </Badge>
+                              </td>
+                              <td className="py-2">
+                                <span className="break-words">{m.detail}</span>
+                                {m.type === 'sale' && m.payment_method && (
+                                  <span className="ml-1.5 text-[11px] text-muted-foreground">· {m.payment_method}</span>
+                                )}
+                                {m.created_by_name && (
+                                  <span className="ml-1.5 text-[11px] text-muted-foreground">· {m.created_by_name}</span>
+                                )}
+                              </td>
+                              <td className={`py-2 text-right font-semibold tabular-nums ${isIn ? 'text-emerald-700' : 'text-red-700'}`}>
+                                {isIn ? '+' : '−'} {fmtTND(m.amount)}
+                              </td>
+                            </tr>
+                          );
                         })}
-                      </td>
-                      <td className="py-2">
-                        <Badge variant="outline" className={`text-[10px] ${MOVEMENT_BADGE[m.type] ?? ''}`}>
-                          {m.type_display}
-                        </Badge>
-                      </td>
-                      <td className="py-2">
-                        <span className="break-words">{m.detail}</span>
-                        {m.type === 'sale' && m.payment_method && (
-                          <span className="ml-1.5 text-[11px] text-muted-foreground">· {m.payment_method}</span>
-                        )}
-                        {m.created_by_name && (
-                          <span className="ml-1.5 text-[11px] text-muted-foreground">· {m.created_by_name}</span>
-                        )}
-                      </td>
-                      <td className={`py-2 text-right font-semibold tabular-nums ${isIn ? 'text-emerald-700' : 'text-red-700'}`}>
-                        {isIn ? '+' : '−'} {fmtTND(m.amount)}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
             </TabsContent>
@@ -694,33 +733,69 @@ export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0
               {dailyHistory.length === 0 ? (
                 <p className="py-6 text-center text-xs text-muted-foreground">Aucune journée enregistrée.</p>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[560px] text-sm">
-                    <thead>
-                      <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-                        <th className="py-2 font-medium">Date</th>
-                        <th className="py-2 text-right font-medium">Ventes espèces</th>
-                        <th className="py-2 text-right font-medium">Alimentation</th>
-                        <th className="py-2 text-right font-medium">Dépenses</th>
-                        <th className="py-2 text-right font-medium">Solde caisse</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {dailyHistory.map(row => (
-                        <tr key={row.date} className="border-b last:border-0">
-                          <td className="py-2 whitespace-nowrap text-xs text-muted-foreground">
+                <div>
+                  {/* Mobile: card list */}
+                  <ul className="divide-y sm:hidden">
+                    {dailyHistory.map(row => (
+                      <li key={row.date} className="py-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-medium">
                             {new Date(row.date).toLocaleDateString('fr-FR', {
                               day: '2-digit', month: '2-digit', year: 'numeric',
                             })}
-                          </td>
-                          <td className="py-2 text-right tabular-nums text-emerald-700">{fmtTND(row.cash_sales)}</td>
-                          <td className="py-2 text-right tabular-nums text-blue-700">{fmtTND(row.funding_total)}</td>
-                          <td className="py-2 text-right tabular-nums text-amber-700">{fmtTND(row.expenses)}</td>
-                          <td className="py-2 text-right font-bold tabular-nums">{fmtTND(row.cash_balance)}</td>
+                          </span>
+                          <span className="text-sm font-bold tabular-nums">
+                            {fmtTND(row.cash_balance)}{' '}
+                            <span className="text-[10px] font-normal text-muted-foreground">solde</span>
+                          </span>
+                        </div>
+                        <div className="mt-1.5 grid grid-cols-3 gap-2 text-[11px]">
+                          <div className="flex flex-col">
+                            <span className="text-muted-foreground">Ventes esp.</span>
+                            <span className="tabular-nums text-emerald-700">{fmtTND(row.cash_sales)}</span>
+                          </div>
+                          <div className="flex flex-col">
+                            <span className="text-muted-foreground">Alimentation</span>
+                            <span className="tabular-nums text-blue-700">{fmtTND(row.funding_total)}</span>
+                          </div>
+                          <div className="flex flex-col">
+                            <span className="text-muted-foreground">Dépenses</span>
+                            <span className="tabular-nums text-amber-700">{fmtTND(row.expenses)}</span>
+                          </div>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+
+                  {/* Tablet / desktop: table */}
+                  <div className="hidden overflow-x-auto sm:block">
+                    <table className="w-full min-w-[560px] text-sm">
+                      <thead>
+                        <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                          <th className="py-2 font-medium">Date</th>
+                          <th className="py-2 text-right font-medium">Ventes espèces</th>
+                          <th className="py-2 text-right font-medium">Alimentation</th>
+                          <th className="py-2 text-right font-medium">Dépenses</th>
+                          <th className="py-2 text-right font-medium">Solde caisse</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {dailyHistory.map(row => (
+                          <tr key={row.date} className="border-b last:border-0">
+                            <td className="py-2 whitespace-nowrap text-xs text-muted-foreground">
+                              {new Date(row.date).toLocaleDateString('fr-FR', {
+                                day: '2-digit', month: '2-digit', year: 'numeric',
+                              })}
+                            </td>
+                            <td className="py-2 text-right tabular-nums text-emerald-700">{fmtTND(row.cash_sales)}</td>
+                            <td className="py-2 text-right tabular-nums text-blue-700">{fmtTND(row.funding_total)}</td>
+                            <td className="py-2 text-right tabular-nums text-amber-700">{fmtTND(row.expenses)}</td>
+                            <td className="py-2 text-right font-bold tabular-nums">{fmtTND(row.cash_balance)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
             </TabsContent>
