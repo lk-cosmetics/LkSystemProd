@@ -1,15 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-	<!-- Dark background -->
-	<circle cx="50" cy="50" r="48" fill="#20232a" />
-
-	<!-- React orbital rings -->
-	<ellipse cx="50" cy="50" rx="40" ry="15" fill="none" stroke="#61dafb" stroke-width="2.5"
-		transform="rotate(30, 50, 50)" />
-	<ellipse cx="50" cy="50" rx="40" ry="15" fill="none" stroke="#61dafb" stroke-width="2.5"
-		transform="rotate(90, 50, 50)" />
-	<ellipse cx="50" cy="50" rx="40" ry="15" fill="none" stroke="#61dafb" stroke-width="2.5"
-		transform="rotate(150, 50, 50)" />
-
-	<!-- React center dot -->
-	<circle cx="50" cy="50" r="7" fill="#61dafb" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160">
+	<!-- LK Cosmetics monogram — browser-tab favicon -->
+	<rect width="160" height="160" rx="30" fill="#ffffff" />
+	<g transform="translate(7.3, 22.7) scale(0.92)" fill="#231f20">
+		<path d="m36.32,102.29v-58.6H14.13v80.23c61.53,0,60.72.27,76.67.08l-17.38-21.38c-16.32-.09-34.25-.33-37.1-.33Z" />
+		<path d="m137.23,0H26.1q-12.31.01-12.32,12.12v15.8h6.21c16.95.01,10.95.13,27.87-.08,4.04-.04,5.23,1.2,5.17,5.18-.19,14.73-.09,29.47-.07,44.21,0,1.69.19,3.38.36,6.38,2.01-2.48,3.08-3.76,4.11-5.09,12.19-15.61,24.35-31.25,36.63-46.82,1.08-1.36,2.73-3.11,4.19-3.19,7.37-.32,14.74-.15,23.5-.15-15.06,18.37-29.26,35.68-43.57,53.13,3.41,4.03,6.73,7.96,10.08,11.93,3.83,4.54,7.68,9.1,11.49,13.6,4.75,5.63,9.49,11.24,14.27,16.89.09-.07.14-.12.22-.2v.2h29.84V0h-6.87Z" />
+	</g>
 </svg>
