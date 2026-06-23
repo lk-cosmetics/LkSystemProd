@@ -99,8 +99,9 @@ wire-figures.cjs
 main_recovered.txt
 
 # ─── Personal report / thesis documents — kept out of the app repo ──────────
-LkSystem_latex_Pfe/
+LkSystem_latex_Pfe__11_/
 conception/
 Bilan*.docx
 Bilan*.pdf
 project-plan.html
+
