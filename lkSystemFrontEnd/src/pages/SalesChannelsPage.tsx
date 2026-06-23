@@ -9,7 +9,7 @@
  *    dependencies (no @radix-ui/react-popover or cmdk required).
  */
 
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
@@ -85,16 +85,26 @@ const EMPTY_FORM: ChannelFormData = {
 // WooCommerce fields block – defined at module level (critical!)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// WooCommerce posts webhooks to this path; the backend returns an absolute
+// `webhook_url`, but we fall back to the current origin (SPA + API are
+// same-origin behind nginx) so the Delivery URL always shows something usable.
+const WC_WEBHOOK_PATH = '/api/v1/webhooks/woocommerce/';
+const resolveWebhookUrl = (ch?: { webhook_url?: string } | null): string =>
+  ch?.webhook_url
+  || (typeof window !== 'undefined' ? `${window.location.origin}${WC_WEBHOOK_PATH}` : WC_WEBHOOK_PATH);
+
 interface WooFieldsProps {
   form: ChannelFormData;
   onChange: <K extends keyof ChannelFormData>(k: K, v: ChannelFormData[K]) => void;
-  /** When editing, show webhook token row */
+  /** When editing, show the webhook setup (Delivery URL + Secret) rows. */
   webhookToken?: string;
+  webhookUrl?: string;
+  renderCopy?: (text: string, field: string) => ReactNode;
   onRegenerateWebhook?: () => void;
   regenerating?: boolean;
 }
 
-function WooFields({ form, onChange, webhookToken, onRegenerateWebhook, regenerating }: WooFieldsProps) {
+function WooFields({ form, onChange, webhookToken, webhookUrl, renderCopy, onRegenerateWebhook, regenerating }: WooFieldsProps) {
   return (
     <div className="space-y-4 rounded-lg border border-purple-200 bg-purple-50/40 dark:bg-purple-950/20 dark:border-purple-800/40 p-4">
       <p className="text-xs font-semibold text-purple-700 dark:text-purple-400 uppercase tracking-wide flex items-center gap-1.5">
@@ -182,30 +192,49 @@ function WooFields({ form, onChange, webhookToken, onRegenerateWebhook, regenera
         />
       </div>
 
-      {/* Webhook token — only shown when editing */}
+      {/* Webhook setup (Delivery URL + Secret) — only shown when editing */}
       {onRegenerateWebhook !== undefined && (
-        <div className="space-y-2">
-          <Label>Webhook Token</Label>
-          <div className="flex items-center gap-2">
-            <Input
-              readOnly
-              value={webhookToken ?? 'No token generated'}
-              className="flex-1 min-w-0 font-mono text-xs bg-muted"
-            />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={regenerating}
-              onClick={onRegenerateWebhook}
-              className="gap-1 shrink-0"
-            >
-              <RefreshCw className={`size-4 ${regenerating ? 'animate-spin' : ''}`} />
-              Regenerate
-            </Button>
+        <div className="space-y-3 rounded-md border border-purple-200/60 dark:border-purple-800/40 bg-background/60 p-3">
+          <p className="text-xs font-semibold uppercase tracking-wide text-purple-700 dark:text-purple-400">
+            Webhook setup
+          </p>
+
+          {/* Delivery URL */}
+          <div className="space-y-1">
+            <Label className="text-xs">Delivery URL</Label>
+            <div className="flex items-center gap-2">
+              <Input readOnly value={webhookUrl ?? ''} className="flex-1 min-w-0 bg-muted font-mono text-xs" />
+              {renderCopy?.(webhookUrl ?? '', 'wh-url-edit')}
+            </div>
           </div>
+
+          {/* Secret / token */}
+          <div className="space-y-1">
+            <Label className="text-xs">Secret (webhook token)</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                readOnly
+                value={webhookToken ?? 'No token generated'}
+                className="flex-1 min-w-0 bg-muted font-mono text-xs"
+              />
+              {webhookToken ? renderCopy?.(webhookToken, 'wh-token-edit') : null}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={regenerating}
+                onClick={onRegenerateWebhook}
+                className="gap-1 shrink-0"
+              >
+                <RefreshCw className={`size-4 ${regenerating ? 'animate-spin' : ''}`} />
+                Regenerate
+              </Button>
+            </div>
+          </div>
+
           <p className="text-xs text-muted-foreground">
-            Configure this token in WooCommerce → Settings → Advanced → Webhooks.
+            In WooCommerce → Settings → Advanced → Webhooks, paste the <span className="font-medium">Delivery URL</span> and{' '}
+            <span className="font-medium">Secret</span> (Topic: <span className="font-medium">Order updated</span>). They must match exactly.
           </p>
         </div>
       )}
@@ -558,9 +587,12 @@ export default function SalesChannelsPage() {
     );
   }
 
-  // ── The live webhook token for the channel being edited ────────────────────
+  // ── The live webhook token + Delivery URL for the channel being edited ──────
   const editChannelLiveToken = editForm
     ? channels.find(c => c.id === editForm.id)?.wc_webhook_token
+    : undefined;
+  const editChannelLiveUrl = editForm
+    ? resolveWebhookUrl(channels.find(c => c.id === editForm.id))
     : undefined;
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -799,7 +831,8 @@ export default function SalesChannelsPage() {
                     { key: 'url',     label: 'Store URL',        val: selectedChannel.wc_store_url },
                     { key: 'ck',      label: 'Consumer Key',     val: selectedChannel.wc_consumer_key },
                     { key: 'cs',      label: 'Consumer Secret',  val: selectedChannel.wc_consumer_secret },
-                    { key: 'wh',      label: 'Webhook Token',    val: selectedChannel.wc_webhook_token },
+                    { key: 'wh-url',  label: 'Webhook Delivery URL', val: resolveWebhookUrl(selectedChannel) },
+                    { key: 'wh',      label: 'Webhook Secret (token)', val: selectedChannel.wc_webhook_token },
                     { key: 'del-key', label: 'Delivery API Key', val: selectedChannel.delivery_api_key },
                   ].filter(f => f.val).map(f => (
                     <div key={f.key} className="space-y-1">
@@ -883,6 +916,8 @@ export default function SalesChannelsPage() {
                   form={editForm}
                   onChange={updateEdit}
                   webhookToken={editChannelLiveToken}
+                  webhookUrl={editChannelLiveUrl}
+                  renderCopy={(text, field) => <CopyButton text={text} field={field} />}
                   onRegenerateWebhook={handleRegenerateFromEdit}
                   regenerating={regenerateMutation.isPending}
                 />
@@ -990,18 +1025,32 @@ export default function SalesChannelsPage() {
 
           {newChannelCredentials?.wc_webhook_token && (
             <div className="space-y-3">
-              <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
-                <p className="text-sm text-green-800 dark:text-green-200">
-                  Configure this token in WooCommerce → Settings → Advanced → Webhooks.
-                </p>
+              <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-800 dark:border-green-800 dark:bg-green-900/20 dark:text-green-200">
+                In WooCommerce → <span className="font-medium">Settings → Advanced → Webhooks</span>, add a webhook
+                (Status <span className="font-medium">Active</span>, Topic <span className="font-medium">Order updated</span>),
+                then paste the <span className="font-medium">Delivery URL</span> and <span className="font-medium">Secret</span> below.
+                They must match <span className="font-medium">exactly</span>.
               </div>
+
               <div className="space-y-1">
-                <p className="text-xs font-medium text-muted-foreground">Webhook Token</p>
-                <div className="flex items-center gap-2 p-3 bg-muted/40 rounded-lg border">
-                  <span className="text-sm font-mono flex-1 break-all">{newChannelCredentials.wc_webhook_token}</span>
+                <p className="text-xs font-medium text-muted-foreground">Delivery URL</p>
+                <div className="flex items-center gap-2 rounded-lg border bg-muted/40 p-3">
+                  <span className="flex-1 break-all font-mono text-sm">{resolveWebhookUrl(newChannelCredentials)}</span>
+                  <CopyButton text={resolveWebhookUrl(newChannelCredentials)} field="wh-url-new" />
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-muted-foreground">Secret (webhook token)</p>
+                <div className="flex items-center gap-2 rounded-lg border bg-muted/40 p-3">
+                  <span className="flex-1 break-all font-mono text-sm">{newChannelCredentials.wc_webhook_token}</span>
                   <CopyButton text={newChannelCredentials.wc_webhook_token} field="wh-new" />
                 </div>
               </div>
+
+              <p className="text-xs text-muted-foreground">
+                Save the secret now — it won&apos;t be shown again after you close this dialog.
+              </p>
             </div>
           )}
 

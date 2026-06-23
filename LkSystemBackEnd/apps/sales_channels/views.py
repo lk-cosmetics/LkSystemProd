@@ -247,9 +247,11 @@ Only works for channels with type = WOOCOMMERCE.
         return Response({
             'message': 'Webhook token regenerated successfully.',
             'webhook_token': webhook_token,
+            'webhook_url': request.build_absolute_uri('/api/v1/webhooks/woocommerce/'),
             'channel_id': channel.id,
             'channel_name': channel.name,
-            'usage_hint': 'Add this token to your WooCommerce webhook secret field.',
+            'usage_hint': "Paste this token into the WooCommerce webhook 'Secret' field, "
+                          "and the Delivery URL above into the webhook 'Delivery URL' field.",
         })
     
     @extend_schema(
