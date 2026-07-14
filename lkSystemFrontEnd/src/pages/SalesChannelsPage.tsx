@@ -116,7 +116,7 @@ function ConfigRow({
   const shown = !secret || revealed;
   const masked = value.length > 6 ? `${'•'.repeat(Math.min(value.length - 4, 20))}${value.slice(-4)}` : '••••••';
   return (
-    <div className="space-y-1">
+    <div className="min-w-0 space-y-1">
       <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
       <div className="flex items-center gap-0.5 rounded-lg border bg-background/70 pl-3 pr-1">
         <span
@@ -817,37 +817,44 @@ export default function SalesChannelsPage() {
 
       {/* ── View Dialog ──────────────────────────────────────────────────────── */}
       <Dialog open={viewDialog} onOpenChange={setViewDialog}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Channel Details</DialogTitle>
-            <DialogDescription>Complete information about this sales channel</DialogDescription>
-          </DialogHeader>
+        {/* Flex column so the header/footer stay fixed and only the body scrolls.
+            gap-0 + p-0 override the base grid/padding; overflow-hidden clips the
+            rounded corners — the body is the only scroll container. Width grows
+            to 900px on desktop, 95vw on smaller screens. */}
+        <DialogContent className="flex max-h-[90vh] w-[95vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[900px]">
+          {/* ── Fixed header: channel identity ─────────────────────────── */}
+          <div className="flex shrink-0 items-start gap-4 border-b py-4 pl-6 pr-12">
+            <div className="flex size-14 shrink-0 items-center justify-center rounded-xl border bg-gradient-to-br from-muted/70 to-background">
+              {selectedChannel && <ChannelIcon type={selectedChannel.channel_type} className="size-7" />}
+            </div>
+            <div className="min-w-0 flex-1">
+              <DialogTitle className="truncate text-lg font-semibold leading-tight">
+                {selectedChannel?.name ?? 'Channel details'}
+              </DialogTitle>
+              <DialogDescription className="sr-only">
+                Connection details for {selectedChannel?.name ?? 'this sales channel'}.
+              </DialogDescription>
+              {selectedChannel && (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <ChannelTypeBadge type={selectedChannel.channel_type} />
+                  <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${
+                    selectedChannel.is_active
+                      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400'
+                      : 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-400'
+                  }`}>
+                    <span className={`size-1.5 rounded-full ${selectedChannel.is_active ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                    {selectedChannel.is_active ? 'Active' : 'Inactive'}
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
 
+          {/* ── Scrollable body (vertical only) ────────────────────────── */}
           {selectedChannel && (
-            <div className="space-y-5">
-              {/* ── Identity ─────────────────────────────────────────────── */}
-              <div className="flex items-start gap-4 border-b pb-4">
-                <div className="flex size-14 shrink-0 items-center justify-center rounded-xl border bg-gradient-to-br from-muted/70 to-background">
-                  <ChannelIcon type={selectedChannel.channel_type} className="size-7" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <h3 className="truncate text-lg font-semibold leading-tight">{selectedChannel.name}</h3>
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <ChannelTypeBadge type={selectedChannel.channel_type} />
-                    <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${
-                      selectedChannel.is_active
-                        ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400'
-                        : 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-400'
-                    }`}>
-                      <span className={`size-1.5 rounded-full ${selectedChannel.is_active ? 'bg-emerald-500' : 'bg-red-500'}`} />
-                      {selectedChannel.is_active ? 'Active' : 'Inactive'}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* ── Meta ─────────────────────────────────────────────────── */}
-              <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+            <div className="min-w-0 flex-1 space-y-6 overflow-y-auto px-6 py-5">
+              {/* Meta — 2 cols on tablet+, 1 col on mobile */}
+              <div className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2">
                 {[
                   { icon: Tag,       label: 'Brand',   val: selectedChannel.brand_name },
                   { icon: Building2, label: 'Company', val: selectedChannel.company_name },
@@ -859,7 +866,7 @@ export default function SalesChannelsPage() {
                 ].map(({ icon: Icon, label, val }) => (
                   <div key={label} className="min-w-0 space-y-1">
                     <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
-                    <p className="flex items-center gap-1.5 text-sm font-medium">
+                    <p className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
                       <Icon className="size-3.5 shrink-0 text-muted-foreground" />
                       <span className="truncate">{val || '—'}</span>
                     </p>
@@ -867,27 +874,30 @@ export default function SalesChannelsPage() {
                 ))}
               </div>
 
-              {/* ── WooCommerce connection ───────────────────────────────── */}
+              {/* WooCommerce connection */}
               {selectedChannel.channel_type === 'WOOCOMMERCE' && (
-                <div className="space-y-4 border-t pt-4">
-                  <div className="space-y-2.5">
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Store &amp; API credentials</p>
+                <div className="space-y-5 border-t pt-5">
+                  <div className="space-y-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Store and API credentials</p>
                     {selectedChannel.wc_store_url && (
                       <ConfigRow label="Store URL" value={selectedChannel.wc_store_url} fieldKey="url"
                         copiedField={copiedField} onCopy={copyToClipboard} href={selectedChannel.wc_store_url} />
                     )}
-                    {selectedChannel.wc_consumer_key && (
-                      <ConfigRow label="Consumer Key" value={selectedChannel.wc_consumer_key} fieldKey="ck"
-                        copiedField={copiedField} onCopy={copyToClipboard} />
-                    )}
-                    {selectedChannel.wc_consumer_secret && (
-                      <ConfigRow label="Consumer Secret" value={selectedChannel.wc_consumer_secret} fieldKey="cs"
-                        copiedField={copiedField} onCopy={copyToClipboard} secret />
-                    )}
+                    {/* Key + secret share a row on desktop, stack on mobile */}
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      {selectedChannel.wc_consumer_key && (
+                        <ConfigRow label="Consumer Key" value={selectedChannel.wc_consumer_key} fieldKey="ck"
+                          copiedField={copiedField} onCopy={copyToClipboard} />
+                      )}
+                      {selectedChannel.wc_consumer_secret && (
+                        <ConfigRow label="Consumer Secret" value={selectedChannel.wc_consumer_secret} fieldKey="cs"
+                          copiedField={copiedField} onCopy={copyToClipboard} secret />
+                      )}
+                    </div>
                   </div>
 
                   {/* Order webhook — the values people open this dialog to copy */}
-                  <div className="space-y-2.5 rounded-lg border border-purple-200 bg-purple-50/50 p-3.5 dark:border-purple-800/40 dark:bg-purple-950/20">
+                  <div className="space-y-3 rounded-lg border border-purple-200 bg-purple-50/50 p-4 dark:border-purple-800/40 dark:bg-purple-950/20">
                     <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-purple-700 dark:text-purple-400">
                       <Globe className="size-3.5" /> Order webhook
                     </p>
@@ -904,7 +914,7 @@ export default function SalesChannelsPage() {
                   </div>
 
                   {selectedChannel.delivery_api_key && (
-                    <div className="space-y-2.5">
+                    <div className="space-y-3">
                       <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Delivery</p>
                       <ConfigRow label="Delivery API Key" value={selectedChannel.delivery_api_key} fieldKey="del-key"
                         copiedField={copiedField} onCopy={copyToClipboard} secret />
@@ -912,24 +922,26 @@ export default function SalesChannelsPage() {
                   )}
                 </div>
               )}
+            </div>
+          )}
 
-              {/* ── Actions ──────────────────────────────────────────────── */}
-              <div className="flex gap-3 border-t pt-4">
-                <Button onClick={() => { setViewDialog(false); handleEdit(selectedChannel); }} className="flex-1 gap-2">
-                  <Pencil className="size-4" /> Edit channel
+          {/* ── Fixed footer: actions ──────────────────────────────────── */}
+          {selectedChannel && (
+            <div className="flex shrink-0 flex-wrap gap-3 border-t px-6 py-4">
+              <Button onClick={() => { setViewDialog(false); handleEdit(selectedChannel); }} className="flex-1 gap-2">
+                <Pencil className="size-4" /> Edit channel
+              </Button>
+              {selectedChannel.channel_type === 'WOOCOMMERCE' && (
+                <Button
+                  variant="outline"
+                  onClick={() => handleRegenerateWebhook(selectedChannel)}
+                  className="gap-2"
+                  disabled={regenerateMutation.isPending}
+                >
+                  <RefreshCw className={`size-4 ${regenerateMutation.isPending ? 'animate-spin' : ''}`} />
+                  Regenerate secret
                 </Button>
-                {selectedChannel.channel_type === 'WOOCOMMERCE' && (
-                  <Button
-                    variant="outline"
-                    onClick={() => handleRegenerateWebhook(selectedChannel)}
-                    className="gap-2"
-                    disabled={regenerateMutation.isPending}
-                  >
-                    <RefreshCw className={`size-4 ${regenerateMutation.isPending ? 'animate-spin' : ''}`} />
-                    Regenerate secret
-                  </Button>
-                )}
-              </div>
+              )}
             </div>
           )}
         </DialogContent>
