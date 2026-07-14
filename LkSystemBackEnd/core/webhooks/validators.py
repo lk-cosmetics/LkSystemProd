@@ -134,23 +134,57 @@ class WebhookValidator:
         
         return headers
     
+    @staticmethod
+    def _host_of(url: str) -> str:
+        """Lower-cased host of a URL — scheme / www / port / path insensitive.
+
+        WooCommerce sets ``X-WC-Webhook-Source`` to the site URL; matching on the
+        host (rather than a strict prefix) tolerates the harmless differences that
+        otherwise cause a spurious 401: http vs https, a ``www.`` prefix, a
+        trailing slash, or an extra path segment. Returns '' if unparseable."""
+        from urllib.parse import urlparse
+        raw = (url or '').strip()
+        if not raw:
+            return ''
+        if '://' not in raw:
+            raw = 'http://' + raw  # bare host or host+path
+        host = (urlparse(raw).hostname or '').lower()
+        return host[4:] if host.startswith('www.') else host
+
     def _find_sales_channel(self, source: str) -> SalesChannel:
-        """Find the sales channel matching the webhook source."""
+        """Find the active WooCommerce channel that sent this webhook.
+
+        Security note: this only *selects* a channel — the HMAC signature check
+        that follows still requires the matching channel's secret, so a loose
+        host match never bypasses authentication."""
         if not source:
             raise WebhookValidationError("Empty webhook source")
-        
-        # Normalize URL
-        source = source.rstrip('/')
-        
-        # Find matching channel
-        for channel in SalesChannel.objects.filter(
+
+        channels = list(SalesChannel.objects.filter(
             channel_type=SalesChannel.ChannelType.WOOCOMMERCE,
-            is_active=True
-        ):
+            is_active=True,
+        ))
+
+        # Primary: host match (tolerant of http/https, www, trailing slash, path).
+        source_host = self._host_of(source)
+        if source_host:
+            for channel in channels:
+                if self._host_of(channel.wc_store_url) == source_host:
+                    return channel
+
+        # Fallback: legacy strict prefix match (preserves prior behaviour).
+        src = source.rstrip('/')
+        for channel in channels:
             store_url = (channel.wc_store_url or '').rstrip('/')
-            if store_url and source.startswith(store_url):
+            if store_url and src.startswith(store_url):
                 return channel
-        
+
+        logger.warning(
+            "Webhook source not matched: incoming source=%r (host=%r) matches no "
+            "active WooCommerce channel; configured store hosts=%r. Set the "
+            "channel's Store URL to the exact site sending the webhook.",
+            source, source_host, [self._host_of(c.wc_store_url) for c in channels],
+        )
         raise WebhookValidationError(
             "Unknown webhook source",
             details={'source': source}

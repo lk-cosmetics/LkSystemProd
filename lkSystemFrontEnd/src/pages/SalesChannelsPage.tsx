@@ -13,7 +13,7 @@ import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
-  Eye, Pencil, Trash2, Search, Filter, MoreVertical,
+  Eye, EyeOff, ExternalLink, Pencil, Trash2, Search, Filter, MoreVertical,
   Building2, Tag, Calendar, Store, Plus, Globe, Key,
   Copy, Check, RefreshCw, Link2, Power, MapPin, Truck,
 } from 'lucide-react';
@@ -92,6 +92,65 @@ const WC_WEBHOOK_PATH = '/api/v1/webhooks/woocommerce/';
 const resolveWebhookUrl = (ch?: { webhook_url?: string } | null): string =>
   ch?.webhook_url
   || (typeof window !== 'undefined' ? `${window.location.origin}${WC_WEBHOOK_PATH}` : WC_WEBHOOK_PATH);
+
+const fmtDateTime = (iso: string): string =>
+  new Date(iso).toLocaleString('en-GB', {
+    day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+
+// Read-only credential/URL row for the Channel Details dialog: a mono value that
+// truncates (never overflows the card), a reveal toggle for secrets, an open-in-
+// new-tab affordance for URLs, and a copy button with success feedback.
+function ConfigRow({
+  label, value, fieldKey, copiedField, onCopy, secret = false, href,
+}: {
+  label: string;
+  value: string;
+  fieldKey: string;
+  copiedField: string | null;
+  onCopy: (text: string, field: string) => void;
+  secret?: boolean;
+  href?: string;
+}) {
+  const [revealed, setRevealed] = useState(false);
+  const shown = !secret || revealed;
+  const masked = value.length > 6 ? `${'•'.repeat(Math.min(value.length - 4, 20))}${value.slice(-4)}` : '••••••';
+  return (
+    <div className="space-y-1">
+      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+      <div className="flex items-center gap-0.5 rounded-lg border bg-background/70 pl-3 pr-1">
+        <span
+          className={`min-w-0 flex-1 py-2 font-mono text-[13px] leading-tight ${shown ? 'truncate' : 'tracking-[0.2em] text-muted-foreground'}`}
+          title={shown ? value : undefined}
+        >
+          {shown ? value : masked}
+        </span>
+        {secret && (
+          <Button
+            type="button" variant="ghost" size="icon" className="size-7 shrink-0 text-muted-foreground"
+            onClick={() => setRevealed(r => !r)} title={revealed ? 'Hide' : 'Reveal'}
+          >
+            {revealed ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+          </Button>
+        )}
+        {href && (
+          <a
+            href={href} target="_blank" rel="noopener noreferrer" title="Open"
+            className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            <ExternalLink className="size-3.5" />
+          </a>
+        )}
+        <Button
+          type="button" variant="ghost" size="icon" className="size-7 shrink-0"
+          onClick={() => onCopy(value, fieldKey)} title="Copy"
+        >
+          {copiedField === fieldKey ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5 text-muted-foreground" />}
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 interface WooFieldsProps {
   form: ChannelFormData;
@@ -426,9 +485,6 @@ export default function SalesChannelsPage() {
     </Button>
   );
 
-  const maskSecret = (value: string) => (
-    value.length > 28 ? `${value.slice(0, 16)}...${value.slice(-8)}` : value
-  );
 
   const updateAdd  = <K extends keyof ChannelFormData>(k: K, v: ChannelFormData[K]) =>
     setAddForm(prev => ({ ...prev, [k]: v }));
@@ -769,89 +825,98 @@ export default function SalesChannelsPage() {
 
           {selectedChannel && (
             <div className="space-y-5">
-              {/* Header row */}
-              <div className="flex items-center gap-4 pb-4 border-b">
-                <div className="size-16 rounded-xl bg-muted flex items-center justify-center border-2">
-                  <ChannelIcon type={selectedChannel.channel_type} className="size-8" />
+              {/* ── Identity ─────────────────────────────────────────────── */}
+              <div className="flex items-start gap-4 border-b pb-4">
+                <div className="flex size-14 shrink-0 items-center justify-center rounded-xl border bg-gradient-to-br from-muted/70 to-background">
+                  <ChannelIcon type={selectedChannel.channel_type} className="size-7" />
                 </div>
-                <div>
-                  <h3 className="text-xl font-semibold">{selectedChannel.name}</h3>
-                  <div className="flex items-center gap-2 mt-1.5">
+                <div className="min-w-0 flex-1">
+                  <h3 className="truncate text-lg font-semibold leading-tight">{selectedChannel.name}</h3>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
                     <ChannelTypeBadge type={selectedChannel.channel_type} />
-                    <Badge variant={selectedChannel.is_active ? 'default' : 'destructive'}>
+                    <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${
+                      selectedChannel.is_active
+                        ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400'
+                        : 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-400'
+                    }`}>
+                      <span className={`size-1.5 rounded-full ${selectedChannel.is_active ? 'bg-emerald-500' : 'bg-red-500'}`} />
                       {selectedChannel.is_active ? 'Active' : 'Inactive'}
-                    </Badge>
+                    </span>
                   </div>
                 </div>
               </div>
 
-              {/* Core info */}
-              <div className="grid grid-cols-2 gap-3">
+              {/* ── Meta ─────────────────────────────────────────────────── */}
+              <div className="grid grid-cols-2 gap-x-6 gap-y-4">
                 {[
                   { icon: Tag,       label: 'Brand',   val: selectedChannel.brand_name },
                   { icon: Building2, label: 'Company', val: selectedChannel.company_name },
-                  { icon: Calendar,  label: 'Created', val: new Date(selectedChannel.created_at).toLocaleString() },
-                  { icon: Calendar,  label: 'Updated', val: new Date(selectedChannel.updated_at).toLocaleString() },
+                  { icon: Calendar,  label: 'Created', val: fmtDateTime(selectedChannel.created_at) },
+                  { icon: Calendar,  label: 'Updated', val: fmtDateTime(selectedChannel.updated_at) },
+                  ...(selectedChannel.state
+                    ? [{ icon: MapPin, label: selectedChannel.channel_type === 'POS' ? 'POS location' : 'Governorate', val: selectedChannel.state }]
+                    : []),
                 ].map(({ icon: Icon, label, val }) => (
-                  <div key={label} className="space-y-1">
-                    <p className="text-xs font-medium text-muted-foreground">{label}</p>
-                    <div className="flex items-center gap-2 p-2.5 bg-muted/40 rounded-lg text-sm">
-                      <Icon className="size-4 text-primary shrink-0" /> {val}
-                    </div>
+                  <div key={label} className="min-w-0 space-y-1">
+                    <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+                    <p className="flex items-center gap-1.5 text-sm font-medium">
+                      <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+                      <span className="truncate">{val || '—'}</span>
+                    </p>
                   </div>
                 ))}
               </div>
 
-              {/* Location */}
-              {selectedChannel.state && (
-                <div className="space-y-1.5">
-                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1.5">
-                    <MapPin className="size-3.5" />
-                    {selectedChannel.channel_type === 'POS' ? 'POS Location' : 'Location'}
-                  </p>
-                  <div className="grid gap-3">
-                    {selectedChannel.state && (
-                      <div className="space-y-1">
-                        <p className="text-xs text-muted-foreground">Governorate</p>
-                        <div className="p-2.5 bg-muted/40 rounded-lg text-sm font-medium">{selectedChannel.state}</div>
-                      </div>
+              {/* ── WooCommerce connection ───────────────────────────────── */}
+              {selectedChannel.channel_type === 'WOOCOMMERCE' && (
+                <div className="space-y-4 border-t pt-4">
+                  <div className="space-y-2.5">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Store &amp; API credentials</p>
+                    {selectedChannel.wc_store_url && (
+                      <ConfigRow label="Store URL" value={selectedChannel.wc_store_url} fieldKey="url"
+                        copiedField={copiedField} onCopy={copyToClipboard} href={selectedChannel.wc_store_url} />
+                    )}
+                    {selectedChannel.wc_consumer_key && (
+                      <ConfigRow label="Consumer Key" value={selectedChannel.wc_consumer_key} fieldKey="ck"
+                        copiedField={copiedField} onCopy={copyToClipboard} />
+                    )}
+                    {selectedChannel.wc_consumer_secret && (
+                      <ConfigRow label="Consumer Secret" value={selectedChannel.wc_consumer_secret} fieldKey="cs"
+                        copiedField={copiedField} onCopy={copyToClipboard} secret />
                     )}
                   </div>
-                </div>
-              )}
 
-              {/* WooCommerce config */}
-              {selectedChannel.channel_type === 'WOOCOMMERCE' && (
-                <div className="space-y-3 rounded-lg border border-purple-200 bg-purple-50/40 dark:bg-purple-950/20 dark:border-purple-800/40 p-4">
-                  <p className="text-xs font-semibold text-purple-700 dark:text-purple-400 uppercase tracking-wide flex items-center gap-1.5">
-                    <Globe className="size-3.5" /> WooCommerce Configuration
-                  </p>
+                  {/* Order webhook — the values people open this dialog to copy */}
+                  <div className="space-y-2.5 rounded-lg border border-purple-200 bg-purple-50/50 p-3.5 dark:border-purple-800/40 dark:bg-purple-950/20">
+                    <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-purple-700 dark:text-purple-400">
+                      <Globe className="size-3.5" /> Order webhook
+                    </p>
+                    <ConfigRow label="Delivery URL" value={resolveWebhookUrl(selectedChannel)} fieldKey="wh-url"
+                      copiedField={copiedField} onCopy={copyToClipboard} />
+                    {selectedChannel.wc_webhook_token && (
+                      <ConfigRow label="Secret" value={selectedChannel.wc_webhook_token} fieldKey="wh"
+                        copiedField={copiedField} onCopy={copyToClipboard} secret />
+                    )}
+                    <p className="text-[11px] text-muted-foreground">
+                      In WooCommerce → Settings → Advanced → Webhooks (Topic:{' '}
+                      <span className="font-medium">Order updated</span>), paste both. They must match exactly.
+                    </p>
+                  </div>
 
-                  {[
-                    { key: 'url',     label: 'Store URL',        val: selectedChannel.wc_store_url },
-                    { key: 'ck',      label: 'Consumer Key',     val: selectedChannel.wc_consumer_key },
-                    { key: 'cs',      label: 'Consumer Secret',  val: selectedChannel.wc_consumer_secret },
-                    { key: 'wh-url',  label: 'Webhook Delivery URL', val: resolveWebhookUrl(selectedChannel) },
-                    { key: 'wh',      label: 'Webhook Secret (token)', val: selectedChannel.wc_webhook_token },
-                    { key: 'del-key', label: 'Delivery API Key', val: selectedChannel.delivery_api_key },
-                  ].filter(f => f.val).map(f => (
-                    <div key={f.key} className="space-y-1">
-                      <p className="text-xs text-muted-foreground">{f.label}</p>
-                      <div className="flex items-center gap-2 p-2.5 bg-background/60 rounded-lg border">
-                        <span className="text-sm font-mono flex-1 truncate">
-                          {f.key === 'del-key' ? maskSecret(f.val) : f.val}
-                        </span>
-                        <CopyButton text={f.val} field={f.key} />
-                      </div>
+                  {selectedChannel.delivery_api_key && (
+                    <div className="space-y-2.5">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Delivery</p>
+                      <ConfigRow label="Delivery API Key" value={selectedChannel.delivery_api_key} fieldKey="del-key"
+                        copiedField={copiedField} onCopy={copyToClipboard} secret />
                     </div>
-                  ))}
+                  )}
                 </div>
               )}
 
-              {/* Action buttons */}
-              <div className="flex gap-3 pt-2 border-t">
+              {/* ── Actions ──────────────────────────────────────────────── */}
+              <div className="flex gap-3 border-t pt-4">
                 <Button onClick={() => { setViewDialog(false); handleEdit(selectedChannel); }} className="flex-1 gap-2">
-                  <Pencil className="size-4" /> Edit Channel
+                  <Pencil className="size-4" /> Edit channel
                 </Button>
                 {selectedChannel.channel_type === 'WOOCOMMERCE' && (
                   <Button
@@ -861,7 +926,7 @@ export default function SalesChannelsPage() {
                     disabled={regenerateMutation.isPending}
                   >
                     <RefreshCw className={`size-4 ${regenerateMutation.isPending ? 'animate-spin' : ''}`} />
-                    Regenerate Webhook
+                    Regenerate secret
                   </Button>
                 )}
               </div>
