@@ -214,8 +214,20 @@ def summary(*, company_id, brand_id, period: str, start_date=None, end_date=None
         .values('client_id').distinct().count()
     )
 
-    average_order_value = _safe_div(total_revenue, total_orders)
-    prev_aov = _safe_div(prev_revenue, prev_orders)
+    # AOV is a revenue KPI, so divide the Done-only revenue by the count of
+    # DONE orders — this keeps it consistent with total_revenue. total_orders
+    # and customers_count above stay as volume metrics (all order statuses).
+    done_orders_count = _filter_orders(
+        Order.objects.filter(status=Order.Status.DONE),
+        company_id=company_id, brand_id=brand_id, start=rng.start, end=rng.end,
+    ).count()
+    prev_done_orders_count = _filter_orders(
+        Order.objects.filter(status=Order.Status.DONE),
+        company_id=company_id, brand_id=brand_id, start=prev.start, end=prev.end,
+    ).count()
+
+    average_order_value = _safe_div(total_revenue, done_orders_count)
+    prev_aov = _safe_div(prev_revenue, prev_done_orders_count)
 
     revenue_growth = _growth_rate(total_revenue, prev_revenue)
     orders_growth = _growth_rate(total_orders, prev_orders)
@@ -492,8 +504,9 @@ def _products_payload(
     from apps.products.models import Product
 
     rng = period_range(period, start_date=start_date, end_date=end_date)
+    # Product revenue is revenue: rank by completed (DONE) sales only.
     base_orders = _filter_orders(
-        Order.objects.all(),
+        Order.objects.filter(status=Order.Status.DONE),
         company_id=company_id, brand_id=brand_id,
         start=rng.start, end=rng.end,
     )
@@ -590,13 +603,14 @@ def trending_products(
     rng = period_range(period, start_date=start_date, end_date=end_date)
     prev = _previous_range(rng)
 
+    # Trending is a revenue-growth view: consider completed (DONE) sales only.
     current_orders = _filter_orders(
-        Order.objects.all(),
+        Order.objects.filter(status=Order.Status.DONE),
         company_id=company_id, brand_id=brand_id,
         start=rng.start, end=rng.end,
     )
     previous_orders = _filter_orders(
-        Order.objects.all(),
+        Order.objects.filter(status=Order.Status.DONE),
         company_id=company_id, brand_id=brand_id,
         start=prev.start, end=prev.end,
     )

@@ -59,6 +59,14 @@ def recompute_for_company_brand_date(company_id: int, brand_id: int, day) -> Non
         created_at__date=day,
     ).exclude(status__in=EXCLUDED_ORDER_STATUSES)
 
+    # Revenue counts ONLY completed (``done``) orders — pending / confirmed /
+    # packaging / returned / canceled never contribute. The order's post_save
+    # signal re-runs this recompute, so an order that leaves ``done`` (returned,
+    # canceled, re-opened) drops its amount automatically on the next pass.
+    # Order/customer *counts* below stay on the wider base: they are volume, not
+    # revenue.
+    done_orders = base_orders.filter(status=Order.Status.DONE)
+
     with transaction.atomic():
         # ── 1. Per-channel daily stats ──────────────────────────────────
         DailyBrandChannelStats.objects.filter(
@@ -67,12 +75,13 @@ def recompute_for_company_brand_date(company_id: int, brand_id: int, day) -> Non
             date=day,
         ).delete()
 
-        # Revenue per channel — sum over (qty * unit_price) of active lines
+        # Revenue per channel — sum over (qty * unit_price) of active lines of
+        # DONE orders only.
         revenue_by_channel = {
             row['sales_channel_id']: row['revenue']
             for row in (
                 OrderLine.objects.filter(
-                    order__in=base_orders,
+                    order__in=done_orders,
                     is_deleted=False,
                 )
                 .values('order__sales_channel_id')
@@ -121,7 +130,7 @@ def recompute_for_company_brand_date(company_id: int, brand_id: int, day) -> Non
 
         per_resale = (
             OrderLine.objects.filter(
-                order__in=base_orders,
+                order__in=done_orders,
                 is_deleted=False,
                 product__isnull=False,
             )
