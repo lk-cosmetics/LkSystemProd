@@ -19,6 +19,7 @@ import { getMediaUrl } from '@/utils/helpers';
 import {
   publicVitrineService,
   type PublicVitrineCategory,
+  type PublicVitrinePackComponent,
   type PublicVitrineProduct,
   type PublicVitrineResponse,
 } from '@/services/publicVitrine.service';
@@ -189,18 +190,77 @@ function CategoryButton({
   );
 }
 
+function PackComponentRow({
+  component,
+  canOpen,
+  onOpen,
+}: {
+  component: PublicVitrinePackComponent;
+  canOpen: boolean;
+  onOpen: () => void;
+}) {
+  const content = (
+    <>
+      <ProductImage
+        src={component.image_url}
+        alt={component.name}
+        className="h-14 w-14"
+      />
+      <div className="min-w-0">
+        <p className="line-clamp-2 text-sm font-bold uppercase">
+          {component.name}
+        </p>
+        <p className="text-xs text-neutral-500">
+          Qté {component.quantity}
+        </p>
+      </div>
+      <div className="flex items-center justify-end gap-2">
+        <p className="text-sm font-black">
+          {formatTND(component.line_total)}
+        </p>
+        {canOpen && <ChevronRight className="h-4 w-4 text-neutral-400" />}
+      </div>
+    </>
+  );
+
+  const className =
+    'grid w-full grid-cols-[56px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-left';
+
+  if (!canOpen) {
+    return <div className={className}>{content}</div>;
+  }
+
+  return (
+    <button
+      type="button"
+      className={`${className} transition hover:bg-neutral-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-black`}
+      onClick={onOpen}
+      aria-label={`Voir ${component.name}`}
+    >
+      {content}
+    </button>
+  );
+}
+
 function ProductDetailOverlay({
   product,
   data,
+  salesChannelId,
   onClose,
 }: {
   product: PublicVitrineProduct;
   data: PublicVitrineResponse;
+  salesChannelId: string;
   onClose: () => void;
 }) {
+  const navigate = useNavigate();
   const label = promotionLabel(product);
   const hasDiscount = Number(product.effective_price) < Number(product.sales_price);
   const isPack = isPackProduct(product);
+  const catalogueProductIds = useMemo(
+    () => new Set(data.products.map(row => row.id)),
+    [data.products],
+  );
 
   useEffect(() => {
     const previous = document.body.style.overflow;
@@ -305,29 +365,22 @@ function ProductDetailOverlay({
                 )}
               </div>
               <div className="divide-y">
-                {product.pack_components.map(component => (
-                  <div
-                    key={`${component.product_id}-${component.name}`}
-                    className="grid grid-cols-[56px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3"
-                  >
-                    <ProductImage
-                      src={component.image_url}
-                      alt={component.name}
-                      className="h-14 w-14"
+                {product.pack_components.map(component => {
+                  const componentId = component.product_id;
+                  const canOpen = Boolean(componentId && catalogueProductIds.has(componentId));
+
+                  return (
+                    <PackComponentRow
+                      key={`${component.product_id}-${component.name}`}
+                      component={component}
+                      canOpen={canOpen}
+                      onOpen={() => {
+                        if (!componentId) return;
+                        navigate(`/vitrine/${salesChannelId}/product/${componentId}`);
+                      }}
                     />
-                    <div className="min-w-0">
-                      <p className="line-clamp-2 text-sm font-bold uppercase">
-                        {component.name}
-                      </p>
-                      <p className="text-xs text-neutral-500">
-                        Qté {component.quantity}
-                      </p>
-                    </div>
-                    <p className="text-sm font-black">
-                      {formatTND(component.line_total)}
-                    </p>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -602,8 +655,10 @@ export default function PublicVitrinePage() {
 
       {selectedProduct && (
         <ProductDetailOverlay
+          key={selectedProduct.id}
           product={selectedProduct}
           data={data}
+          salesChannelId={salesChannelId}
           onClose={() => navigate(`/vitrine/${salesChannelId}`)}
         />
       )}
