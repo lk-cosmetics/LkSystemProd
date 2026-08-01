@@ -69,12 +69,148 @@ export interface PublicVitrineResponse {
   products: PublicVitrineProduct[];
 }
 
+export interface CachedPublicVitrine {
+  cache_key: string;
+  data: PublicVitrineResponse;
+  cached_at: string;
+}
+
+const DB_NAME = 'lk-system-public-vitrine';
+const DB_VERSION = 1;
+const VITRINE_STORE = 'vitrines';
+
 const buildPublicApiUrl = (path: string) => {
   const base = API_CONFIG.BASE_URL.replace(/\/$/, '');
   return `${base}${path}`;
 };
 
+const requestToPromise = <T>(request: IDBRequest<T>): Promise<T> =>
+  new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+
+const transactionDone = (transaction: IDBTransaction): Promise<void> =>
+  new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+
+const canUseIndexedDB = () =>
+  typeof window !== 'undefined' && 'indexedDB' in window;
+
+const openDB = (): Promise<IDBDatabase> =>
+  new Promise((resolve, reject) => {
+    if (!canUseIndexedDB()) {
+      reject(new Error('IndexedDB is not available.'));
+      return;
+    }
+
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(VITRINE_STORE)) {
+        db.createObjectStore(VITRINE_STORE, { keyPath: 'cache_key' });
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+
+const makeLocalStorageKey = (salesChannelId: number | string) =>
+  `lk-public-vitrine:${String(salesChannelId).trim().toLowerCase()}`;
+
+const makeCacheKeys = (
+  salesChannelId: number | string,
+  data?: PublicVitrineResponse,
+) => {
+  const keys = new Set<string>();
+  const add = (value: unknown) => {
+    const key = String(value ?? '').trim().toLowerCase();
+    if (key) keys.add(key);
+  };
+
+  add(salesChannelId);
+  add(data?.sales_channel.id);
+  add(data?.sales_channel.code);
+  add(data?.sales_channel.name);
+
+  return Array.from(keys);
+};
+
+const readLocalStorageCache = (salesChannelId: number | string): CachedPublicVitrine | null => {
+  if (typeof window === 'undefined') return null;
+  const raw = window.localStorage.getItem(makeLocalStorageKey(salesChannelId));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as CachedPublicVitrine;
+  } catch {
+    window.localStorage.removeItem(makeLocalStorageKey(salesChannelId));
+    return null;
+  }
+};
+
+const writeLocalStorageCache = (record: CachedPublicVitrine) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(makeLocalStorageKey(record.cache_key), JSON.stringify(record));
+  } catch {
+    // IndexedDB is the primary cache; localStorage is only a small fallback.
+  }
+};
+
 class PublicVitrineService {
+  async getCachedPOSVitrine(salesChannelId: number | string): Promise<CachedPublicVitrine | null> {
+    const cacheKey = String(salesChannelId).trim().toLowerCase();
+    if (!cacheKey) return null;
+
+    try {
+      const db = await openDB();
+      try {
+        const transaction = db.transaction(VITRINE_STORE, 'readonly');
+        const cached = await requestToPromise<CachedPublicVitrine | undefined>(
+          transaction.objectStore(VITRINE_STORE).get(cacheKey),
+        );
+        return cached ?? readLocalStorageCache(cacheKey);
+      } finally {
+        db.close();
+      }
+    } catch {
+      return readLocalStorageCache(cacheKey);
+    }
+  }
+
+  async savePOSVitrine(
+    salesChannelId: number | string,
+    data: PublicVitrineResponse,
+  ): Promise<void> {
+    const cachedAt = new Date().toISOString();
+    const records = makeCacheKeys(salesChannelId, data).map(cacheKey => ({
+      cache_key: cacheKey,
+      data,
+      cached_at: cachedAt,
+    }));
+
+    records.forEach(writeLocalStorageCache);
+
+    try {
+      const db = await openDB();
+      try {
+        const transaction = db.transaction(VITRINE_STORE, 'readwrite');
+        const store = transaction.objectStore(VITRINE_STORE);
+        records.forEach(record => store.put(record));
+        await transactionDone(transaction);
+      } finally {
+        db.close();
+      }
+    } catch {
+      // LocalStorage fallback above already keeps a last-known-good snapshot.
+    }
+  }
+
   async getPOSVitrine(salesChannelId: number | string): Promise<PublicVitrineResponse> {
     const response = await fetch(
       buildPublicApiUrl(
@@ -100,7 +236,9 @@ class PublicVitrineService {
       throw new Error(message);
     }
 
-    return response.json();
+    const payload = await response.json() as PublicVitrineResponse;
+    await this.savePOSVitrine(salesChannelId, payload);
+    return payload;
   }
 }
 

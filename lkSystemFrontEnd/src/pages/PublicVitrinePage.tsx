@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   AlertCircle,
   ArrowLeft,
@@ -101,14 +101,18 @@ function ProductTile({
   const label = promotionLabel(product);
   const hasDiscount = Number(product.effective_price) < Number(product.sales_price);
   const isPack = isPackProduct(product);
+  const packSavings = Number(product.pack_savings);
+  const packSavingsText = isPack && packSavings > 0
+    ? `Vous économisez ${formatTND(packSavings)}`
+    : null;
 
   return (
     <button
       type="button"
-      className="group min-w-0 text-left focus:outline-none"
+      className="group grid h-full w-full min-w-0 grid-rows-[auto_minmax(8rem,1fr)] self-stretch appearance-none border-0 bg-transparent p-0 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-black"
       onClick={() => navigate(`/vitrine/${salesChannelId}/product/${product.id}`)}
     >
-      <div className="relative aspect-[4/3] overflow-hidden bg-neutral-100 md:aspect-square">
+      <div className="relative aspect-square w-full shrink-0 overflow-hidden bg-neutral-100">
         <ProductImage
           src={product.image_url}
           alt={product.name}
@@ -133,11 +137,11 @@ function ProductTile({
         </div>
       </div>
 
-      <div className="mt-3 space-y-1">
+      <div className="grid min-h-[8rem] grid-rows-[2.75rem_1.75rem_1.25rem] content-start gap-y-2 pt-3">
         <h3 className="line-clamp-2 min-h-[2.75rem] text-base font-semibold uppercase leading-snug tracking-normal text-neutral-950 md:text-lg">
           {product.name}
         </h3>
-        <div className="flex flex-wrap items-baseline gap-2">
+        <div className="flex min-h-[1.75rem] flex-wrap items-baseline gap-2">
           <span className="text-base font-black text-neutral-950 md:text-lg">
             {formatTND(product.effective_price)}
           </span>
@@ -147,11 +151,14 @@ function ProductTile({
             </span>
           )}
         </div>
-        {isPack && Number(product.pack_savings) > 0 && (
-          <p className="text-sm font-semibold text-neutral-700">
-            Vous économisez {formatTND(product.pack_savings)}
-          </p>
-        )}
+        <p
+          className={`min-h-[1.25rem] line-clamp-1 text-sm font-semibold ${
+            packSavingsText ? 'text-neutral-700' : 'invisible'
+          }`}
+          aria-hidden={!packSavingsText}
+        >
+          {packSavingsText || '\u00A0'}
+        </p>
       </div>
     </button>
   );
@@ -246,11 +253,15 @@ function ProductDetailOverlay({
   product,
   data,
   salesChannelId,
+  backLabel = 'Retour',
+  onBack,
   onClose,
 }: {
   product: PublicVitrineProduct;
   data: PublicVitrineResponse;
   salesChannelId: string;
+  backLabel?: string;
+  onBack: () => void;
   onClose: () => void;
 }) {
   const navigate = useNavigate();
@@ -276,11 +287,11 @@ function ProductDetailOverlay({
         <div className="mx-auto flex max-w-[1680px] items-center justify-between gap-4 px-4 py-4 md:px-8">
           <button
             type="button"
-            onClick={onClose}
+            onClick={onBack}
             className="flex items-center gap-2 text-sm font-black uppercase tracking-normal"
           >
             <ArrowLeft className="h-5 w-5" />
-            Retour
+            {backLabel}
           </button>
           <div className="min-w-0 text-center">
             <p className="truncate text-xs font-bold uppercase text-neutral-500">
@@ -376,7 +387,7 @@ function ProductDetailOverlay({
                       canOpen={canOpen}
                       onOpen={() => {
                         if (!componentId) return;
-                        navigate(`/vitrine/${salesChannelId}/product/${componentId}`);
+                        navigate(`/vitrine/${salesChannelId}/product/${componentId}?from=${product.id}`);
                       }}
                     />
                   );
@@ -410,35 +421,77 @@ function ProductDetailOverlay({
 export default function PublicVitrinePage() {
   const { salesChannelId = '', productId } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [data, setData] = useState<PublicVitrineResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [usingCachedSnapshot, setUsingCachedSnapshot] = useState(false);
+  const [cachedAt, setCachedAt] = useState<string | null>(null);
+  const [isBrowserOnline, setIsBrowserOnline] = useState(
+    () => typeof navigator === 'undefined' || navigator.onLine,
+  );
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState<CategoryFilter>('all');
   const [typeFilter, setTypeFilter] = useState<ProductTypeFilter>('all');
+
+  useEffect(() => {
+    const updateOnlineState = () => setIsBrowserOnline(navigator.onLine);
+    window.addEventListener('online', updateOnlineState);
+    window.addEventListener('offline', updateOnlineState);
+    return () => {
+      window.removeEventListener('online', updateOnlineState);
+      window.removeEventListener('offline', updateOnlineState);
+    };
+  }, []);
 
   useEffect(() => {
     if (!salesChannelId) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setUsingCachedSnapshot(false);
 
-    publicVitrineService
-      .getPOSVitrine(salesChannelId)
-      .then(payload => {
-        if (!cancelled) setData(payload);
-      })
-      .catch(err => {
-        if (!cancelled) setError(err instanceof Error ? err.message : 'Impossible de charger la vitrine.');
-      })
-      .finally(() => {
+    const loadVitrine = async () => {
+      const cached = await publicVitrineService
+        .getCachedPOSVitrine(salesChannelId)
+        .catch(() => null);
+
+      if (cancelled) return;
+
+      if (cached) {
+        setData(cached.data);
+        setCachedAt(cached.cached_at);
+        setUsingCachedSnapshot(!isBrowserOnline);
+        setLoading(false);
+      }
+
+      try {
+        const payload = await publicVitrineService.getPOSVitrine(salesChannelId);
+        if (cancelled) return;
+        setData(payload);
+        setCachedAt(new Date().toISOString());
+        setUsingCachedSnapshot(false);
+        setError(null);
+      } catch (err) {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : 'Impossible de charger la vitrine.';
+        if (cached) {
+          setUsingCachedSnapshot(true);
+          setError(null);
+          return;
+        }
+        setError(`${message} Ouvrez cette vitrine une fois en ligne pour activer le mode offline.`);
+      } finally {
         if (!cancelled) setLoading(false);
-      });
+      }
+    };
+
+    void loadVitrine();
 
     return () => {
       cancelled = true;
     };
-  }, [salesChannelId]);
+  }, [isBrowserOnline, salesChannelId]);
 
   const categoryTabs = useMemo(() => {
     if (!data) return [];
@@ -509,6 +562,27 @@ export default function PublicVitrinePage() {
     return data.products.find(product => String(product.id) === String(productId)) ?? null;
   }, [data, productId]);
 
+  const returnProductId = searchParams.get('from');
+  const returnProduct = useMemo(() => {
+    if (!data || !productId || !returnProductId) return null;
+    const candidate = data.products.find(product => String(product.id) === String(returnProductId));
+    if (!candidate || String(candidate.id) === String(productId) || !isPackProduct(candidate)) return null;
+    return candidate;
+  }, [data, productId, returnProductId]);
+
+  const cachedAtLabel = useMemo(() => {
+    if (!cachedAt) return null;
+    const date = new Date(cachedAt);
+    if (Number.isNaN(date.getTime())) return null;
+    return date.toLocaleString('fr-FR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }, [cachedAt]);
+
   if (loading) {
     return (
       <main className="public-vitrine-page flex min-h-screen items-center justify-center bg-white text-black">
@@ -559,6 +633,18 @@ export default function PublicVitrinePage() {
               <span>{data.sales_channel.name}</span>
               {data.sales_channel.state && <span>{data.sales_channel.state}</span>}
               <span>{data.products.length} produits</span>
+              <span
+                className={`px-2 py-1 text-[11px] font-black ${
+                  usingCachedSnapshot || !isBrowserOnline
+                    ? 'bg-black text-white'
+                    : 'bg-neutral-100 text-neutral-700'
+                }`}
+              >
+                {usingCachedSnapshot || !isBrowserOnline ? 'Mode offline' : 'Mode en ligne'}
+              </span>
+              {usingCachedSnapshot && cachedAtLabel && (
+                <span>Dernière sync {cachedAtLabel}</span>
+              )}
             </div>
           </div>
 
@@ -636,7 +722,7 @@ export default function PublicVitrinePage() {
             </div>
           </div>
         ) : (
-          <div className="grid grid-cols-1 gap-x-5 gap-y-10 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+          <div className="grid auto-rows-fr grid-cols-1 items-stretch gap-x-5 gap-y-10 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 [&>*]:min-w-0">
             {filteredProducts.map(product => (
               <ProductTile
                 key={product.id}
@@ -659,6 +745,14 @@ export default function PublicVitrinePage() {
           product={selectedProduct}
           data={data}
           salesChannelId={salesChannelId}
+          backLabel={returnProduct ? 'Retour au pack' : 'Retour'}
+          onBack={() => {
+            if (returnProduct) {
+              navigate(`/vitrine/${salesChannelId}/product/${returnProduct.id}`);
+              return;
+            }
+            navigate(`/vitrine/${salesChannelId}`);
+          }}
           onClose={() => navigate(`/vitrine/${salesChannelId}`)}
         />
       )}
