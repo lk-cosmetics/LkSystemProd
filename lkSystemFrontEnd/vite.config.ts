@@ -67,6 +67,31 @@ export default defineConfig({
         maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
         runtimeCaching: [
           {
+            // Public customer vitrine: first successful online load is kept so
+            // tablets can reopen / browse the catalogue during a network drop.
+            urlPattern: ({ url, request }) =>
+              request.method === 'GET' &&
+              url.pathname.includes('/api/v1/products/public-vitrine/'),
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'lk-public-vitrine-api',
+              networkTimeoutSeconds: 5,
+              expiration: { maxEntries: 80, maxAgeSeconds: 14 * 24 * 60 * 60 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+          {
+            // Product/pack visuals for the public vitrine and POS. Images are
+            // immutable enough for CacheFirst and keep browsing smooth offline.
+            urlPattern: ({ request }) => request.method === 'GET' && request.destination === 'image',
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'lk-product-images',
+              expiration: { maxEntries: 1200, maxAgeSeconds: 30 * 24 * 60 * 60 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+          {
             // Caisse reads: keep the last-synced stats / history / journal and
             // the unified cash movements (expenses + alimentations) available
             // offline (NetworkFirst → fresh when online, cached fallback when

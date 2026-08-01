@@ -15,6 +15,7 @@ import {
   CalendarDays,
   RotateCcw,
   X,
+  ExternalLink,
 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -115,6 +116,10 @@ export function POSProductGrid({
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>('products');
   const hasHistoryFilters = Boolean(historySearch || historyDateFrom || historyDateTo);
+  const openPublicVitrine = () => {
+    if (!channelId) return;
+    window.open(`/vitrine/${channelId}`, '_blank', 'noopener,noreferrer');
+  };
   const sortedHistoryOrders = [...historyOrders].sort((a, b) => {
     const bTime = new Date(b.created_at || b.updated_at || '').getTime() || 0;
     const aTime = new Date(a.created_at || a.updated_at || '').getTime() || 0;
@@ -163,6 +168,17 @@ export function POSProductGrid({
               ))}
             </SelectContent>
           </Select>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mt-1.5 h-8 w-full justify-center gap-1.5 text-xs"
+            onClick={openPublicVitrine}
+            disabled={!channelId}
+          >
+            <ExternalLink className="size-3.5" />
+            Vitrine
+          </Button>
         </div>
 
         {activeTab === 'products' && (

@@ -40,6 +40,7 @@ const ClientsPage = lazyWithRetry(() => import('@/pages/ClientsPage'));
 const POSPage = lazyWithRetry(() => import('@/pages/POSPage'));
 const NotificationsPage = lazyWithRetry(() => import('@/pages/NotificationsPage'));
 const SettingsPage = lazyWithRetry(() => import('@/pages/SettingsPage'));
+const PublicVitrinePage = lazyWithRetry(() => import('@/pages/PublicVitrinePage'));
 
 function DashboardIndexRedirect() {
   const user = useAuthStore(state => state.user);
@@ -283,6 +284,8 @@ export function AppRouter() {
         <Route path="/forgot-password" element={<ForgotPasswordPage />} />
         <Route path="/reset-password" element={<ResetPasswordPage />} />
         <Route path="/accept-invitation" element={<AcceptInvitationPage />} />
+        <Route path="/vitrine/:salesChannelId" element={<PublicVitrinePage />} />
+        <Route path="/vitrine/:salesChannelId/product/:productId" element={<PublicVitrinePage />} />
 
         {/* 404 Page - catches all unmatched routes */}
         <Route path="*" element={<NotFoundPage />} />

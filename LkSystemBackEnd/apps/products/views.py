@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.parsers import JSONParser, MultiPartParser
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
@@ -90,6 +90,11 @@ class ProductViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     search_fields = ['name', 'barcode']
     ordering_fields = ['name', 'sales_price', 'purchase_price', 'created_at']
     ordering = ['-created_at']
+
+    def get_permissions(self):
+        if getattr(self, 'action', None) == 'public_vitrine':
+            return [AllowAny()]
+        return super().get_permissions()
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -406,6 +411,235 @@ class ProductViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             'brand': sales_channel.brand_id,
             'brand_name': sales_channel.brand.name if sales_channel.brand else None,
             'last_sync': timezone.now().isoformat(),
+            'products': product_rows,
+        })
+
+    @action(
+        detail=False,
+        methods=['get'],
+        url_path='public-vitrine',
+        authentication_classes=[],
+        permission_classes=[AllowAny],
+    )
+    def public_vitrine(self, request):
+        """
+        Public read-only catalogue snapshot for a POS sales channel.
+
+        This endpoint powers the customer-facing vitrine page. It intentionally
+        returns only published sellable products for one active POS channel and
+        never exposes credentials, purchase prices, internal audit fields, or
+        protected dashboard data.
+        """
+        sales_channel_id = request.query_params.get('sales_channel')
+        if not sales_channel_id:
+            return Response(
+                {'detail': 'sales_channel query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            requested_channel = (
+                SalesChannel.objects
+                .select_related('brand', 'brand__company')
+                .get(pk=sales_channel_id, is_active=True)
+            )
+        except (SalesChannel.DoesNotExist, ValueError):
+            return Response(
+                {'detail': 'Public vitrine source was not found or is inactive.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if requested_channel.channel_type == SalesChannel.ChannelType.POS:
+            sales_channel = requested_channel
+        else:
+            sales_channel = (
+                SalesChannel.objects
+                .select_related('brand', 'brand__company')
+                .filter(
+                    brand=requested_channel.brand,
+                    channel_type=SalesChannel.ChannelType.POS,
+                    is_active=True,
+                )
+                .order_by('-is_default', 'id')
+                .first()
+            )
+            if sales_channel is None:
+                return Response(
+                    {'detail': 'No active POS vitrine is configured for this brand.'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+        products = list(
+            Product.objects
+            .filter(
+                brand=sales_channel.brand,
+                status=Product.ProductStatus.PUBLISH,
+                product_type__in=Product.SELLABLE_TYPES,
+            )
+            .prefetch_related('categories')
+            .order_by('name')
+        )
+
+        product_ids = [product.id for product in products]
+        money_quantum = Decimal('0.001')
+
+        def money(value):
+            return str(Decimal(value or 0).quantize(money_quantum))
+
+        inventory_by_product = {
+            inv.product_id: inv
+            for inv in SalesChannelInventory.objects.filter(
+                sales_channel=sales_channel,
+                product_id__in=product_ids,
+            )
+        }
+
+        now = timezone.now()
+        from apps.promotions.models import Promotion, PromotionStatus
+
+        promotion_by_product = {}
+        promotions = (
+            Promotion.objects
+            .filter(
+                Q(end_date__isnull=True) | Q(end_date__gte=now),
+                product_id__in=product_ids,
+                status=PromotionStatus.ACTIVE,
+                is_active=True,
+                start_date__lte=now,
+                channel_rules__sales_channel=sales_channel,
+                channel_rules__is_enabled=True,
+            )
+            .select_related('product')
+            .prefetch_related('channel_rules')
+            .order_by('product_id', '-priority', '-updated_at')
+            .distinct()
+        )
+        for promotion in promotions:
+            if promotion.product_id in promotion_by_product:
+                continue
+            if not promotion.is_within_usage_limit:
+                continue
+            original = promotion.product.sales_price or Decimal('0')
+            discounted = promotion.calculate_discounted_price(original, sales_channel.id)
+            if discounted is None or discounted >= original:
+                continue
+            discount_value = promotion.get_discount_for_channel(sales_channel.id)
+            promotion_by_product[promotion.product_id] = {
+                'id': promotion.id,
+                'name': promotion.name,
+                'discount_type': promotion.discount_type,
+                'discount_value': str(discount_value),
+                'discounted_price': money(discounted),
+                'savings': money(original - discounted),
+            }
+
+        component_ids = set()
+        for product in products:
+            if not product.is_pack or not product.pack_items:
+                continue
+            for item in product.pack_items:
+                product_id = item.get('product_id') if isinstance(item, dict) else None
+                if product_id:
+                    component_ids.add(product_id)
+        component_by_id = {
+            product.id: product
+            for product in Product.objects.filter(id__in=component_ids)
+        }
+
+        categories = {}
+        product_rows = []
+        for product in products:
+            inv = inventory_by_product.get(product.id)
+            if product.is_pack:
+                pack_stock = product.get_pack_stock(sales_channel.id)
+                available_quantity = int(pack_stock.get(sales_channel.id, 0))
+            else:
+                available_quantity = int(inv.available_quantity if inv else 0)
+
+            product_categories = list(product.categories.all())
+            for category in product_categories:
+                current = categories.setdefault(
+                    category.id,
+                    {
+                        'id': category.id,
+                        'name': category.name,
+                        'slug': category.slug,
+                        'display_order': category.display_order,
+                        'product_count': 0,
+                    },
+                )
+                current['product_count'] += 1
+
+            promotion = promotion_by_product.get(product.id)
+            effective_price = Decimal(promotion['discounted_price']) if promotion else product.sales_price
+            components = []
+            components_total = Decimal('0')
+            if product.is_pack and product.pack_items:
+                for item in product.pack_items:
+                    component_id = item.get('product_id') if isinstance(item, dict) else None
+                    quantity = int(item.get('quantity') or 0) if isinstance(item, dict) else 0
+                    component = component_by_id.get(component_id)
+                    unit_price = component.sales_price if component else Decimal('0')
+                    line_total = unit_price * quantity
+                    components_total += line_total
+                    components.append({
+                        'product_id': component_id,
+                        'name': component.name if component else 'Missing component',
+                        'barcode': component.barcode if component else '',
+                        'image_url': component.image_url if component else '',
+                        'quantity': quantity,
+                        'unit_price': money(unit_price),
+                        'line_total': money(line_total),
+                    })
+
+            pack_savings = max(Decimal('0'), components_total - effective_price)
+
+            product_rows.append({
+                'id': product.id,
+                'name': product.name,
+                'barcode': product.barcode,
+                'image_url': product.image_url,
+                'product_link': product.product_link,
+                'product_type': product.product_type,
+                'is_pack': product.is_pack,
+                'sales_price': money(product.sales_price),
+                'effective_price': money(effective_price),
+                'available_quantity': available_quantity,
+                'is_out_of_stock': available_quantity <= 0,
+                'category_ids': [category.id for category in product_categories],
+                'category_names': [category.name for category in product_categories],
+                'promotion': promotion,
+                'pack_components': components,
+                'pack_components_total': money(components_total),
+                'pack_savings': money(pack_savings),
+            })
+
+        brand_logo = ''
+        if sales_channel.brand and sales_channel.brand.logo:
+            try:
+                brand_logo = request.build_absolute_uri(sales_channel.brand.logo.url)
+            except ValueError:
+                brand_logo = ''
+
+        ordered_categories = sorted(
+            categories.values(),
+            key=lambda row: (row['display_order'], row['name'].lower()),
+        )
+
+        return Response({
+            'sales_channel': {
+                'id': sales_channel.id,
+                'name': sales_channel.name,
+                'code': sales_channel.code,
+                'address': sales_channel.address,
+                'phone': sales_channel.phone,
+                'state': sales_channel.state,
+                'brand_id': sales_channel.brand_id,
+                'brand_name': sales_channel.brand.name if sales_channel.brand else '',
+                'brand_logo': brand_logo,
+            },
+            'generated_at': timezone.now().isoformat(),
+            'categories': ordered_categories,
             'products': product_rows,
         })
 
