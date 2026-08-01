@@ -438,20 +438,36 @@ class ProductViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             )
 
         try:
-            sales_channel = (
+            requested_channel = (
                 SalesChannel.objects
                 .select_related('brand', 'brand__company')
-                .get(
-                    pk=sales_channel_id,
-                    channel_type=SalesChannel.ChannelType.POS,
-                    is_active=True,
-                )
+                .get(pk=sales_channel_id, is_active=True)
             )
         except (SalesChannel.DoesNotExist, ValueError):
             return Response(
-                {'detail': 'Public vitrine is available only for an active POS sales channel.'},
+                {'detail': 'Public vitrine source was not found or is inactive.'},
                 status=status.HTTP_404_NOT_FOUND,
             )
+
+        if requested_channel.channel_type == SalesChannel.ChannelType.POS:
+            sales_channel = requested_channel
+        else:
+            sales_channel = (
+                SalesChannel.objects
+                .select_related('brand', 'brand__company')
+                .filter(
+                    brand=requested_channel.brand,
+                    channel_type=SalesChannel.ChannelType.POS,
+                    is_active=True,
+                )
+                .order_by('-is_default', 'id')
+                .first()
+            )
+            if sales_channel is None:
+                return Response(
+                    {'detail': 'No active POS vitrine is configured for this brand.'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
         products = list(
             Product.objects

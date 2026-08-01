@@ -132,11 +132,24 @@ class PublicVitrineEndpointTests(TestCase):
         self.assertEqual(pack['pack_components_total'], '75.000')
         self.assertEqual(pack['pack_savings'], '15.000')
 
-    def test_public_vitrine_rejects_inactive_or_non_pos_channel(self):
+    def test_public_vitrine_resolves_brand_woocommerce_channel_to_active_pos(self):
         web = SalesChannel.objects.create(
             brand=self.brand,
             name='Website',
             code='WEB',
+            channel_type=SalesChannel.ChannelType.WOOCOMMERCE,
+            is_active=True,
+        )
+        res = self.api.get(f'/api/v1/products/public-vitrine/?sales_channel={web.id}')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()['sales_channel']['id'], self.pos.id)
+
+    def test_public_vitrine_rejects_brand_without_active_pos_channel(self):
+        other_brand = Brand.objects.create(company=self.company, name='No POS Brand')
+        web = SalesChannel.objects.create(
+            brand=other_brand,
+            name='Website',
+            code='WEB2',
             channel_type=SalesChannel.ChannelType.WOOCOMMERCE,
             is_active=True,
         )
