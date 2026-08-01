@@ -42,6 +42,12 @@ function isPackProduct(product: PublicVitrineProduct) {
   return product.product_type === 'pack' || product.is_pack;
 }
 
+function productMatchesCategory(product: PublicVitrineProduct, category: CategoryFilter) {
+  if (category === 'all') return true;
+  if (category === 'uncategorized') return product.category_ids.length === 0;
+  return product.category_ids.includes(Number(category));
+}
+
 function promotionLabel(product: PublicVitrineProduct) {
   if (!product.promotion) return null;
   const value = Number(product.promotion.discount_value);
@@ -400,24 +406,37 @@ export default function PublicVitrinePage() {
     return tabs;
   }, [data]);
 
-  const filteredProducts = useMemo(() => {
+  const categoryProducts = useMemo(() => {
     if (!data) return [];
+    return data.products.filter(product => productMatchesCategory(product, activeCategory));
+  }, [activeCategory, data]);
+
+  const productCounts = useMemo(() => {
+    return categoryProducts.reduce(
+      (acc, product) => {
+        acc.all += 1;
+        if (isPackProduct(product)) acc.pack += 1;
+        else acc.resell_product += 1;
+        return acc;
+      },
+      { all: 0, resell_product: 0, pack: 0 },
+    );
+  }, [categoryProducts]);
+
+  useEffect(() => {
+    if (typeFilter !== 'all' && productCounts[typeFilter] === 0) {
+      setTypeFilter('all');
+    }
+  }, [productCounts, typeFilter]);
+
+  const filteredProducts = useMemo(() => {
     const query = normalize(search);
 
-    return data.products
+    return categoryProducts
       .filter(product => {
         if (typeFilter !== 'all') {
           const productKind = isPackProduct(product) ? 'pack' : 'resell_product';
           if (productKind !== typeFilter) return false;
-        }
-
-        if (activeCategory === 'uncategorized' && product.category_ids.length > 0) return false;
-        if (
-          activeCategory !== 'all' &&
-          activeCategory !== 'uncategorized' &&
-          !product.category_ids.includes(Number(activeCategory))
-        ) {
-          return false;
         }
 
         if (!query) return true;
@@ -436,25 +455,12 @@ export default function PublicVitrinePage() {
         if (aPromo !== bPromo) return aPromo ? -1 : 1;
         return a.name.localeCompare(b.name);
       });
-  }, [activeCategory, data, search, typeFilter]);
+  }, [categoryProducts, search, typeFilter]);
 
   const selectedProduct = useMemo(() => {
     if (!data || !productId) return null;
     return data.products.find(product => String(product.id) === String(productId)) ?? null;
   }, [data, productId]);
-
-  const productCounts = useMemo(() => {
-    if (!data) return { all: 0, resell_product: 0, pack: 0 };
-    return data.products.reduce(
-      (acc, product) => {
-        acc.all += 1;
-        if (isPackProduct(product)) acc.pack += 1;
-        else acc.resell_product += 1;
-        return acc;
-      },
-      { all: 0, resell_product: 0, pack: 0 },
-    );
-  }, [data]);
 
   if (loading) {
     return (
@@ -556,10 +562,13 @@ export default function PublicVitrinePage() {
                 key={String(value)}
                 type="button"
                 onClick={() => setTypeFilter(value as ProductTypeFilter)}
+                disabled={value !== 'all' && Number(count) === 0}
                 className={`min-w-24 px-3 py-3 text-xs font-black uppercase transition md:min-w-32 ${
                   typeFilter === value
                     ? 'bg-black text-white'
-                    : 'bg-white text-neutral-700 hover:bg-neutral-100'
+                    : Number(count) === 0 && value !== 'all'
+                      ? 'cursor-not-allowed bg-neutral-50 text-neutral-300'
+                      : 'bg-white text-neutral-700 hover:bg-neutral-100'
                 }`}
               >
                 {label}
