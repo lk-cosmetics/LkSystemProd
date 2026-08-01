@@ -124,6 +124,8 @@ class PublicVitrineEndpointTests(TestCase):
         self.assertEqual(normal_product['available_quantity'], 6)
         self.assertEqual(normal_product['effective_price'], '40.000')
         self.assertEqual(normal_product['promotion']['discount_value'], '20.00')
+        self.assertIn('created_at', normal_product)
+        self.assertIn('updated_at', normal_product)
 
         pack = products[self.pack.id]
         self.assertEqual(pack['product_type'], Product.ProductType.PACK)

@@ -28,6 +28,9 @@ type ProductTypeFilter = 'all' | 'resell_product' | 'pack';
 type CategoryFilter = 'all' | 'uncategorized' | string;
 
 const MARKETING_SITE_URL = 'https://therapybylk.com/';
+const RECENT_CATEGORY_MIN_PRODUCTS = 8;
+const RECENT_CATEGORY_MAX_PRODUCTS = 24;
+const RECENT_CATEGORY_RATIO = 0.35;
 
 function formatTND(value: string | number | null | undefined) {
   const amount = Number(value ?? 0);
@@ -47,6 +50,94 @@ function productMatchesCategory(product: PublicVitrineProduct, category: Categor
   if (category === 'all') return true;
   if (category === 'uncategorized') return product.category_ids.length === 0;
   return product.category_ids.includes(Number(category));
+}
+
+function productCreatedTime(product: PublicVitrineProduct) {
+  const parsed = Date.parse(product.created_at || product.updated_at || '');
+  if (Number.isFinite(parsed)) return parsed;
+  return Number(product.id) || 0;
+}
+
+function compareProductsByVitrinePriority(
+  a: PublicVitrineProduct,
+  b: PublicVitrineProduct,
+) {
+  const createdDiff = productCreatedTime(b) - productCreatedTime(a);
+  if (createdDiff !== 0) return createdDiff;
+
+  if (a.is_out_of_stock !== b.is_out_of_stock) return a.is_out_of_stock ? 1 : -1;
+  const aPromo = Boolean(a.promotion);
+  const bPromo = Boolean(b.promotion);
+  if (aPromo !== bPromo) return aPromo ? -1 : 1;
+  return a.name.localeCompare(b.name);
+}
+
+function categoryKeyForProduct(
+  product: PublicVitrineProduct,
+  categoryOrder: Map<number, number>,
+) {
+  const firstCategoryId = product.category_ids
+    .filter(categoryId => categoryOrder.has(categoryId))
+    .sort(
+      (a, b) =>
+        (categoryOrder.get(a) ?? Number.MAX_SAFE_INTEGER) -
+        (categoryOrder.get(b) ?? Number.MAX_SAFE_INTEGER),
+    )[0];
+
+  return firstCategoryId == null ? 'uncategorized' : String(firstCategoryId);
+}
+
+function buildCategoryRecencyStats(
+  products: PublicVitrineProduct[],
+  categoryOrder: Map<number, number>,
+) {
+  const recentLimit = Math.min(
+    Math.max(Math.ceil(products.length * RECENT_CATEGORY_RATIO), RECENT_CATEGORY_MIN_PRODUCTS),
+    RECENT_CATEGORY_MAX_PRODUCTS,
+    products.length,
+  );
+  const recentProductIds = new Set(
+    [...products]
+      .sort(compareProductsByVitrinePriority)
+      .slice(0, recentLimit)
+      .map(product => product.id),
+  );
+  const stats = new Map<
+    string,
+    {
+      productCount: number;
+      recentCount: number;
+      newestTime: number;
+    }
+  >();
+
+  products.forEach(product => {
+    const key = categoryKeyForProduct(product, categoryOrder);
+    const stat = stats.get(key) ?? { productCount: 0, recentCount: 0, newestTime: 0 };
+    stat.productCount += 1;
+    if (recentProductIds.has(product.id)) stat.recentCount += 1;
+    stat.newestTime = Math.max(stat.newestTime, productCreatedTime(product));
+    stats.set(key, stat);
+  });
+
+  return stats;
+}
+
+function compareCategoriesByNewProducts(
+  a: { id: string; name: string; order: number },
+  b: { id: string; name: string; order: number },
+  stats: Map<string, { productCount: number; recentCount: number; newestTime: number }>,
+) {
+  const aStats = stats.get(a.id) ?? { productCount: 0, recentCount: 0, newestTime: 0 };
+  const bStats = stats.get(b.id) ?? { productCount: 0, recentCount: 0, newestTime: 0 };
+
+  return (
+    bStats.recentCount - aStats.recentCount ||
+    bStats.newestTime - aStats.newestTime ||
+    bStats.productCount - aStats.productCount ||
+    a.order - b.order ||
+    a.name.localeCompare(b.name)
+  );
 }
 
 function promotionLabel(product: PublicVitrineProduct) {
@@ -161,6 +252,26 @@ function ProductTile({
         </p>
       </div>
     </button>
+  );
+}
+
+function ProductGrid({
+  products,
+  salesChannelId,
+}: {
+  products: PublicVitrineProduct[];
+  salesChannelId: string;
+}) {
+  return (
+    <div className="grid auto-rows-fr grid-cols-1 items-stretch gap-x-5 gap-y-10 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 [&>*]:min-w-0">
+      {products.map(product => (
+        <ProductTile
+          key={product.id}
+          product={product}
+          salesChannelId={salesChannelId}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -328,7 +439,7 @@ function ProductDetailOverlay({
                 </Badge>
               ) : (
                 <Badge variant="outline" className="rounded-none">
-                  Stock {product.available_quantity}
+                  Disponible
                 </Badge>
               )}
               {isPack && (
@@ -495,15 +606,44 @@ export default function PublicVitrinePage() {
 
   const categoryTabs = useMemo(() => {
     if (!data) return [];
-    const uncategorizedCount = data.products.filter(product => product.category_ids.length === 0).length;
+    const categoryOrder = new Map(
+      data.categories.map((category, index) => [category.id, index]),
+    );
+    const stats = buildCategoryRecencyStats(data.products, categoryOrder);
+    const uncategorizedCount = stats.get('uncategorized')?.productCount ?? 0;
+    const categoryCandidates = data.categories
+      .map((category, index) => ({
+        ...category,
+        id: category.id,
+        product_count: stats.get(String(category.id))?.productCount ?? category.product_count,
+        order: index,
+      }))
+      .filter(category => category.product_count > 0);
+
+    const sortedCategories: Array<
+      PublicVitrineCategory & { order: number }
+      | { id: CategoryFilter; name: string; product_count: number; order: number }
+    > = [...categoryCandidates];
+
     const tabs: Array<PublicVitrineCategory | { id: CategoryFilter; name: string; product_count: number }> = [
       { id: 'all', name: 'Tous', product_count: data.products.length },
-      ...data.categories,
     ];
     if (uncategorizedCount > 0) {
-      tabs.push({ id: 'uncategorized', name: 'Autres', product_count: uncategorizedCount });
+      sortedCategories.push({
+        id: 'uncategorized',
+        name: 'Autres',
+        product_count: uncategorizedCount,
+        order: data.categories.length + 1,
+      });
     }
-    return tabs;
+    sortedCategories.sort((a, b) =>
+      compareCategoriesByNewProducts(
+        { id: String(a.id), name: a.name, order: a.order },
+        { id: String(b.id), name: b.name, order: b.order },
+        stats,
+      ),
+    );
+    return [...tabs, ...sortedCategories];
   }, [data]);
 
   const categoryProducts = useMemo(() => {
@@ -548,14 +688,60 @@ export default function PublicVitrinePage() {
         ].join(' ').toLowerCase();
         return haystack.includes(query);
       })
-      .sort((a, b) => {
-        if (a.is_out_of_stock !== b.is_out_of_stock) return a.is_out_of_stock ? 1 : -1;
-        const aPromo = Boolean(a.promotion);
-        const bPromo = Boolean(b.promotion);
-        if (aPromo !== bPromo) return aPromo ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      });
+      .sort(compareProductsByVitrinePriority);
   }, [categoryProducts, search, typeFilter]);
+
+  const groupedProducts = useMemo(() => {
+    if (!data || activeCategory !== 'all') return [];
+
+    const categoryOrder = new Map(
+      data.categories.map((category, index) => [category.id, index]),
+    );
+    const groups = new Map<
+      string,
+      {
+        id: string;
+        name: string;
+        order: number;
+        products: PublicVitrineProduct[];
+      }
+    >();
+
+    data.categories.forEach((category, index) => {
+      groups.set(String(category.id), {
+        id: String(category.id),
+        name: category.name,
+        order: index,
+        products: [],
+      });
+    });
+
+    const ensureUncategorized = () => {
+      const key = 'uncategorized';
+      if (!groups.has(key)) {
+        groups.set(key, {
+          id: key,
+          name: 'Autres',
+          order: data.categories.length + 1,
+          products: [],
+        });
+      }
+      return groups.get(key)!;
+    };
+
+    filteredProducts.forEach(product => {
+      const categoryKey = categoryKeyForProduct(product, categoryOrder);
+      const group = categoryKey === 'uncategorized'
+        ? ensureUncategorized()
+        : groups.get(categoryKey) ?? ensureUncategorized();
+      group.products.push(product);
+    });
+
+    const stats = buildCategoryRecencyStats(filteredProducts, categoryOrder);
+    return Array.from(groups.values())
+      .filter(group => group.products.length > 0)
+      .sort((a, b) => compareCategoriesByNewProducts(a, b, stats));
+  }, [activeCategory, data, filteredProducts]);
 
   const selectedProduct = useMemo(() => {
     if (!data || !productId) return null;
@@ -721,16 +907,29 @@ export default function PublicVitrinePage() {
               <p className="mt-1 text-sm text-neutral-500">Essayez une autre catégorie ou recherche.</p>
             </div>
           </div>
-        ) : (
-          <div className="grid auto-rows-fr grid-cols-1 items-stretch gap-x-5 gap-y-10 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 [&>*]:min-w-0">
-            {filteredProducts.map(product => (
-              <ProductTile
-                key={product.id}
-                product={product}
-                salesChannelId={salesChannelId}
-              />
+        ) : activeCategory === 'all' ? (
+          <div className="space-y-14">
+            {groupedProducts.map(group => (
+              <section key={group.id} className="scroll-mt-40">
+                <div className="mb-5 flex flex-col gap-2 border-b border-neutral-200 pb-3 sm:flex-row sm:items-end sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="text-xs font-black uppercase tracking-normal text-neutral-500">
+                      {data.sales_channel.name}
+                    </p>
+                    <h2 className="vitrine-display truncate text-3xl font-black uppercase leading-none tracking-normal text-neutral-950 md:text-5xl">
+                      {group.name}
+                    </h2>
+                  </div>
+                  <span className="w-fit bg-neutral-100 px-3 py-1 text-xs font-black uppercase text-neutral-700">
+                    {group.products.length} produit{group.products.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+                <ProductGrid products={group.products} salesChannelId={salesChannelId} />
+              </section>
             ))}
           </div>
+        ) : (
+          <ProductGrid products={filteredProducts} salesChannelId={salesChannelId} />
         )}
       </section>
 

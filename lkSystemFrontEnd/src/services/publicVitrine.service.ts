@@ -40,6 +40,8 @@ export interface PublicVitrineProduct {
   pack_components: PublicVitrinePackComponent[];
   pack_components_total: string;
   pack_savings: string;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface PublicVitrineCategory {

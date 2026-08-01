@@ -612,6 +612,8 @@ class ProductViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 'pack_components': components,
                 'pack_components_total': money(components_total),
                 'pack_savings': money(pack_savings),
+                'created_at': product.created_at.isoformat() if product.created_at else None,
+                'updated_at': product.updated_at.isoformat() if product.updated_at else None,
             })
 
         brand_logo = ''
