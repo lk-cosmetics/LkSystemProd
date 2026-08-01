@@ -971,6 +971,7 @@ export default function InventoryPage() {
   const [bulkChannel, setBulkChannel] = useState('');
   const [bulkRows, setBulkRows] = useState<BulkRow[]>([]);
   const [bulkSearch, setBulkSearch] = useState('');
+  const [bulkAllQuantity, setBulkAllQuantity] = useState('');
   const [bulkSaving, setBulkSaving] = useState(false);
   const [selectedInvIds, setSelectedInvIds] = useState<Set<number>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
@@ -1437,6 +1438,28 @@ export default function InventoryPage() {
     () => new Set(inventories.map(i => i.product)).size,
     [inventories]
   );
+  const activeChannels = useMemo(
+    () => channels.filter(channel => channel.is_active),
+    [channels],
+  );
+  const preferredSalesChannelId = useMemo(() => {
+    const selected = Number(channelFilter);
+    if (
+      channelFilter !== 'all' &&
+      Number.isFinite(selected) &&
+      activeChannels.some(channel => channel.id === selected)
+    ) {
+      return String(selected);
+    }
+    return activeChannels.length === 1 ? String(activeChannels[0].id) : '';
+  }, [activeChannels, channelFilter]);
+  const resellProducts = useMemo(
+    () =>
+      products
+        .filter(product => product.product_type === 'resell_product' && !product.is_deleted)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [products],
+  );
   const totalQty = useMemo(
     () => inventories.reduce((s, i) => s + i.quantity, 0),
     [inventories]
@@ -1517,9 +1540,10 @@ export default function InventoryPage() {
 
   // ── Bulk add/update + multi-select delete ────────────────────────────────
   const openBulkDialog = () => {
-    setBulkChannel('');
+    setBulkChannel(preferredSalesChannelId);
     setBulkRows([]);
     setBulkSearch('');
+    setBulkAllQuantity('');
     setBulkDialog(true);
   };
   const addBulkProduct = (p: ProductListItem) => {
@@ -1546,6 +1570,39 @@ export default function InventoryPage() {
     setBulkRows(rows => rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   const removeBulkRow = (i: number) =>
     setBulkRows(rows => rows.filter((_, idx) => idx !== i));
+  const applyBulkAllResellProducts = () => {
+    const quantity = Number(bulkAllQuantity);
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      toast.error('Enter a positive quantity for all resale products.');
+      return;
+    }
+    if (resellProducts.length === 0) {
+      toast.error('No resale products are available in this workspace.');
+      return;
+    }
+
+    const resellIds = new Set(resellProducts.map(product => product.id));
+    setBulkRows(rows => {
+      const existingByProduct = new Map(rows.map(row => [row.product, row]));
+      const resellRows = resellProducts.map(product => {
+        const existing = existingByProduct.get(product.id);
+        return {
+          product: product.id,
+          product_name: product.name,
+          product_barcode: product.barcode,
+          product_image: product.image || product.image_url || null,
+          minimum_quantity: existing?.minimum_quantity ?? '',
+          maximum_quantity: existing?.maximum_quantity ?? '',
+          bin_location: existing?.bin_location ?? '',
+          mode: 'add' as const,
+          quantity: String(quantity),
+        };
+      });
+      const manualRows = rows.filter(row => !resellIds.has(row.product));
+      return [...resellRows, ...manualRows];
+    });
+    toast.success(`Prepared ${resellProducts.length} resale product row(s).`);
+  };
   const bulkSearchResults = useMemo(() => {
     const q = bulkSearch.trim().toLowerCase();
     if (!q) return [] as ProductListItem[];
@@ -1649,7 +1706,7 @@ export default function InventoryPage() {
 
   const openAddDialog = () => {
     setAddForm({
-      sales_channel: '',
+      sales_channel: preferredSalesChannelId,
       product: '',
       quantity: '',
       minimum_quantity: '0',
@@ -3341,7 +3398,7 @@ export default function InventoryPage() {
                     <SelectValue placeholder="Select a channel…" />
                   </SelectTrigger>
                   <SelectContent>
-                    {channels.map(ch => (
+                    {activeChannels.map(ch => (
                       <SelectItem key={ch.id} value={String(ch.id)}>
                         {ch.name}
                       </SelectItem>
@@ -3366,6 +3423,48 @@ export default function InventoryPage() {
                     }}
                     autoFocus
                   />
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-md border bg-muted/30 p-3">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                <div className="min-w-0 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold">Fast add for resale products</p>
+                    <Badge variant="secondary">{resellProducts.length} products</Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Adds the same received quantity to every resale product in this workspace. Packs, components, and packaging items are ignored.
+                  </p>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-[minmax(9rem,12rem)_auto]">
+                  <div className="space-y-1">
+                    <Label className="text-[11px] text-muted-foreground">Qty to add to each</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      className="h-9"
+                      placeholder="e.g. 10"
+                      value={bulkAllQuantity}
+                      onChange={e => setBulkAllQuantity(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          applyBulkAllResellProducts();
+                        }
+                      }}
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    className="self-end"
+                    onClick={applyBulkAllResellProducts}
+                    disabled={resellProducts.length === 0}
+                  >
+                    <PackagePlus className="h-4 w-4 mr-1.5" />
+                    All add
+                  </Button>
                 </div>
               </div>
             </div>
@@ -3550,13 +3649,11 @@ export default function InventoryPage() {
                   <SelectValue placeholder="Select channel" />
                 </SelectTrigger>
                 <SelectContent>
-                  {channels
-                    .filter(c => c.is_active)
-                    .map(ch => (
-                      <SelectItem key={ch.id} value={String(ch.id)}>
-                        {ch.name}
-                      </SelectItem>
-                    ))}
+                  {activeChannels.map(ch => (
+                    <SelectItem key={ch.id} value={String(ch.id)}>
+                      {ch.name}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
