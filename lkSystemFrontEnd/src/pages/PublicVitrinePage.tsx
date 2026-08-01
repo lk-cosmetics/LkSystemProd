@@ -347,12 +347,6 @@ function ProductDetailOverlay({
               <p className="text-xs font-bold uppercase text-neutral-500">Point de vente</p>
               <p className="mt-1 font-bold">{data.sales_channel.name}</p>
             </div>
-            <div>
-              <p className="text-xs font-bold uppercase text-neutral-500">Disponibilité</p>
-              <p className="mt-1 font-bold">
-                {product.is_out_of_stock ? 'Non disponible' : `${product.available_quantity} disponible(s)`}
-              </p>
-            </div>
           </div>
         </section>
       </main>
