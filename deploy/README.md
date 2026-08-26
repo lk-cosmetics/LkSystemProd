@@ -7,7 +7,8 @@ This directory contains the only scripts the VPS needs:
 | File | Purpose |
 | --- | --- |
 | `lksystem.env.example` | Template for `lksystem.env` (real secrets, **never** committed). |
-| `install-ssl-certificate.sh` | First-time `certbot` issuance + renewal hook. |
+| `install-ssl-certificate.sh` | TLS bootstrap **and** renewal wiring (idempotent - safe to re-run). |
+| `letsencrypt-deploy-hook.sh` | Installed as a certbot deploy hook; reloads nginx after each renewal. |
 | `deploy-production.sh` | Rebuild + restart the prod stack idempotently. |
 
 The CI/CD pipeline lives one level up under [`.github/workflows/`](../.github/workflows).
@@ -54,21 +55,56 @@ cd /opt/lksystem
 cp deploy/lksystem.env.example deploy/lksystem.env
 nano deploy/lksystem.env            # fill SECRET_KEY, DB password, email creds, etc.
 
-# 2. Issue the TLS certificate (stops the frontend container automatically
-#    so certbot can bind port 80; reinstalls a renewal hook).
+# 2. Build and start the stack. With no certificate yet, nginx boots with a
+#    temporary self-signed one so port 80 is up and can answer the ACME
+#    challenge (browsers warn until step 3 completes).
+./deploy/deploy-production.sh
+
+# 3. Issue the real certificate and wire up automatic renewal. No downtime:
+#    certbot uses --webroot and the running nginx serves the challenge.
+#    Re-run this at any time to repair the renewal wiring.
 sudo LETSENCRYPT_EMAIL=admin@therapybylk.com DOMAIN=lksystem.therapybylk.com \
   ./deploy/install-ssl-certificate.sh
-
-# 3. Build and start the stack.
-./deploy/deploy-production.sh
 
 # 4. (Optional) bootstrap the first super-admin if you set
 #    AUTO_CREATE_DEFAULT_ADMIN=true in the env; flip it back to ``false``
 #    once the account exists.
 ```
 
-The frontend container mounts `/etc/letsencrypt` read-only, so a `certbot`
-renewal followed by a frontend restart is enough — no rebuild needed.
+### How TLS renewal works
+
+```
+certbot.timer (systemd, twice daily)
+        |
+        v
+certbot renew                    <- webroot authenticator, binds no port
+        |  writes /var/www/certbot/.well-known/acme-challenge/<token>,
+        |  which the ALREADY-RUNNING nginx serves over :80  -> zero downtime
+        v
+/etc/letsencrypt/renewal-hooks/deploy/lksystem-reload.sh
+        |  (runs only when a certificate was actually renewed)
+        v
+docker exec lksystem_prod_frontend nginx -s reload   <- graceful, no dropped
+                                                        connections
+```
+
+Key points:
+
+* **`--webroot`, never `--standalone`.** Port 80 belongs to the frontend
+  container permanently, so a `--standalone` renewal can never bind it. What
+  certbot actually obeys is the authenticator stored in
+  `/etc/letsencrypt/renewal/<domain>.conf` - `install-ssl-certificate.sh`
+  rewrites it to webroot, which is what repairs an existing standalone lineage.
+* **nginx must be reloaded.** Certificates are read into memory at config load,
+  so a renewed file on disk changes nothing until `nginx -s reload`. A plain
+  `docker compose up -d frontend` is a *no-op* for an unchanged service - which
+  is exactly how an expired certificate reaches users. The hook reloads, and
+  only falls back to `--force-recreate` if the reload is impossible.
+* **The frontend mounts `/etc/letsencrypt` read-only**, so renewal needs no
+  rebuild - the reload picks the new file straight off the host.
+* Everything is logged to `/var/log/lksystem/ssl-renewal.log` (rotated
+  monthly), and `install-ssl-certificate.sh` ends with a
+  `certbot renew --dry-run` so a broken setup fails loudly at install time.
 
 ---
 
@@ -169,7 +205,11 @@ Docker volumes (managed by Docker, persisted across rebuilds):
 TLS:
   /etc/letsencrypt/live/lksystem.therapybylk.com/fullchain.pem
   /etc/letsencrypt/live/lksystem.therapybylk.com/privkey.pem
-  /etc/letsencrypt/renewal-hooks/deploy/lksystem-reload.sh   # auto-restarts frontend on renewal
+  /etc/letsencrypt/renewal/lksystem.therapybylk.com.conf     # authenticator = webroot
+  /etc/letsencrypt/renewal-hooks/deploy/lksystem-reload.sh   # reloads nginx on renewal
+  /var/www/certbot/                                          # ACME challenge webroot
+  /etc/default/lksystem-ssl                                  # non-secret paths for the hook
+  /var/log/lksystem/{deploy,ssl-install,ssl-renewal}.log     # rotated monthly
 ```
 
 Backing up the VPS = dumping `postgres_data` (e.g. `pg_dump`) + tarring `media_volume`.
@@ -188,6 +228,30 @@ docker compose --env-file deploy/lksystem.env -f docker-compose.prod.yml logs -f
 # Force a clean rebuild
 ./deploy/deploy-production.sh
 
-# Renew TLS manually (the cron renewal runs daily already)
-sudo certbot renew --quiet
+# Renew TLS manually (the timer already renews automatically)
+sudo certbot renew
+
+# Prove unattended renewal works, without spending a rate-limit slot
+sudo certbot renew --dry-run
+
+# Expiry date + is the renewal timer alive?
+sudo certbot certificates
+systemctl list-timers | grep certbot
+
+# What did the last renewal actually do?
+sudo tail -n 50 /var/log/lksystem/ssl-renewal.log
+
+# Re-run the whole TLS setup (idempotent; keeps a still-valid certificate)
+sudo LETSENCRYPT_EMAIL=admin@therapybylk.com DOMAIN=lksystem.therapybylk.com \
+  ./deploy/install-ssl-certificate.sh
 ```
+
+### SSL troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `Could not bind TCP port 80` during renewal | The lineage is still on the `standalone` authenticator | Re-run `install-ssl-certificate.sh`; it rewrites the renewal config to `webroot`. |
+| Renewal succeeds but browsers still see the old certificate | nginx was never reloaded | Check `/var/log/lksystem/ssl-renewal.log`; the deploy hook must exist at `/etc/letsencrypt/renewal-hooks/deploy/lksystem-reload.sh`. |
+| The challenge URL returns 301 | `/.well-known/acme-challenge/` is falling through to the HTTPS redirect | The `location ^~ /.well-known/acme-challenge/` block in `lkSystemFrontEnd/nginx.conf` must precede `location /`. |
+| Browser warns about a self-signed certificate | No Let's Encrypt certificate on disk, so nginx booted with the bootstrap cert | `docker compose logs frontend` shows the warning - run `install-ssl-certificate.sh`. |
+| Port 80 is held by something else | A host `nginx`/`apache2` service is running | `sudo systemctl disable --now nginx apache2` - the container owns :80/:443. |
