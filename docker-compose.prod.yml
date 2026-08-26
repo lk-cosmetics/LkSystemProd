@@ -164,10 +164,22 @@ services:
       SSL_CERTIFICATE: /etc/letsencrypt/live/${DOMAIN}/fullchain.pem
       SSL_CERTIFICATE_KEY: /etc/letsencrypt/live/${DOMAIN}/privkey.pem
       ENABLE_SELF_SIGNED_SSL: "false"
+      # Bootstrap escape hatch. When the Let's Encrypt cert is not on disk yet
+      # (very first install) or is temporarily unreadable, nginx falls back to
+      # a throwaway self-signed cert instead of refusing to start. That matters
+      # because a dead nginx also means a dead port 80 -- and without port 80
+      # certbot cannot answer the HTTP-01 challenge, so the stack would be
+      # deadlocked with no way to ever obtain a certificate. The fallback is
+      # logged loudly and replaced by the real cert on the next reload.
+      SSL_BOOTSTRAP_SELF_SIGNED: "true"
       NGINX_ENVSUBST_FILTER: "BACKEND_UPSTREAM|WS_UPSTREAM|PUBLIC_DOMAIN|HTTPS_PORT_SUFFIX|SSL_CERTIFICATE|SSL_CERTIFICATE_KEY"
     volumes:
       - media_volume:/usr/share/nginx/html/media:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
+      # ACME HTTP-01 webroot. certbot (on the host) writes the challenge token
+      # here; nginx serves it from /.well-known/acme-challenge/. Read-only for
+      # nginx -- it only ever needs to read the token back out.
+      - ${ACME_WEBROOT:-/var/www/certbot}:/var/www/certbot:ro
     ports:
       - "80:80"
       - "443:443"
