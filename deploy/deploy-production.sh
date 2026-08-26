@@ -158,9 +158,13 @@ if command -v curl >/dev/null 2>&1; then
     # curl validates the chain by default, so a failure here is either a bad
     # certificate or the app not being reachable from this host.
     log "WARNING: https://$DOMAIN/health returned $https_code (TLS or reachability problem)."
+    # `|| true`: this is a DIAGNOSTIC. Without it, pipefail + set -e propagate
+    # curl's exit code and abort a deploy that otherwise succeeded - which is
+    # also what would happen during the documented bootstrap, where HTTPS is
+    # expected to fail until the certificate is issued.
     curl -sS -o /dev/null --max-time 15 "https://$DOMAIN/health" 2>&1 | while read -r line; do
       log "WARNING: curl: $line"
-    done
+    done || true
   fi
 fi
 
