@@ -19,6 +19,7 @@ import {
 } from '@/components/ui/dialog';
 import { clientService } from '@/services/client.service';
 import { TUNISIA_GOVERNORATES } from '@/constants/tunisia';
+import { SearchSelect } from '@/components/ui/search-select';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import type { Client, SalesChannel } from '@/types';
 
@@ -27,6 +28,17 @@ interface POSAddClientDialogProps {
   onOpenChange: (open: boolean) => void;
   channel: SalesChannel | undefined;
   onClientCreated: (client: Client) => void;
+}
+
+interface POSClientForm {
+  first_name: string;
+  last_name: string;
+  phone: string;
+  email: string;
+  client_type: 'PERSON' | 'COMPANY';
+  matricule_fiscale: string;
+  date_of_birth: string;
+  state: string;
 }
 
 /** Turn an API error into the backend's clear message (not "Request failed with
@@ -40,7 +52,7 @@ function extractClientError(err: unknown): string {
     if (typeof direct === 'string' && direct) return direct;
     for (const value of Object.values(d)) {
       if (typeof value === 'string' && value) return value;
-      if (Array.isArray(value) && typeof value[0] === 'string') return value[0] as string;
+      if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
     }
   }
   return err instanceof Error ? err.message : 'Failed to create client.';
@@ -52,12 +64,12 @@ export function POSAddClientDialog({
   channel,
   onClientCreated,
 }: POSAddClientDialogProps) {
-  const [form, setForm] = useState({
+  const [form, setForm] = useState<POSClientForm>({
     first_name: '',
     last_name: '',
     phone: '',
     email: '',
-    client_type: 'PERSON' as 'PERSON' | 'COMPANY',
+    client_type: 'PERSON',
     matricule_fiscale: '',
     date_of_birth: '',
     state: '',
@@ -125,7 +137,10 @@ export function POSAddClientDialog({
     }
   }, [form, channel, onClientCreated, handleClose]);
 
-  const updateField = (field: keyof typeof form, value: string | 'PERSON' | 'COMPANY') =>
+  const updateField = <Field extends keyof POSClientForm>(
+    field: Field,
+    value: POSClientForm[Field],
+  ) =>
     setForm(prev => ({ ...prev, [field]: value }));
 
   return (
@@ -224,16 +239,18 @@ export function POSAddClientDialog({
           </div>
           <div>
             <Label className="text-xs">Governorate</Label>
-            <Select value={form.state} onValueChange={value => updateField('state', value)}>
-              <SelectTrigger className="h-9 mt-1">
-                <SelectValue placeholder="Select governorate" />
-              </SelectTrigger>
-              <SelectContent>
-                {TUNISIA_GOVERNORATES.map(gov => (
-                  <SelectItem key={gov} value={gov}>{gov}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <div className="mt-1">
+              <SearchSelect
+                value={form.state}
+                onChange={value => updateField('state', value)}
+                options={TUNISIA_GOVERNORATES.map(governorate => ({
+                  label: governorate,
+                  value: governorate,
+                }))}
+                placeholder="Search governorate..."
+                className="h-9"
+              />
+            </div>
           </div>
         </div>
 

@@ -13,6 +13,7 @@ from apps.inventory.models import InventoryMovement, SalesChannelInventory
 from apps.orders.delivery_service import DeliverySubmissionService
 from apps.orders.logging_service import OrderLoggingService
 from apps.orders.models import Order, OrderLog
+from apps.orders.payment_service import POSPaymentError, POSPaymentService
 from apps.products.models import Product
 from apps.sales_channels.models import SalesChannel
 
@@ -533,6 +534,9 @@ class OrderLifecycleService:
         actor=None,
         payment_method: str = '',
         payment_method_title: str = '',
+        cash_amount=None,
+        card_amount=None,
+        amount_received=None,
         customer_note: str = '',
     ) -> Order:
         order = cls._lock(order)
@@ -545,15 +549,22 @@ class OrderLifecycleService:
 
         order.pos_validated_at = timezone.now()
         order.pos_validated_by = actor
-        if payment_method:
-            order.payment_method = payment_method
-        order.payment_status = Order.PaymentStatus.PAID
         if customer_note:
             order.customer_note = customer_note
         order.save(update_fields=[
             'pos_validated_at', 'pos_validated_by',
-            'payment_method', 'payment_status', 'customer_note', 'updated_at',
+            'customer_note', 'updated_at',
         ])
+        try:
+            POSPaymentService.apply(
+                order,
+                payment_method=payment_method or 'cash',
+                cash_amount=cash_amount,
+                card_amount=card_amount,
+                amount_received=amount_received,
+            )
+        except POSPaymentError as exc:
+            raise LifecycleError(str(exc)) from exc
         # Canonical lifecycle FIRST: the stock engine below keys the sale
         # deduction on status == done.
         from apps.orders.status_service import OrderStatusService

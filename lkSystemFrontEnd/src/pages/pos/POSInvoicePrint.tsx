@@ -12,6 +12,8 @@ const paymentLabel = (method: string): string => {
       return 'Espèces';
     case 'card':
       return 'Carte bancaire';
+    case 'split':
+      return 'Espèces + carte';
     case 'bank_transfer':
       return 'Virement';
     default:
@@ -30,6 +32,8 @@ export function POSInvoicePrint({ data }: POSInvoicePrintProps) {
     paymentMethod,
     amountReceived,
     changeAmount,
+    cashAmount,
+    cardAmount,
     discountTotal,
     ticketNumber,
     logoSrc,
@@ -114,7 +118,19 @@ export function POSInvoicePrint({ data }: POSInvoicePrintProps) {
             <span>Méthode</span>
             <strong>{paymentLabel(paymentMethod)}</strong>
           </p>
-          {paymentMethod === 'cash' && amountReceived > 0 && (
+          {paymentMethod === 'split' && (
+            <>
+              <p>
+                <span>Espèces</span>
+                <strong>{fmtTND(Number(cashAmount || 0))} TND</strong>
+              </p>
+              <p>
+                <span>Carte</span>
+                <strong>{fmtTND(Number(cardAmount || 0))} TND</strong>
+              </p>
+            </>
+          )}
+          {(paymentMethod === 'cash' || paymentMethod === 'split') && amountReceived > 0 && (
             <>
               <p>
                 <span>Reçu</span>

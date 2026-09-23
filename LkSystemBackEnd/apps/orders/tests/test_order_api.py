@@ -508,6 +508,102 @@ class OrderAPITests(TestCase):
         inventory.refresh_from_db()
         self.assertEqual(inventory.quantity, 4)
 
+    def test_pos_split_payment_is_persisted_and_returned(self):
+        pos_channel = SalesChannel.objects.create(
+            brand=self.brand,
+            name='Split Payment POS',
+            code='POS-SPLIT',
+            channel_type=SalesChannel.ChannelType.POS,
+        )
+        product = Product.objects.create(
+            brand=self.brand,
+            name='Split Payment Product',
+            barcode='SPLIT-001',
+            product_type=Product.ProductType.RESELL_PRODUCT,
+            sales_price='44.50',
+        )
+        SalesChannelInventory.objects.create(
+            sales_channel=pos_channel,
+            product=product,
+            quantity=5,
+        )
+
+        response = self.client.post(
+            '/api/v1/orders/pos/',
+            {
+                'sales_channel': pos_channel.id,
+                'client_ticket_uuid': 'split-payment-uuid-001',
+                'line_items': [{
+                    'local_product_id': product.id,
+                    'name': product.name,
+                    'quantity': 1,
+                    'price': '44.50',
+                    'total': '44.50',
+                }],
+                'payment_method': 'split',
+                'cash_amount': '14.500',
+                'card_amount': '30.000',
+                'amount_received': '20.000',
+                'status': 'completed',
+                'total': '44.50',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['payment_method'], 'split')
+        self.assertEqual(Decimal(response.data['cash_amount']), Decimal('14.500'))
+        self.assertEqual(Decimal(response.data['card_amount']), Decimal('30.000'))
+        self.assertEqual(Decimal(response.data['amount_received']), Decimal('20.000'))
+        self.assertEqual(Decimal(response.data['change_returned']), Decimal('5.500'))
+        self.assertEqual(Decimal(response.data['total_paid']), Decimal('44.500'))
+
+    def test_invalid_pos_payment_rolls_back_order_and_stock(self):
+        pos_channel = SalesChannel.objects.create(
+            brand=self.brand,
+            name='Payment Rollback POS',
+            code='POS-PAYMENT-ROLLBACK',
+            channel_type=SalesChannel.ChannelType.POS,
+        )
+        product = Product.objects.create(
+            brand=self.brand,
+            name='Rollback Product',
+            barcode='ROLLBACK-001',
+            product_type=Product.ProductType.RESELL_PRODUCT,
+            sales_price='25.00',
+        )
+        inventory = SalesChannelInventory.objects.create(
+            sales_channel=pos_channel,
+            product=product,
+            quantity=5,
+        )
+
+        response = self.client.post(
+            '/api/v1/orders/pos/',
+            {
+                'sales_channel': pos_channel.id,
+                'client_ticket_uuid': 'invalid-payment-uuid-001',
+                'line_items': [{
+                    'local_product_id': product.id,
+                    'name': product.name,
+                    'quantity': 1,
+                    'price': '25.00',
+                    'total': '25.00',
+                }],
+                'payment_method': 'cash',
+                'amount_received': '10.000',
+                'status': 'completed',
+                'total': '25.00',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('lower than the order total', response.data['detail'])
+        self.assertFalse(Order.objects.filter(client_ticket_uuid='invalid-payment-uuid-001').exists())
+        inventory.refresh_from_db()
+        self.assertEqual(inventory.quantity, 5)
+
     def test_pos_ticket_id_is_short_daily_sequence_when_missing(self):
         pos_channel = SalesChannel.objects.create(
             brand=self.brand,

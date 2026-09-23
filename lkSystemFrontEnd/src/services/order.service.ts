@@ -570,6 +570,9 @@ export const orderService = {
   async checkoutPOS(id: number, payload: {
     payment_method?: string;
     payment_method_title?: string;
+    cash_amount?: string;
+    card_amount?: string;
+    amount_received?: string;
     customer_note?: string;
   }) {
     const { data } = await apiClient.post<OrderDetail>(

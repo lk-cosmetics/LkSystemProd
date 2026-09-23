@@ -77,6 +77,7 @@ from .kpi_service import OrderKPIService
 from .delivery_service import DeliveryError
 from .logging_service import OrderLoggingService
 from .assignment_service import OrderAssignmentService, OPEN_STATUSES
+from .payment_service import POSPaymentError, POSPaymentService
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +328,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
     # ── POS / Manual order creation ──────────────────────────────────────
 
     @action(detail=False, methods=['post'], url_path='pos')
+    @transaction.atomic
     def create_pos_order(self, request):
         """
         Method B endpoint.
@@ -370,6 +372,21 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                 {'detail': exc.message, **exc.details},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        try:
+            POSPaymentService.apply(
+                order,
+                payment_method=data.get('payment_method', 'cash'),
+                cash_amount=data.get('cash_amount'),
+                card_amount=data.get('card_amount'),
+                amount_received=data.get('amount_received'),
+            )
+        except POSPaymentError as exc:
+            # Ingestion may already have created lines and stock movements.
+            # Mark the outer transaction for rollback so an invalid tender can
+            # never leave a half-created POS sale behind.
+            transaction.set_rollback(True)
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         now = timezone.now()
         update_fields = []
@@ -1464,6 +1481,9 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                 actor=request.user,
                 payment_method=data.get('payment_method', ''),
                 payment_method_title=data.get('payment_method_title', ''),
+                cash_amount=data.get('cash_amount'),
+                card_amount=data.get('card_amount'),
+                amount_received=data.get('amount_received'),
                 customer_note=data.get('customer_note', ''),
             )
         except LifecycleError as exc:
