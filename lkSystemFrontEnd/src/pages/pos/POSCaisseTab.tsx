@@ -1,34 +1,26 @@
-/**
- * POSCaisseTab — full cash-register (caisse) view for the POS page.
- *
- * Renders:
- *  1. **Caisse statement banner** — the real cash-drawer balance, broken down as
- *     opening float + alimentation + cash sales − expenses − refunds = closing.
- *     Card/transfer sales are shown separately (they don't enter the till).
- *  2. **Alimentation de caisse form** — add cash IN (opening float or top-up).
- *  3. **Dépense form** — record cash OUT.
- *  4. **Today's cash-ins + expenses lists** — each with delete.
- *  5. **History table** — day-by-day sales, funding, expenses and closing balance.
- *
- * Self-contained: only needs the selected channel id from the parent.
- */
-
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowDownToLine, CloudOff, Loader2, Plus, Receipt, RefreshCw, Trash2, Wallet,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Banknote,
+  CalendarDays,
+  CheckCircle2,
+  CloudOff,
+  Eye,
+  History,
+  Loader2,
+  LockKeyhole,
+  Receipt,
+  RefreshCw,
+  Trash2,
+  Wallet,
 } from 'lucide-react';
-import { useOnlineStatus } from '@/hooks/useOnlineStatus';
-import {
-  offlineCaisseService,
-  type PendingCaisseOp,
-} from '@/services/offlineCaisse.service';
-
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { Separator } from '@/components/ui/separator';
+import { Dialog } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import {
   Select,
   SelectContent,
@@ -36,772 +28,1279 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-
+import { Separator } from '@/components/ui/separator';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Textarea } from '@/components/ui/textarea';
 import {
   cashMovementService,
-  EXPENSE_CATEGORY_OPTIONS,
+  cashSessionService,
   DEPOSIT_CATEGORY_OPTIONS,
+  EXPENSE_CATEGORY_OPTIONS,
   type CashMovement,
-  type DepositCategory,
-  type CaisseStats,
+  type CashMovementCategory,
+  type CashSession,
+  type CashSessionSummary,
   type CaisseMovement,
-  type CaisseHistoryRow,
-  type ExpenseCategory,
+  type CurrentCashSession,
 } from '@/services/cashMovement.service';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-
-const fmtTND = (raw: string | number): string => {
-  const n = typeof raw === 'string' ? Number(raw) : raw;
-  if (Number.isNaN(n)) return '0.000';
-  return n.toLocaleString('fr-FR', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-};
-
-// Per-type badge colour for the caisse journal (Historique de caisse).
-const MOVEMENT_BADGE: Record<string, string> = {
-  sale: 'border-emerald-200 text-emerald-700',
-  return: 'border-red-200 text-red-700',
-  expense: 'border-amber-200 text-amber-700',
-  expense_deleted: 'border-red-200 text-red-700',
-  deposit: 'border-blue-200 text-blue-700',
-  deposit_deleted: 'border-red-200 text-red-700',
-};
-
-// A failed request with no HTTP response is a connectivity problem (offline /
-// timeout) → safe to queue the write locally and replay it later. A response
-// (4xx/5xx) means the server rejected it → surface the error instead.
-const isNetworkError = (err: unknown): boolean => {
-  const e = err as { response?: { status?: number }; code?: string };
-  const status = e?.response?.status;
-  if (status && [0, 502, 503, 504].includes(status)) return true;
-  if (typeof navigator !== 'undefined' && !navigator.onLine) return true;
-  return !e?.response || e?.code === 'ERR_NETWORK' || e?.code === 'ECONNABORTED';
-};
-
-// Pull a human message out of a DRF error body without leaning on `any`.
-const extractApiError = (err: unknown, fallback: string): string => {
-  const data = (err as { response?: { data?: unknown } })?.response?.data;
-  if (typeof data === 'string' && data.trim()) return data;
-  if (data && typeof data === 'object') {
-    const detail = (data as { detail?: unknown }).detail;
-    if (typeof detail === 'string' && detail.trim()) return detail;
-    const joined = Object.values(data as Record<string, unknown>)
-      .flat()
-      .filter((v): v is string => typeof v === 'string')
-      .join(' ');
-    if (joined.trim()) return joined;
-  }
-  return fallback;
-};
+import {
+  offlineCaisseService,
+  type PendingCaisseOp,
+} from '@/services/offlineCaisse.service';
+import {
+  POSDialogBody,
+  POSDialogContent,
+  POSDialogFooter,
+  POSDialogHeader,
+  POSPrimaryButton,
+  POSSecondaryButton,
+} from './POSDialog';
+import { roundTND } from './posPayment';
+import { fmtTND } from './types';
 
 interface Props {
   channelId: number | null;
   channelName?: string;
   refreshSignal?: number;
-  onAfterChange?: () => void; // parent may want to refresh other tiles
+  onAfterChange?: () => void;
 }
 
-function StatLine({
-  label, value, sign, tone,
+const ZERO_SUMMARY: CashSessionSummary = {
+  gross_sales: '0.000',
+  revenue: '0.000',
+  revenue_count: 0,
+  cash_sales: '0.000',
+  card_sales: '0.000',
+  cash_refunds: '0.000',
+  card_refunds: '0.000',
+  refunds: '0.000',
+  opening: '0.000',
+  cash_added: '0.000',
+  manual_cash_in: '0.000',
+  manual_cash_out: '0.000',
+  funding_total: '0.000',
+  funding_count: 0,
+  expenses: '0.000',
+  expenses_count: 0,
+  net_balance: '0.000',
+  cash_balance: '0.000',
+  expected_cash_live: '0.000',
+  by_category: [],
+};
+
+const parseAmount = (value: string) => {
+  const parsed = Number(value.replace(',', '.'));
+  return Number.isFinite(parsed) ? roundTND(Math.max(0, parsed)) : 0;
+};
+
+const extractApiError = (error: unknown, fallback: string) => {
+  const data = (error as { response?: { data?: unknown } } | null)?.response
+    ?.data;
+  if (typeof data === 'string' && data) return data;
+  if (data && typeof data === 'object') {
+    const record = data as Record<string, unknown>;
+    const direct = record.detail ?? record.message ?? record.error;
+    if (typeof direct === 'string') return direct;
+    for (const value of Object.values(record)) {
+      if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
+      if (typeof value === 'string') return value;
+    }
+  }
+  return error instanceof Error ? error.message : fallback;
+};
+
+const isNetworkError = (error: unknown) =>
+  !(error as { response?: unknown } | null)?.response;
+
+const formatDate = (date: string) =>
+  new Date(`${date}T12:00:00`).toLocaleDateString('fr-FR', {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+  });
+
+function Metric({
+  label,
+  value,
+  hint,
+  tone = 'default',
 }: {
   label: string;
   value: string | number;
-  sign: '+' | '−';
-  tone?: 'in' | 'out';
+  hint?: string;
+  tone?: 'default' | 'positive' | 'negative';
 }) {
-  const color = tone === 'in' ? 'text-emerald-700' : tone === 'out' ? 'text-red-700' : '';
   return (
-    <div className="flex items-center justify-between gap-3">
-      <span className="text-muted-foreground">{label}</span>
-      <span className={`tabular-nums ${color}`}>{sign} {fmtTND(value)}</span>
+    <div className="min-w-0 border-l-2 pl-3">
+      <p className="text-xs font-medium text-muted-foreground">{label}</p>
+      <p
+        className={`mt-1 truncate text-xl font-bold tabular-nums ${tone === 'positive' ? 'text-emerald-700' : tone === 'negative' ? 'text-destructive' : ''}`}
+      >
+        {value}
+      </p>
+      {hint ? (
+        <p className="mt-1 text-xs text-muted-foreground">{hint}</p>
+      ) : null}
     </div>
   );
 }
 
-export function CaisseStatsBanner({ stats, loading }: { stats: CaisseStats | null; loading: boolean }) {
-  if (loading && !stats) {
-    return (
-      <div className="rounded-md border bg-card/80 p-3 flex items-center gap-2 text-sm text-muted-foreground">
-        <Loader2 className="size-4 animate-spin" /> Chargement de la caisse…
-      </div>
-    );
-  }
-  if (!stats) return null;
-  const balance = Number(stats.cash_balance);
-  const balColor = balance >= 0 ? 'text-emerald-700' : 'text-red-700';
-  const otherExpenses = Number(stats.expenses) - Number(stats.refunds);
-  const cardSales = Number(stats.card_sales);
-
+function SessionSummary({ summary }: { summary: CashSessionSummary }) {
   return (
-    <Card className="p-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Solde caisse (espèces)</p>
-          <p className={`text-2xl font-bold leading-tight tabular-nums break-all sm:text-3xl ${balColor}`}>
-            {fmtTND(stats.cash_balance)} <span className="text-sm font-normal text-muted-foreground">TND</span>
-          </p>
-        </div>
-        <Wallet className={`size-7 shrink-0 sm:size-8 ${balColor}`} />
-      </div>
-
-      <Separator className="my-3" />
-
-      <div className="grid gap-x-8 gap-y-1.5 text-sm sm:grid-cols-2">
-        <StatLine label="Fond de caisse (ouverture)" value={stats.opening} sign="+" tone="in" />
-        <StatLine label="Alimentation (ajouts)" value={stats.cash_added} sign="+" tone="in" />
-        <StatLine label={`Ventes espèces (${stats.revenue_count})`} value={stats.cash_sales} sign="+" tone="in" />
-        <StatLine label="Dépenses" value={otherExpenses} sign="−" tone="out" />
-        <StatLine label="Remboursements" value={stats.refunds} sign="−" tone="out" />
-      </div>
-
-      {cardSales > 0 && (
-        <p className="mt-3 text-xs text-muted-foreground">
-          + {fmtTND(stats.card_sales)} TND encaissés par carte / virement — hors caisse espèces.
-        </p>
-      )}
-    </Card>
+    <div className="grid gap-x-5 gap-y-5 sm:grid-cols-2 xl:grid-cols-4">
+      <Metric label="Fond de caisse" value={`${fmtTND(summary.opening)} TND`} />
+      <Metric
+        label="Ventes espèces"
+        value={`${fmtTND(summary.cash_sales)} TND`}
+        tone="positive"
+      />
+      <Metric
+        label="Ventes carte"
+        value={`${fmtTND(summary.card_sales)} TND`}
+      />
+      <Metric
+        label="Remboursements"
+        value={`-${fmtTND(summary.refunds)} TND`}
+        tone={Number(summary.refunds) > 0 ? 'negative' : 'default'}
+      />
+      <Metric
+        label="Entrées manuelles"
+        value={`+${fmtTND(summary.manual_cash_in)} TND`}
+      />
+      <Metric
+        label="Sorties manuelles"
+        value={`-${fmtTND(summary.manual_cash_out)} TND`}
+      />
+      <Metric
+        label="Caisse théorique"
+        value={`${fmtTND(summary.cash_balance)} TND`}
+        hint="Espèces attendues dans le tiroir"
+      />
+      <Metric
+        label="Chiffre d’affaires net"
+        value={`${fmtTND(summary.revenue)} TND`}
+        hint={`${summary.revenue_count} transaction(s)`}
+      />
+    </div>
   );
 }
 
-export default function POSCaisseTab({ channelId, channelName, refreshSignal = 0, onAfterChange }: Props) {
-  const [stats, setStats] = useState<CaisseStats | null>(null);
-  const [statsLoading, setStatsLoading] = useState(false);
-  const [journal, setJournal] = useState<CaisseMovement[]>([]);
-  const [dailyHistory, setDailyHistory] = useState<CaisseHistoryRow[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [expenses, setExpenses] = useState<CashMovement[]>([]);
-  const [deposits, setDeposits] = useState<CashMovement[]>([]);
-  const [listLoading, setListLoading] = useState(false);
-
-  // Dépense (cash-out) form
+function MovementForm({
+  type,
+  onSubmit,
+  disabled,
+  submitting,
+}: {
+  type: 'deposit' | 'expense';
+  onSubmit: (payload: {
+    amount: number;
+    category: CashMovementCategory;
+    note: string;
+  }) => Promise<void>;
+  disabled: boolean;
+  submitting: boolean;
+}) {
   const [amount, setAmount] = useState('');
-  const [category, setCategory] = useState<ExpenseCategory>('OTHER');
   const [note, setNote] = useState('');
-  const [submitting, setSubmitting] = useState(false);
+  const [category, setCategory] = useState<CashMovementCategory>(
+    type === 'deposit' ? 'TOP_UP' : 'SUPPLIES'
+  );
+  const options =
+    type === 'deposit'
+      ? DEPOSIT_CATEGORY_OPTIONS.filter(option => option.value !== 'OPENING')
+      : EXPENSE_CATEGORY_OPTIONS;
 
-  // Alimentation (cash-in) form
-  const [depAmount, setDepAmount] = useState('');
-  const [depKind, setDepKind] = useState<DepositCategory>('TOP_UP');
-  const [depNote, setDepNote] = useState('');
-  const [depSubmitting, setDepSubmitting] = useState(false);
+  const submit = async () => {
+    const numeric = parseAmount(amount);
+    if (numeric <= 0) return;
+    await onSubmit({ amount: numeric, category, note: note.trim() });
+    setAmount('');
+    setNote('');
+  };
 
-  const [error, setError] = useState<string | null>(null);
-  const [okMessage, setOkMessage] = useState<string | null>(null);
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
+          <Label>
+            {type === 'deposit' ? 'Montant ajouté' : 'Montant retiré'}
+          </Label>
+          <div className="relative">
+            <Input
+              value={amount}
+              onChange={event => setAmount(event.target.value)}
+              inputMode="decimal"
+              placeholder="0.000"
+              className="h-11 pr-12 tabular-nums"
+              disabled={disabled}
+            />
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground">
+              TND
+            </span>
+          </div>
+        </div>
+        <div className="space-y-2">
+          <Label>Motif</Label>
+          <Select
+            value={category}
+            onValueChange={value => setCategory(value as CashMovementCategory)}
+            disabled={disabled}
+          >
+            <SelectTrigger className="h-11">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {options.map(option => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <div className="space-y-2">
+        <Label>
+          Note{' '}
+          <span className="font-normal text-muted-foreground">
+            (optionnelle)
+          </span>
+        </Label>
+        <Input
+          value={note}
+          onChange={event => setNote(event.target.value)}
+          placeholder="Justification de l’opération"
+          className="h-11"
+          disabled={disabled}
+        />
+      </div>
+      <Button
+        type="button"
+        className="h-11 w-full"
+        variant={type === 'deposit' ? 'default' : 'outline'}
+        onClick={() => void submit()}
+        disabled={disabled || submitting || parseAmount(amount) <= 0}
+      >
+        {submitting ? (
+          <Loader2 className="size-4 animate-spin" />
+        ) : type === 'deposit' ? (
+          <ArrowDownToLine className="size-4" />
+        ) : (
+          <ArrowUpFromLine className="size-4" />
+        )}
+        {type === 'deposit' ? 'Ajouter les espèces' : 'Enregistrer la sortie'}
+      </Button>
+    </div>
+  );
+}
 
-  // ── Offline (queued) cash operations ─────────────────────────────────────
-  const online = useOnlineStatus();
+export default function POSCaisseTab({
+  channelId,
+  channelName,
+  refreshSignal = 0,
+  onAfterChange,
+}: Props) {
+  const [current, setCurrent] = useState<CurrentCashSession | null>(null);
+  const [history, setHistory] = useState<CashSession[]>([]);
+  const [journal, setJournal] = useState<CaisseMovement[]>([]);
+  const [manualMovements, setManualMovements] = useState<CashMovement[]>([]);
   const [pending, setPending] = useState<PendingCaisseOp[]>([]);
-  const [syncing, setSyncing] = useState(false);
-  // Guards against a second sync starting before the first finishes (which
-  // could double-POST a queued op) — refs don't trigger re-renders.
+  const [loading, setLoading] = useState(false);
+  const [movementSubmitting, setMovementSubmitting] = useState(false);
+  const [openingAmount, setOpeningAmount] = useState('');
+  const [opening, setOpening] = useState(false);
+  const [closeOpen, setCloseOpen] = useState(false);
+  const [closingAmount, setClosingAmount] = useState('');
+  const [closingNote, setClosingNote] = useState('');
+  const [closing, setClosing] = useState(false);
+  const [selectedHistory, setSelectedHistory] = useState<CashSession | null>(
+    null
+  );
+  const [selectedHistoryJournal, setSelectedHistoryJournal] = useState<
+    CaisseMovement[]
+  >([]);
+  const [historyDetailLoading, setHistoryDetailLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [online, setOnline] = useState(() => navigator.onLine);
   const syncingRef = useRef(false);
 
-  const pendingDeposits = useMemo(() => pending.filter(p => p.kind === 'deposit'), [pending]);
-  const pendingExpenses = useMemo(() => pending.filter(p => p.kind === 'expense'), [pending]);
-  // Net effect of not-yet-synced ops on the cash drawer (deposits in, expenses out).
-  const pendingNet = useMemo(
-    () =>
-      pendingDeposits.reduce((s, p) => s + p.amount, 0) -
-      pendingExpenses.reduce((s, p) => s + p.amount, 0),
-    [pendingDeposits, pendingExpenses],
-  );
-  const estimatedBalance = useMemo(
-    () => (stats ? Number(stats.cash_balance) + pendingNet : pendingNet),
-    [stats, pendingNet],
-  );
-
-  const todayISO = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const session = current?.session ?? null;
+  const summary = current?.summary ?? ZERO_SUMMARY;
+  const isClosed = session?.status === 'CLOSED';
+  const canOperate = Boolean(session && session.status === 'OPEN');
 
   const refresh = useCallback(async () => {
-    if (!channelId) {
-      setStats(null);
-      setJournal([]);
-      setDailyHistory([]);
-      setExpenses([]);
-      setDeposits([]);
-      setPending([]);
-      return;
-    }
-    setStatsLoading(true);
-    setListLoading(true);
-    setHistoryLoading(true);
+    if (!channelId) return;
+    setLoading(true);
+    setError('');
     try {
-      const [s, journalRes, dailyRes, expList, depList, pendingOps] = await Promise.all([
-        cashMovementService.caisseStats(channelId).catch(() => null),
-        cashMovementService.caisseJournal(channelId).catch(() => null),
-        cashMovementService.caisseHistory(channelId).catch(() => [] as CaisseHistoryRow[]),
-        cashMovementService.list({ type: 'expense', sales_channel: channelId, date_from: todayISO, date_to: todayISO })
-          .catch(() => [] as CashMovement[]),
-        cashMovementService.list({ type: 'deposit', sales_channel: channelId, date_from: todayISO, date_to: todayISO })
-          .catch(() => [] as CashMovement[]),
-        offlineCaisseService.listPending(channelId).catch(() => [] as PendingCaisseOp[]),
+      const currentSession = await cashSessionService.current(channelId);
+      setCurrent(currentSession);
+      const date = currentSession.business_date;
+      const [sessions, dayJournal, movements, queued] = await Promise.all([
+        cashSessionService.list(channelId),
+        cashMovementService.caisseJournal(channelId, {
+          date_from: date,
+          date_to: date,
+        }),
+        cashMovementService.list({
+          sales_channel: channelId,
+          date_from: date,
+          date_to: date,
+        }),
+        offlineCaisseService
+          .listPending(channelId)
+          .catch(() => [] as PendingCaisseOp[]),
       ]);
-      setStats(s);
-      setJournal(journalRes?.movements ?? []);
-      setDailyHistory(dailyRes);
-      setExpenses(expList);
-      setDeposits(depList);
-      setPending(pendingOps);
+      setHistory(sessions);
+      setJournal(dayJournal.movements);
+      setManualMovements(movements);
+      setPending(queued);
+    } catch (requestError) {
+      setError(
+        extractApiError(requestError, 'Impossible de charger la caisse.')
+      );
     } finally {
-      setStatsLoading(false);
-      setListLoading(false);
-      setHistoryLoading(false);
+      setLoading(false);
     }
-  }, [channelId, todayISO]);
+  }, [channelId]);
 
-  useEffect(() => { void refresh(); }, [refresh, refreshSignal]);
+  useEffect(() => {
+    void refresh();
+  }, [refresh, refreshSignal]);
 
-  const parseAmount = (raw: string) => Number(raw.replace(',', '.'));
-
-  const submitExpense = useCallback(async () => {
-    setError(null);
-    setOkMessage(null);
-    if (!channelId) { setError('Sélectionnez d\'abord une caisse.'); return; }
-    const n = parseAmount(amount);
-    if (!n || n <= 0) { setError('Le montant de la dépense doit être strictement positif.'); return; }
-    const payload = {
-      sales_channel: channelId, movement_type: 'expense' as const,
-      amount: n, category, note: note.trim(),
+  useEffect(() => {
+    if (!channelId) return undefined;
+    const refreshVisibleSession = () => {
+      if (document.visibilityState === 'visible') void refresh();
     };
-    const label = EXPENSE_CATEGORY_OPTIONS.find(o => o.value === category)?.label ?? category;
-    const queueOffline = async () => {
-      await offlineCaisseService.queueExpense(payload, label);
-      setAmount(''); setNote(''); setCategory('OTHER');
-      setOkMessage(`Dépense de ${fmtTND(n)} TND enregistrée hors ligne — synchronisation à la reconnexion.`);
-      await refresh();
+    const timer = window.setInterval(refreshVisibleSession, 60_000);
+    window.addEventListener('focus', refreshVisibleSession);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refreshVisibleSession);
     };
-    setSubmitting(true);
-    try {
-      if (!online) { await queueOffline(); return; }
-      await cashMovementService.create(payload);
-      setAmount(''); setNote(''); setCategory('OTHER');
-      setOkMessage(`Dépense de ${fmtTND(n)} TND enregistrée.`);
-      await refresh();
-      onAfterChange?.();
-    } catch (err) {
-      if (isNetworkError(err)) { await queueOffline(); return; }
-      setError(extractApiError(err, 'Échec de l\'enregistrement de la dépense.'));
-    } finally {
-      setSubmitting(false);
-    }
-  }, [amount, category, note, channelId, online, refresh, onAfterChange]);
+  }, [channelId, refresh]);
 
-  const submitDeposit = useCallback(async () => {
-    setError(null);
-    setOkMessage(null);
-    if (!channelId) { setError('Sélectionnez d\'abord une caisse.'); return; }
-    const n = parseAmount(depAmount);
-    if (!n || n <= 0) { setError('Le montant de l\'alimentation doit être strictement positif.'); return; }
-    const payload = {
-      sales_channel: channelId, movement_type: 'deposit' as const,
-      amount: n, category: depKind, note: depNote.trim(),
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    return () => {
+      window.removeEventListener('online', update);
+      window.removeEventListener('offline', update);
     };
-    const label = DEPOSIT_CATEGORY_OPTIONS.find(o => o.value === depKind)?.label ?? depKind;
-    const queueOffline = async () => {
-      await offlineCaisseService.queueDeposit(payload, label);
-      setDepAmount(''); setDepNote(''); setDepKind('TOP_UP');
-      setOkMessage(`Alimentation de ${fmtTND(n)} TND enregistrée hors ligne — synchronisation à la reconnexion.`);
-      await refresh();
-    };
-    setDepSubmitting(true);
-    try {
-      if (!online) { await queueOffline(); return; }
-      await cashMovementService.create(payload);
-      setDepAmount(''); setDepNote(''); setDepKind('TOP_UP');
-      setOkMessage(`Alimentation de ${fmtTND(n)} TND enregistrée.`);
-      await refresh();
-      onAfterChange?.();
-    } catch (err) {
-      if (isNetworkError(err)) { await queueOffline(); return; }
-      setError(extractApiError(err, 'Échec de l\'enregistrement de l\'alimentation.'));
-    } finally {
-      setDepSubmitting(false);
-    }
-  }, [depAmount, depKind, depNote, channelId, online, refresh, onAfterChange]);
+  }, []);
 
-  const handleDeleteExpense = useCallback(async (id: number) => {
-    if (!confirm('Supprimer cette dépense ? Le solde sera ajusté.')) return;
-    try {
-      await cashMovementService.remove(id);
-      await refresh();
-      onAfterChange?.();
-    } catch {
-      setError('Impossible de supprimer la dépense.');
-    }
-  }, [refresh, onAfterChange]);
-
-  const handleDeleteDeposit = useCallback(async (id: number) => {
-    if (!confirm('Supprimer cette alimentation ? Le solde sera ajusté.')) return;
-    try {
-      await cashMovementService.remove(id);
-      await refresh();
-      onAfterChange?.();
-    } catch {
-      setError('Impossible de supprimer l\'alimentation.');
-    }
-  }, [refresh, onAfterChange]);
-
-  // Drop a not-yet-synced (offline) operation from the local queue.
-  const handleRemovePending = useCallback(async (localId: string) => {
-    await offlineCaisseService.remove(localId);
-    await refresh();
-  }, [refresh]);
-
-  // On reconnect, flush any queued cash operations to the backend, then refresh.
   useEffect(() => {
     if (!online || !channelId || syncingRef.current) return;
-    let cancelled = false;
     void (async () => {
-      const queued = await offlineCaisseService.listPending(channelId).catch(() => []);
-      if (cancelled || queued.length === 0 || syncingRef.current) return;
+      const queued = await offlineCaisseService
+        .listPending(channelId)
+        .catch(() => []);
+      if (queued.length === 0) return;
       syncingRef.current = true;
-      setSyncing(true);
       try {
-        const res = await offlineCaisseService.sync(channelId);
-        if (cancelled) return;
-        if (res.synced > 0) {
-          setOkMessage(`${res.synced} opération(s) de caisse synchronisée(s).`);
-          onAfterChange?.();
-        }
+        const result = await offlineCaisseService.sync(channelId);
+        if (result.synced > 0)
+          setMessage(`${result.synced} opération(s) synchronisée(s).`);
         await refresh();
       } finally {
         syncingRef.current = false;
-        if (!cancelled) setSyncing(false);
       }
     })();
-    return () => { cancelled = true; };
-  }, [online, channelId, refresh, onAfterChange]);
+  }, [channelId, online, refresh]);
+
+  const openSession = async () => {
+    if (!channelId || !online) return;
+    setOpening(true);
+    setError('');
+    try {
+      await cashSessionService.open(channelId, parseAmount(openingAmount));
+      setOpeningAmount('');
+      setMessage(
+        'Caisse ouverte. Le fond de caisse est enregistré séparément du chiffre d’affaires.'
+      );
+      await refresh();
+      onAfterChange?.();
+    } catch (requestError) {
+      setError(extractApiError(requestError, 'Impossible d’ouvrir la caisse.'));
+    } finally {
+      setOpening(false);
+    }
+  };
+
+  const closeSession = async () => {
+    if (!session || !online) return;
+    setClosing(true);
+    setError('');
+    try {
+      await cashSessionService.close(
+        session.id,
+        parseAmount(closingAmount),
+        closingNote
+      );
+      setCloseOpen(false);
+      setClosingAmount('');
+      setClosingNote('');
+      setMessage(
+        'Caisse clôturée. Les montants de cette journée sont maintenant figés.'
+      );
+      await refresh();
+      onAfterChange?.();
+    } catch (requestError) {
+      setError(
+        extractApiError(requestError, 'Impossible de clôturer la caisse.')
+      );
+    } finally {
+      setClosing(false);
+    }
+  };
+
+  const createMovement = async (
+    type: 'deposit' | 'expense',
+    values: { amount: number; category: CashMovementCategory; note: string }
+  ) => {
+    if (!channelId || !canOperate) return;
+    setMovementSubmitting(true);
+    setError('');
+    const payload = {
+      sales_channel: channelId,
+      movement_type: type,
+      amount: values.amount,
+      category: values.category,
+      note: values.note,
+    } as const;
+    const options =
+      type === 'deposit' ? DEPOSIT_CATEGORY_OPTIONS : EXPENSE_CATEGORY_OPTIONS;
+    const label =
+      options.find(option => option.value === values.category)?.label ??
+      values.category;
+    try {
+      if (!online) {
+        if (type === 'deposit')
+          await offlineCaisseService.queueDeposit(payload, label);
+        else await offlineCaisseService.queueExpense(payload, label);
+        setMessage('Opération enregistrée hors ligne et mise en attente.');
+      } else {
+        await cashMovementService.create(payload);
+        setMessage(
+          type === 'deposit'
+            ? 'Entrée de caisse enregistrée.'
+            : 'Sortie de caisse enregistrée.'
+        );
+      }
+      await refresh();
+      onAfterChange?.();
+    } catch (requestError) {
+      if (isNetworkError(requestError)) {
+        if (type === 'deposit')
+          await offlineCaisseService.queueDeposit(payload, label);
+        else await offlineCaisseService.queueExpense(payload, label);
+        setOnline(false);
+        setMessage('Connexion perdue. Opération conservée hors ligne.');
+        await refresh();
+      } else {
+        setError(
+          extractApiError(
+            requestError,
+            'Impossible d’enregistrer le mouvement.'
+          )
+        );
+      }
+    } finally {
+      setMovementSubmitting(false);
+    }
+  };
+
+  const removeMovement = async (id: number) => {
+    if (
+      !window.confirm(
+        'Annuler ce mouvement ? Une trace de contrepassation restera dans le journal.'
+      )
+    )
+      return;
+    try {
+      await cashMovementService.remove(id);
+      await refresh();
+      onAfterChange?.();
+    } catch (requestError) {
+      setError(
+        extractApiError(requestError, 'Impossible d’annuler ce mouvement.')
+      );
+    }
+  };
+
+  const openHistoryDetail = async (row: CashSession) => {
+    setSelectedHistory(row);
+    setSelectedHistoryJournal([]);
+    setHistoryDetailLoading(true);
+    try {
+      const detail = await cashMovementService.caisseJournal(
+        row.sales_channel,
+        {
+          date_from: row.business_date,
+          date_to: row.business_date,
+        }
+      );
+      setSelectedHistoryJournal(detail.movements);
+    } catch (requestError) {
+      setError(
+        extractApiError(
+          requestError,
+          'Impossible de charger le journal de cette journée.'
+        )
+      );
+    } finally {
+      setHistoryDetailLoading(false);
+    }
+  };
+
+  const pendingTotal = useMemo(
+    () =>
+      pending.reduce(
+        (sum, operation) =>
+          sum +
+          (operation.kind === 'deposit' ? operation.amount : -operation.amount),
+        0
+      ),
+    [pending]
+  );
+
+  const liveDifference = roundTND(
+    parseAmount(closingAmount) - Number(summary.cash_balance || 0)
+  );
 
   if (!channelId) {
     return (
-      <div className="p-6 text-sm text-muted-foreground">
-        Sélectionnez une caisse en haut de la page pour gérer le fond, les alimentations et les dépenses.
+      <div className="p-8 text-center text-sm text-muted-foreground">
+        Sélectionnez un point de vente pour ouvrir sa caisse.
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col gap-4 p-1">
-      {/* Cash register statement */}
-      <CaisseStatsBanner stats={stats} loading={statsLoading} />
-
-      {/* Offline / pending-sync status */}
-      {(!online || pending.length > 0) && (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-          <span className="flex items-center gap-1.5 font-medium">
-            {syncing
-              ? <RefreshCw className="size-3.5 animate-spin" />
-              : <CloudOff className="size-3.5" />}
-            {!online ? 'Hors ligne' : syncing ? 'Synchronisation…' : 'Reconnecté'}
-          </span>
-          {pending.length > 0 ? (
-            <span>
-              {pending.length} opération(s) en attente · solde estimé{' '}
-              <span className="font-semibold tabular-nums">{fmtTND(estimatedBalance)} TND</span>
-            </span>
-          ) : (
-            <span className="text-amber-800">
-              Dépenses et alimentations seront enregistrées localement et synchronisées à la reconnexion.
-            </span>
-          )}
+    <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-1 pb-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <Wallet className="size-5" />
+            <h2 className="text-lg font-semibold">
+              Caisse {channelName ? `· ${channelName}` : ''}
+            </h2>
+          </div>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Journée du {current ? formatDate(current.business_date) : '—'}
+          </p>
         </div>
-      )}
-
-      {/* Header */}
-      <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2">
-          <Wallet className="size-4 text-muted-foreground" />
-          <h2 className="text-sm font-semibold">Caisse du jour {channelName ? `· ${channelName}` : ''}</h2>
+          <Badge
+            variant={isClosed ? 'secondary' : 'outline'}
+            className="h-8 px-3"
+          >
+            {isClosed ? (
+              <LockKeyhole className="mr-1.5 size-3.5" />
+            ) : (
+              <CheckCircle2 className="mr-1.5 size-3.5 text-emerald-600" />
+            )}
+            {isClosed ? 'Clôturée' : session ? 'Ouverte' : 'Non ouverte'}
+          </Badge>
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-10"
+            onClick={() => void refresh()}
+            disabled={loading}
+            title="Actualiser"
+          >
+            <RefreshCw className={`size-4 ${loading ? 'animate-spin' : ''}`} />
+          </Button>
         </div>
-        <Badge variant="outline" className="text-[11px]">Date: {todayISO}</Badge>
       </div>
 
-      {/* Forms: alimentation (in) + dépense (out) */}
-      <div className="grid gap-3 md:grid-cols-2">
-        {/* Alimentation de caisse */}
-        <Card className="p-4 border-emerald-200">
-          <p className="mb-3 flex items-center gap-1.5 text-sm font-medium text-emerald-800">
-            <ArrowDownToLine className="size-4" /> Alimentation de caisse
-          </p>
-          <div className="grid gap-3 sm:grid-cols-[140px_1fr]">
+      {!online || pending.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <CloudOff className="size-4 shrink-0" />
+          <span className="font-semibold">
+            {online ? 'Synchronisation en attente' : 'Mode hors ligne'}
+          </span>
+          <span>
+            {pending.length} mouvement(s) · impact estimé{' '}
+            {pendingTotal >= 0 ? '+' : ''}
+            {fmtTND(pendingTotal)} TND
+          </span>
+        </div>
+      ) : null}
+
+      {error ? (
+        <div
+          role="alert"
+          className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive"
+        >
+          {error}
+        </div>
+      ) : null}
+      {message ? (
+        <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+          {message}
+        </div>
+      ) : null}
+
+      {(!session || !session.opening_cash_set) && !isClosed ? (
+        <Card className="p-5 sm:p-6">
+          <div className="grid gap-5 lg:grid-cols-[1fr_320px] lg:items-end">
             <div>
-              <label className="text-[11px] text-muted-foreground">Montant (TND)</label>
-              <Input
-                type="number" inputMode="decimal" step="0.001" min="0"
-                value={depAmount} onChange={e => setDepAmount(e.target.value)}
-                placeholder="0.000" className="mt-1 h-9 tabular-nums"
-              />
+              <p className="text-base font-semibold">Fond de caisse</p>
+              <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
+                Saisissez les espèces présentes dans le tiroir au début de la
+                journée. Ce montant ne sera jamais compté comme chiffre
+                d’affaires.
+              </p>
             </div>
-            <div className="min-w-0">
-              <label className="text-[11px] text-muted-foreground">Type</label>
-              <Select value={depKind} onValueChange={v => setDepKind(v as DepositCategory)}>
-                <SelectTrigger className="mt-1 h-9 w-full min-w-0 [&>span]:truncate"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {DEPOSIT_CATEGORY_OPTIONS.map(opt => (
-                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <Textarea
-            value={depNote} onChange={e => setDepNote(e.target.value)}
-            placeholder="Note (optionnel) — ex: fond de caisse matin…"
-            className="mt-3 min-h-[44px] resize-none"
-          />
-          <Button type="button" onClick={submitDeposit} disabled={depSubmitting} className="mt-3 h-9 w-full gap-2">
-            {depSubmitting ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-            Ajouter à la caisse
-          </Button>
-        </Card>
-
-        {/* Dépense */}
-        <Card className="p-4 border-red-200">
-          <p className="mb-3 flex items-center gap-1.5 text-sm font-medium text-red-800">
-            <Receipt className="size-4" /> Ajouter une dépense
-          </p>
-          <div className="grid gap-3 sm:grid-cols-[140px_1fr]">
-            <div>
-              <label className="text-[11px] text-muted-foreground">Montant (TND)</label>
-              <Input
-                type="number" inputMode="decimal" step="0.001" min="0"
-                value={amount} onChange={e => setAmount(e.target.value)}
-                placeholder="0.000" className="mt-1 h-9 tabular-nums"
-              />
-            </div>
-            <div className="min-w-0">
-              <label className="text-[11px] text-muted-foreground">Catégorie</label>
-              <Select value={category} onValueChange={v => setCategory(v as ExpenseCategory)}>
-                <SelectTrigger className="mt-1 h-9 w-full min-w-0 [&>span]:truncate"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {EXPENSE_CATEGORY_OPTIONS.map(opt => (
-                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="space-y-2">
+              <Label htmlFor="opening-cash">Montant d’ouverture</Label>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Input
+                    id="opening-cash"
+                    value={openingAmount}
+                    onChange={event => setOpeningAmount(event.target.value)}
+                    inputMode="decimal"
+                    placeholder="0.000"
+                    className="h-12 pr-12 text-lg font-semibold tabular-nums"
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground">
+                    TND
+                  </span>
+                </div>
+                <Button
+                  className="h-12 px-5"
+                  onClick={() => void openSession()}
+                  disabled={opening || !online}
+                >
+                  {opening ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Wallet className="size-4" />
+                  )}{' '}
+                  Ouvrir
+                </Button>
+              </div>
+              {!online ? (
+                <p className="text-xs text-amber-700">
+                  La connexion est requise pour ouvrir une journée financière.
+                </p>
+              ) : null}
             </div>
           </div>
-          <Textarea
-            value={note} onChange={e => setNote(e.target.value)}
-            placeholder="Note (optionnel) — ex: Taxi pour livraison express…"
-            className="mt-3 min-h-[44px] resize-none"
-          />
-          <Button type="button" onClick={submitExpense} disabled={submitting} className="mt-3 h-9 w-full gap-2" variant="secondary">
-            {submitting ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-            Enregistrer la dépense
-          </Button>
         </Card>
-      </div>
+      ) : null}
 
-      {error && <p className="text-xs text-red-600">{error}</p>}
-      {okMessage && <p className="text-xs text-emerald-700">{okMessage}</p>}
-
-      {/* Today's movements */}
-      <div className="grid gap-3 md:grid-cols-2">
-        {/* Cash-ins */}
-        <Card className="p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <p className="text-sm font-medium">Alimentations aujourd&apos;hui</p>
-            <span className="text-xs text-muted-foreground">
-              {deposits.length + pendingDeposits.length} ligne{deposits.length + pendingDeposits.length === 1 ? '' : 's'}
-            </span>
-          </div>
-          <Separator className="mb-2" />
-          {listLoading ? (
-            <div className="py-6 text-center text-xs text-muted-foreground">
-              <Loader2 className="mr-1.5 inline size-4 animate-spin" /> Chargement…
-            </div>
-          ) : deposits.length === 0 && pendingDeposits.length === 0 ? (
-            <p className="py-6 text-center text-xs text-muted-foreground">Aucune alimentation aujourd&apos;hui.</p>
-          ) : (
-            <ul className="divide-y">
-              {pendingDeposits.map(op => (
-                <li key={op.local_id} className="flex items-start justify-between gap-3 py-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline" className="text-[10px]">{op.label}</Badge>
-                      <Badge variant="secondary" className="gap-1 text-[10px] text-amber-700">
-                        <CloudOff className="size-3" /> En attente
-                      </Badge>
-                    </div>
-                    {op.note && <p className="mt-1 break-words text-xs">{op.note}</p>}
-                  </div>
-                  <div className="flex flex-shrink-0 items-center gap-2">
-                    <span className="text-sm font-semibold tabular-nums text-emerald-700">+ {fmtTND(op.amount)}</span>
-                    <Button type="button" variant="ghost" size="icon" className="size-7" onClick={() => handleRemovePending(op.local_id)} title="Retirer de la file d'attente">
-                      <Trash2 className="size-3.5 text-muted-foreground" />
-                    </Button>
-                  </div>
-                </li>
-              ))}
-              {deposits.map(dep => (
-                <li key={dep.id} className="flex items-start justify-between gap-3 py-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline" className="text-[10px]">{dep.category_display}</Badge>
-                      <span className="text-xs text-muted-foreground">
-                        {new Date(dep.occurred_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                      {dep.created_by_name && <span className="text-[11px] text-muted-foreground">· {dep.created_by_name}</span>}
-                    </div>
-                    {dep.note && <p className="mt-1 break-words text-xs">{dep.note}</p>}
-                  </div>
-                  <div className="flex flex-shrink-0 items-center gap-2">
-                    <span className="text-sm font-semibold tabular-nums text-emerald-700">+ {fmtTND(dep.amount)}</span>
-                    <Button type="button" variant="ghost" size="icon" className="size-7" onClick={() => handleDeleteDeposit(dep.id)} title="Supprimer">
-                      <Trash2 className="size-3.5 text-muted-foreground" />
-                    </Button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-
-        {/* Cash-outs */}
-        <Card className="p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <p className="text-sm font-medium">Dépenses aujourd&apos;hui</p>
-            <span className="text-xs text-muted-foreground">
-              {expenses.length + pendingExpenses.length} ligne{expenses.length + pendingExpenses.length === 1 ? '' : 's'}
-            </span>
-          </div>
-          <Separator className="mb-2" />
-          {listLoading ? (
-            <div className="py-6 text-center text-xs text-muted-foreground">
-              <Loader2 className="mr-1.5 inline size-4 animate-spin" /> Chargement…
-            </div>
-          ) : expenses.length === 0 && pendingExpenses.length === 0 ? (
-            <p className="py-6 text-center text-xs text-muted-foreground">Aucune dépense aujourd&apos;hui.</p>
-          ) : (
-            <ul className="divide-y">
-              {pendingExpenses.map(op => (
-                <li key={op.local_id} className="flex items-start justify-between gap-3 py-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline" className="text-[10px]">{op.label}</Badge>
-                      <Badge variant="secondary" className="gap-1 text-[10px] text-amber-700">
-                        <CloudOff className="size-3" /> En attente
-                      </Badge>
-                    </div>
-                    {op.note && <p className="mt-1 break-words text-xs">{op.note}</p>}
-                  </div>
-                  <div className="flex flex-shrink-0 items-center gap-2">
-                    <span className="text-sm font-semibold tabular-nums text-red-700">− {fmtTND(op.amount)}</span>
-                    <Button type="button" variant="ghost" size="icon" className="size-7" onClick={() => handleRemovePending(op.local_id)} title="Retirer de la file d'attente">
-                      <Trash2 className="size-3.5 text-muted-foreground" />
-                    </Button>
-                  </div>
-                </li>
-              ))}
-              {expenses.map(exp => (
-                <li key={exp.id} className="flex items-start justify-between gap-3 py-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline" className="text-[10px]">{exp.category_display}</Badge>
-                      <span className="text-xs text-muted-foreground">
-                        {new Date(exp.occurred_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                      {exp.created_by_name && <span className="text-[11px] text-muted-foreground">· {exp.created_by_name}</span>}
-                    </div>
-                    {exp.note && <p className="mt-1 break-words text-xs">{exp.note}</p>}
-                  </div>
-                  <div className="flex flex-shrink-0 items-center gap-2">
-                    <span className="text-sm font-semibold tabular-nums text-red-700">− {fmtTND(exp.amount)}</span>
-                    <Button type="button" variant="ghost" size="icon" className="size-7" onClick={() => handleDeleteExpense(exp.id)} title="Supprimer">
-                      <Trash2 className="size-3.5 text-muted-foreground" />
-                    </Button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-      </div>
-
-      {/* History */}
-      <Card className="p-4">
-        <div className="mb-3 flex items-center justify-between gap-2">
+      <Card className="p-5 sm:p-6">
+        <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="text-sm font-medium">Historique de caisse</p>
-            <p className="text-xs text-muted-foreground">Mouvements par transaction et solde de caisse quotidien.</p>
+            <p className="text-base font-semibold">Situation du jour</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Calculée depuis les tickets confirmés, retours et mouvements
+              réels.
+            </p>
           </div>
-          <Badge variant="secondary" className="text-[11px]">14 jours</Badge>
+          {canOperate ? (
+            <Button
+              variant="outline"
+              className="h-11"
+              onClick={() => {
+                setClosingAmount(summary.cash_balance);
+                setCloseOpen(true);
+              }}
+            >
+              <LockKeyhole className="size-4" /> Clôturer la caisse
+            </Button>
+          ) : null}
         </div>
-        <Separator className="mb-3" />
-        {historyLoading ? (
-          <div className="py-6 text-center text-xs text-muted-foreground">
-            <Loader2 className="mr-1.5 inline size-4 animate-spin" /> Chargement…
-          </div>
-        ) : (
-          <Tabs defaultValue="transactions">
-            <TabsList className="mb-3">
-              <TabsTrigger value="transactions">Transactions</TabsTrigger>
-              <TabsTrigger value="daily">Solde quotidien</TabsTrigger>
-            </TabsList>
+        <SessionSummary summary={summary} />
+        {isClosed && session ? (
+          <>
+            <Separator className="my-5" />
+            <div className="grid gap-4 sm:grid-cols-3">
+              <Metric
+                label="Caisse théorique figée"
+                value={`${fmtTND(session.closing_cash_expected || 0)} TND`}
+              />
+              <Metric
+                label="Montant compté"
+                value={`${fmtTND(session.closing_cash_actual || 0)} TND`}
+              />
+              <Metric
+                label="Écart"
+                value={`${Number(session.cash_difference || 0) >= 0 ? '+' : ''}${fmtTND(session.cash_difference || 0)} TND`}
+                tone={
+                  Number(session.cash_difference || 0) === 0
+                    ? 'default'
+                    : Number(session.cash_difference || 0) > 0
+                      ? 'positive'
+                      : 'negative'
+                }
+              />
+            </div>
+          </>
+        ) : null}
+      </Card>
 
-            <TabsContent value="transactions">
-              {journal.length === 0 ? (
-                <p className="py-6 text-center text-xs text-muted-foreground">Aucun mouvement de caisse.</p>
-              ) : (
-                <div>
-                  {/* Mobile: card list — no horizontal scrolling on phones */}
-                  <ul className="divide-y sm:hidden">
-                    {journal.map(m => {
-                      const isIn = m.direction === 'in';
-                      return (
-                        <li key={m.id} className="flex items-start justify-between gap-3 py-2">
-                          <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <Badge variant="outline" className={`text-[10px] ${MOVEMENT_BADGE[m.type] ?? ''}`}>
-                                {m.type_display}
-                              </Badge>
-                              <span className="whitespace-nowrap text-[11px] text-muted-foreground">
-                                {new Date(m.occurred_at).toLocaleString('fr-FR', {
-                                  day: '2-digit', month: '2-digit', year: 'numeric',
-                                  hour: '2-digit', minute: '2-digit',
-                                })}
-                              </span>
-                            </div>
-                            <p className="mt-1 break-words text-xs">
-                              {m.detail}
-                              {m.type === 'sale' && m.payment_method && (
-                                <span className="text-muted-foreground"> · {m.payment_method}</span>
-                              )}
-                              {m.created_by_name && (
-                                <span className="text-muted-foreground"> · {m.created_by_name}</span>
-                              )}
-                            </p>
-                          </div>
-                          <span className={`shrink-0 text-sm font-semibold tabular-nums ${isIn ? 'text-emerald-700' : 'text-red-700'}`}>
-                            {isIn ? '+' : '−'} {fmtTND(m.amount)}
-                          </span>
-                        </li>
-                      );
-                    })}
-                  </ul>
+      <Tabs defaultValue="movements" className="space-y-4">
+        <TabsList className="h-11 w-full justify-start overflow-x-auto">
+          <TabsTrigger value="movements" className="h-9 gap-2">
+            <Banknote className="size-4" /> Mouvements
+          </TabsTrigger>
+          <TabsTrigger value="journal" className="h-9 gap-2">
+            <Receipt className="size-4" /> Journal du jour
+          </TabsTrigger>
+          <TabsTrigger value="history" className="h-9 gap-2">
+            <History className="size-4" /> Historique
+          </TabsTrigger>
+        </TabsList>
 
-                  {/* Tablet / desktop: table */}
-                  <div className="hidden overflow-x-auto sm:block">
-                    <table className="w-full min-w-[560px] text-sm">
-                      <thead>
-                        <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-                          <th className="py-2 font-medium">Date &amp; heure</th>
-                          <th className="py-2 font-medium">Type</th>
-                          <th className="py-2 font-medium">Détail</th>
-                          <th className="py-2 text-right font-medium">Montant</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {journal.map(m => {
-                          const isIn = m.direction === 'in';
-                          return (
-                            <tr key={m.id} className="border-b last:border-0">
-                              <td className="py-2 whitespace-nowrap text-xs text-muted-foreground">
-                                {new Date(m.occurred_at).toLocaleString('fr-FR', {
-                                  day: '2-digit', month: '2-digit', year: 'numeric',
-                                  hour: '2-digit', minute: '2-digit',
-                                })}
-                              </td>
-                              <td className="py-2">
-                                <Badge variant="outline" className={`text-[10px] ${MOVEMENT_BADGE[m.type] ?? ''}`}>
-                                  {m.type_display}
-                                </Badge>
-                              </td>
-                              <td className="py-2">
-                                <span className="break-words">{m.detail}</span>
-                                {m.type === 'sale' && m.payment_method && (
-                                  <span className="ml-1.5 text-[11px] text-muted-foreground">· {m.payment_method}</span>
-                                )}
-                                {m.created_by_name && (
-                                  <span className="ml-1.5 text-[11px] text-muted-foreground">· {m.created_by_name}</span>
-                                )}
-                              </td>
-                              <td className={`py-2 text-right font-semibold tabular-nums ${isIn ? 'text-emerald-700' : 'text-red-700'}`}>
-                                {isIn ? '+' : '−'} {fmtTND(m.amount)}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+        <TabsContent value="movements" className="space-y-4">
+          {!canOperate ? (
+            <div className="rounded-md border border-dashed px-5 py-8 text-center text-sm text-muted-foreground">
+              {isClosed
+                ? 'La journée est clôturée. Aucun mouvement supplémentaire n’est autorisé.'
+                : 'Ouvrez la caisse pour enregistrer des entrées ou sorties.'}
+            </div>
+          ) : (
+            <div className="grid gap-4 lg:grid-cols-2">
+              <Card className="p-5">
+                <div className="mb-4 flex items-center gap-3">
+                  <span className="flex size-10 items-center justify-center rounded-md bg-emerald-50 text-emerald-700">
+                    <ArrowDownToLine className="size-5" />
+                  </span>
+                  <div>
+                    <p className="font-semibold">Entrée manuelle</p>
+                    <p className="text-sm text-muted-foreground">
+                      Ajouter de la monnaie au tiroir
+                    </p>
                   </div>
                 </div>
-              )}
-            </TabsContent>
+                <MovementForm
+                  type="deposit"
+                  disabled={!canOperate}
+                  submitting={movementSubmitting}
+                  onSubmit={values => createMovement('deposit', values)}
+                />
+              </Card>
+              <Card className="p-5">
+                <div className="mb-4 flex items-center gap-3">
+                  <span className="flex size-10 items-center justify-center rounded-md bg-red-50 text-red-700">
+                    <ArrowUpFromLine className="size-5" />
+                  </span>
+                  <div>
+                    <p className="font-semibold">Sortie manuelle</p>
+                    <p className="text-sm text-muted-foreground">
+                      Dépense ou retrait justifié
+                    </p>
+                  </div>
+                </div>
+                <MovementForm
+                  type="expense"
+                  disabled={!canOperate}
+                  submitting={movementSubmitting}
+                  onSubmit={values => createMovement('expense', values)}
+                />
+              </Card>
+            </div>
+          )}
 
-            <TabsContent value="daily">
-              {dailyHistory.length === 0 ? (
-                <p className="py-6 text-center text-xs text-muted-foreground">Aucune journée enregistrée.</p>
-              ) : (
-                <div>
-                  {/* Mobile: card list */}
-                  <ul className="divide-y sm:hidden">
-                    {dailyHistory.map(row => (
-                      <li key={row.date} className="py-2.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-xs font-medium">
-                            {new Date(row.date).toLocaleDateString('fr-FR', {
-                              day: '2-digit', month: '2-digit', year: 'numeric',
-                            })}
-                          </span>
-                          <span className="text-sm font-bold tabular-nums">
-                            {fmtTND(row.cash_balance)}{' '}
-                            <span className="text-[10px] font-normal text-muted-foreground">solde</span>
-                          </span>
-                        </div>
-                        <div className="mt-1.5 grid grid-cols-3 gap-2 text-[11px]">
-                          <div className="flex flex-col">
-                            <span className="text-muted-foreground">Ventes esp.</span>
-                            <span className="tabular-nums text-emerald-700">{fmtTND(row.cash_sales)}</span>
-                          </div>
-                          <div className="flex flex-col">
-                            <span className="text-muted-foreground">Alimentation</span>
-                            <span className="tabular-nums text-blue-700">{fmtTND(row.funding_total)}</span>
-                          </div>
-                          <div className="flex flex-col">
-                            <span className="text-muted-foreground">Dépenses</span>
-                            <span className="tabular-nums text-amber-700">{fmtTND(row.expenses)}</span>
-                          </div>
-                        </div>
-                      </li>
+          {manualMovements.length > 0 || pending.length > 0 ? (
+            <Card className="overflow-hidden">
+              <div className="border-b px-5 py-4">
+                <p className="font-semibold">Mouvements manuels du jour</p>
+              </div>
+              <div className="divide-y">
+                {pending.map(operation => (
+                  <div
+                    key={operation.local_id}
+                    className="flex items-center gap-3 px-5 py-3"
+                  >
+                    <CloudOff className="size-4 shrink-0 text-amber-600" />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium">
+                        {operation.label}
+                      </p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        En attente · {operation.note || 'Sans note'}
+                      </p>
+                    </div>
+                    <span
+                      className={`font-semibold tabular-nums ${operation.kind === 'deposit' ? 'text-emerald-700' : 'text-destructive'}`}
+                    >
+                      {operation.kind === 'deposit' ? '+' : '-'}
+                      {fmtTND(operation.amount)} TND
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-9"
+                      onClick={() => {
+                        void offlineCaisseService
+                          .remove(operation.local_id)
+                          .then(refresh);
+                      }}
+                      title="Retirer de la file"
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </div>
+                ))}
+                {manualMovements.map(movement => (
+                  <div
+                    key={movement.id}
+                    className="flex items-center gap-3 px-5 py-3"
+                  >
+                    {movement.movement_type === 'deposit' ? (
+                      <ArrowDownToLine className="size-4 shrink-0 text-emerald-700" />
+                    ) : (
+                      <ArrowUpFromLine className="size-4 shrink-0 text-destructive" />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium">
+                        {movement.category_display}
+                      </p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {movement.created_by_name || 'Utilisateur'} ·{' '}
+                        {movement.note || 'Sans note'}
+                      </p>
+                    </div>
+                    <span
+                      className={`font-semibold tabular-nums ${movement.movement_type === 'deposit' ? 'text-emerald-700' : 'text-destructive'}`}
+                    >
+                      {movement.movement_type === 'deposit' ? '+' : '-'}
+                      {fmtTND(movement.amount)} TND
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-9"
+                      onClick={() => void removeMovement(movement.id)}
+                      disabled={isClosed}
+                      title="Annuler le mouvement"
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          ) : null}
+        </TabsContent>
+
+        <TabsContent value="journal">
+          <Card className="overflow-hidden">
+            <div className="border-b px-5 py-4">
+              <p className="font-semibold">Toutes les opérations du jour</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Ventes, retours, entrées et sorties, triés du plus récent au
+                plus ancien.
+              </p>
+            </div>
+            {journal.length === 0 ? (
+              <p className="px-5 py-10 text-center text-sm text-muted-foreground">
+                Aucune opération enregistrée.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[680px] text-sm">
+                  <thead>
+                    <tr className="border-b bg-muted/30 text-left text-xs text-muted-foreground">
+                      <th className="px-5 py-3 font-medium">Heure</th>
+                      <th className="px-4 py-3 font-medium">Type</th>
+                      <th className="px-4 py-3 font-medium">Détail</th>
+                      <th className="px-4 py-3 font-medium">Utilisateur</th>
+                      <th className="px-5 py-3 text-right font-medium">
+                        Montant
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {journal.map(row => (
+                      <tr key={row.id} className="border-b last:border-0">
+                        <td className="whitespace-nowrap px-5 py-3 text-muted-foreground">
+                          {new Date(row.occurred_at).toLocaleTimeString(
+                            'fr-FR',
+                            { hour: '2-digit', minute: '2-digit' }
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          <Badge variant="outline">{row.type_display}</Badge>
+                        </td>
+                        <td className="max-w-80 break-words px-4 py-3">
+                          {row.detail}
+                        </td>
+                        <td className="px-4 py-3 text-muted-foreground">
+                          {row.created_by_name || '—'}
+                        </td>
+                        <td
+                          className={`px-5 py-3 text-right font-semibold tabular-nums ${row.direction === 'in' ? 'text-emerald-700' : 'text-destructive'}`}
+                        >
+                          {row.direction === 'in' ? '+' : '-'}
+                          {fmtTND(row.amount)} TND
+                        </td>
+                      </tr>
                     ))}
-                  </ul>
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        </TabsContent>
 
-                  {/* Tablet / desktop: table */}
-                  <div className="hidden overflow-x-auto sm:block">
-                    <table className="w-full min-w-[560px] text-sm">
+        <TabsContent value="history">
+          <Card className="overflow-hidden">
+            <div className="border-b px-5 py-4">
+              <p className="font-semibold">Historique des journées</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Les clôtures restent figées et consultables.
+              </p>
+            </div>
+            {history.length === 0 ? (
+              <p className="px-5 py-10 text-center text-sm text-muted-foreground">
+                Aucune journée de caisse enregistrée.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[1240px] text-sm">
+                  <thead>
+                    <tr className="border-b bg-muted/30 text-left text-xs text-muted-foreground">
+                      <th className="px-5 py-3 font-medium">Date</th>
+                      <th className="px-4 py-3 text-right font-medium">
+                        Ouverture
+                      </th>
+                      <th className="px-4 py-3 text-right font-medium">
+                        Espèces
+                      </th>
+                      <th className="px-4 py-3 text-right font-medium">
+                        Carte
+                      </th>
+                      <th className="px-4 py-3 text-right font-medium">
+                        CA net
+                      </th>
+                      <th className="px-4 py-3 text-right font-medium">
+                        Théorique
+                      </th>
+                      <th className="px-4 py-3 text-right font-medium">
+                        Compté
+                      </th>
+                      <th className="px-4 py-3 text-right font-medium">
+                        Écart
+                      </th>
+                      <th className="px-4 py-3 text-right font-medium">
+                        Tickets
+                      </th>
+                      <th className="px-4 py-3 font-medium">Caissier</th>
+                      <th className="px-4 py-3 font-medium">Statut</th>
+                      <th className="px-5 py-3"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {history.map(row => (
+                      <tr
+                        key={row.id}
+                        className="border-b last:border-0 hover:bg-muted/20"
+                      >
+                        <td className="whitespace-nowrap px-5 py-3 font-medium">
+                          {formatDate(row.business_date)}
+                        </td>
+                        <td className="px-4 py-3 text-right tabular-nums">
+                          {fmtTND(row.opening_cash)}
+                        </td>
+                        <td className="px-4 py-3 text-right tabular-nums">
+                          {fmtTND(row.summary.cash_sales)}
+                        </td>
+                        <td className="px-4 py-3 text-right tabular-nums">
+                          {fmtTND(row.summary.card_sales)}
+                        </td>
+                        <td className="px-4 py-3 text-right font-semibold tabular-nums">
+                          {fmtTND(row.summary.revenue)}
+                        </td>
+                        <td className="px-4 py-3 text-right tabular-nums">
+                          {fmtTND(
+                            row.closing_cash_expected ??
+                              row.summary.cash_balance
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right tabular-nums">
+                          {row.closing_cash_actual == null
+                            ? '—'
+                            : fmtTND(row.closing_cash_actual)}
+                        </td>
+                        <td
+                          className={`px-4 py-3 text-right font-semibold tabular-nums ${Number(row.cash_difference || 0) < 0 ? 'text-destructive' : Number(row.cash_difference || 0) > 0 ? 'text-emerald-700' : ''}`}
+                        >
+                          {row.cash_difference == null
+                            ? '—'
+                            : `${Number(row.cash_difference) > 0 ? '+' : ''}${fmtTND(row.cash_difference)}`}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          {row.summary.revenue_count}
+                        </td>
+                        <td className="max-w-44 truncate px-4 py-3">
+                          {row.closed_by_name ||
+                            row.opened_by_name ||
+                            'Automatique'}
+                        </td>
+                        <td className="px-4 py-3">
+                          <Badge
+                            variant={
+                              row.status === 'CLOSED' ? 'secondary' : 'outline'
+                            }
+                          >
+                            {row.status === 'CLOSED' ? 'Clôturée' : 'Ouverte'}
+                          </Badge>
+                        </td>
+                        <td className="px-5 py-3 text-right">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="size-9"
+                            onClick={() => void openHistoryDetail(row)}
+                            title="Voir le détail"
+                          >
+                            <Eye className="size-4" />
+                          </Button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        </TabsContent>
+      </Tabs>
+
+      <Dialog
+        open={closeOpen}
+        onOpenChange={next => !closing && setCloseOpen(next)}
+      >
+        <POSDialogContent size="compact">
+          <POSDialogHeader
+            title="Clôture de caisse"
+            description={`Journée du ${current ? formatDate(current.business_date) : ''}`}
+            aside={<LockKeyhole className="size-6" />}
+          />
+          <POSDialogBody className="space-y-5">
+            <div className="flex items-end justify-between gap-4 border-b pb-4">
+              <span className="text-sm text-muted-foreground">
+                Caisse théorique
+              </span>
+              <span className="text-2xl font-bold tabular-nums">
+                {fmtTND(summary.cash_balance)} TND
+              </span>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="closing-cash">Montant réellement compté</Label>
+              <div className="relative">
+                <Input
+                  id="closing-cash"
+                  value={closingAmount}
+                  onChange={event => setClosingAmount(event.target.value)}
+                  inputMode="decimal"
+                  autoFocus
+                  className="h-12 pr-12 text-xl font-semibold tabular-nums"
+                />
+                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground">
+                  TND
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center justify-between rounded-md border px-4 py-3">
+              <span className="font-semibold">Écart</span>
+              <span
+                className={`text-xl font-bold tabular-nums ${liveDifference < 0 ? 'text-destructive' : liveDifference > 0 ? 'text-emerald-700' : ''}`}
+              >
+                {liveDifference > 0 ? '+' : ''}
+                {fmtTND(liveDifference)} TND
+              </span>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="closing-note">
+                Note de clôture{' '}
+                <span className="font-normal text-muted-foreground">
+                  (optionnelle)
+                </span>
+              </Label>
+              <Textarea
+                id="closing-note"
+                value={closingNote}
+                onChange={event => setClosingNote(event.target.value)}
+                placeholder="Ex. erreur de monnaie…"
+              />
+            </div>
+          </POSDialogBody>
+          <POSDialogFooter>
+            <POSSecondaryButton
+              onClick={() => setCloseOpen(false)}
+              disabled={closing}
+            >
+              Annuler
+            </POSSecondaryButton>
+            <POSPrimaryButton
+              onClick={() => void closeSession()}
+              disabled={closing || closingAmount.trim() === ''}
+            >
+              {closing ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <LockKeyhole className="size-4" />
+              )}{' '}
+              Clôturer la caisse
+            </POSPrimaryButton>
+          </POSDialogFooter>
+        </POSDialogContent>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(selectedHistory)}
+        onOpenChange={next => {
+          if (!next) {
+            setSelectedHistory(null);
+            setSelectedHistoryJournal([]);
+          }
+        }}
+      >
+        <POSDialogContent size="default">
+          <POSDialogHeader
+            title="Détail de la journée"
+            description={
+              selectedHistory
+                ? `${formatDate(selectedHistory.business_date)} · ${selectedHistory.sales_channel_name}`
+                : ''
+            }
+            aside={<CalendarDays className="size-6" />}
+          />
+          {selectedHistory ? (
+            <POSDialogBody className="space-y-6">
+              <SessionSummary summary={selectedHistory.summary} />
+              <Separator />
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Metric
+                  label="Ouvert par"
+                  value={selectedHistory.opened_by_name || 'Automatique'}
+                  hint={new Date(selectedHistory.opened_at).toLocaleString(
+                    'fr-FR'
+                  )}
+                />
+                <Metric
+                  label="Clôturé par"
+                  value={selectedHistory.closed_by_name || '—'}
+                  hint={
+                    selectedHistory.closed_at
+                      ? new Date(selectedHistory.closed_at).toLocaleString(
+                          'fr-FR'
+                        )
+                      : 'Journée encore ouverte'
+                  }
+                />
+                <Metric
+                  label="Montant compté"
+                  value={
+                    selectedHistory.closing_cash_actual == null
+                      ? '—'
+                      : `${fmtTND(selectedHistory.closing_cash_actual)} TND`
+                  }
+                />
+                <Metric
+                  label="Écart final"
+                  value={
+                    selectedHistory.cash_difference == null
+                      ? '—'
+                      : `${Number(selectedHistory.cash_difference) > 0 ? '+' : ''}${fmtTND(selectedHistory.cash_difference)} TND`
+                  }
+                  tone={
+                    Number(selectedHistory.cash_difference || 0) < 0
+                      ? 'negative'
+                      : Number(selectedHistory.cash_difference || 0) > 0
+                        ? 'positive'
+                        : 'default'
+                  }
+                />
+              </div>
+              {selectedHistory.closing_note ? (
+                <div className="rounded-md border p-4">
+                  <p className="text-xs font-semibold uppercase text-muted-foreground">
+                    Note de clôture
+                  </p>
+                  <p className="mt-2 whitespace-pre-wrap text-sm">
+                    {selectedHistory.closing_note}
+                  </p>
+                </div>
+              ) : null}
+              <section>
+                <h3 className="font-semibold">Journal de la journée</h3>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Ventes, retours et mouvements manuels dans l’ordre
+                  chronologique.
+                </p>
+                {historyDetailLoading ? (
+                  <div className="flex items-center justify-center py-8">
+                    <Loader2 className="size-5 animate-spin" />
+                  </div>
+                ) : selectedHistoryJournal.length === 0 ? (
+                  <p className="py-8 text-center text-sm text-muted-foreground">
+                    Aucune opération enregistrée.
+                  </p>
+                ) : (
+                  <div className="mt-4 overflow-x-auto border-y">
+                    <table className="w-full min-w-[620px] text-sm">
                       <thead>
-                        <tr className="border-b text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-                          <th className="py-2 font-medium">Date</th>
-                          <th className="py-2 text-right font-medium">Ventes espèces</th>
-                          <th className="py-2 text-right font-medium">Alimentation</th>
-                          <th className="py-2 text-right font-medium">Dépenses</th>
-                          <th className="py-2 text-right font-medium">Solde caisse</th>
+                        <tr className="border-b bg-muted/30 text-left text-xs text-muted-foreground">
+                          <th className="px-3 py-2 font-medium">Heure</th>
+                          <th className="px-3 py-2 font-medium">Type</th>
+                          <th className="px-3 py-2 font-medium">Détail</th>
+                          <th className="px-3 py-2 font-medium">Utilisateur</th>
+                          <th className="px-3 py-2 text-right font-medium">
+                            Montant
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
-                        {dailyHistory.map(row => (
-                          <tr key={row.date} className="border-b last:border-0">
-                            <td className="py-2 whitespace-nowrap text-xs text-muted-foreground">
-                              {new Date(row.date).toLocaleDateString('fr-FR', {
-                                day: '2-digit', month: '2-digit', year: 'numeric',
-                              })}
+                        {selectedHistoryJournal.map(row => (
+                          <tr key={row.id} className="border-b last:border-0">
+                            <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">
+                              {new Date(row.occurred_at).toLocaleTimeString(
+                                'fr-FR',
+                                { hour: '2-digit', minute: '2-digit' }
+                              )}
                             </td>
-                            <td className="py-2 text-right tabular-nums text-emerald-700">{fmtTND(row.cash_sales)}</td>
-                            <td className="py-2 text-right tabular-nums text-blue-700">{fmtTND(row.funding_total)}</td>
-                            <td className="py-2 text-right tabular-nums text-amber-700">{fmtTND(row.expenses)}</td>
-                            <td className="py-2 text-right font-bold tabular-nums">{fmtTND(row.cash_balance)}</td>
+                            <td className="px-3 py-2">{row.type_display}</td>
+                            <td className="max-w-72 break-words px-3 py-2">
+                              {row.detail}
+                            </td>
+                            <td className="px-3 py-2 text-muted-foreground">
+                              {row.created_by_name || '—'}
+                            </td>
+                            <td
+                              className={`px-3 py-2 text-right font-semibold tabular-nums ${row.direction === 'in' ? 'text-emerald-700' : 'text-destructive'}`}
+                            >
+                              {row.direction === 'in' ? '+' : '-'}
+                              {fmtTND(row.amount)}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
-                </div>
-              )}
-            </TabsContent>
-          </Tabs>
-        )}
-      </Card>
+                )}
+              </section>
+            </POSDialogBody>
+          ) : null}
+          <POSDialogFooter className="sm:justify-end">
+            <POSPrimaryButton onClick={() => setSelectedHistory(null)}>
+              Fermer
+            </POSPrimaryButton>
+          </POSDialogFooter>
+        </POSDialogContent>
+      </Dialog>
     </div>
   );
 }

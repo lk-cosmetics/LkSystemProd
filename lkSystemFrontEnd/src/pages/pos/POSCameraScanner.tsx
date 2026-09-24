@@ -15,17 +15,26 @@
  *   4. Manual fallback input always available
  */
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Camera, X, Keyboard, Loader2, AlertTriangle, Copy, Check } from 'lucide-react';
+import {
+  Camera,
+  Keyboard,
+  Loader2,
+  AlertTriangle,
+  Copy,
+  Check,
+} from 'lucide-react';
 import type { Html5Qrcode as Html5QrcodeType } from 'html5-qrcode';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Dialog } from '@/components/ui/dialog';
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from '@/components/ui/dialog';
+  POSDialogBody,
+  POSDialogContent,
+  POSDialogFooter,
+  POSDialogHeader,
+  POSPrimaryButton,
+  POSSecondaryButton,
+} from './POSDialog';
 
 /* ── Constants ────────────────────────────────────────────────────────── */
 
@@ -37,7 +46,8 @@ const sanitizeFeedbackMessage = (message: string): string => {
   const trimmed = message.trim();
   if (!trimmed) return '';
 
-  const looksLikeHtml = trimmed.includes('<!DOCTYPE html') || HTML_TAG_RE.test(trimmed);
+  const looksLikeHtml =
+    trimmed.includes('<!DOCTYPE html') || HTML_TAG_RE.test(trimmed);
   const normalized = looksLikeHtml
     ? trimmed
         .replace(/<[^>]+>/g, ' ')
@@ -85,8 +95,12 @@ export function POSCameraScanner({
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [manualBarcode, setManualBarcode] = useState('');
   const [scanning, setScanning] = useState(false);
-  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
-  const safeFeedbackMessage = feedbackMessage ? sanitizeFeedbackMessage(feedbackMessage) : null;
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>(
+    'idle'
+  );
+  const safeFeedbackMessage = feedbackMessage
+    ? sanitizeFeedbackMessage(feedbackMessage)
+    : null;
 
   // Stable ref for the callback to avoid restarting the scanner
   const onBarcodeRef = useRef(onBarcodeDetected);
@@ -116,7 +130,7 @@ export function POSCameraScanner({
 
     const container = document.getElementById(SCANNER_ELEMENT_ID);
     if (!container) {
-      setCameraError('Scanner container not ready. Please try again.');
+      setCameraError('Le scanner n’est pas prêt. Veuillez réessayer.');
       return;
     }
 
@@ -137,10 +151,13 @@ export function POSCameraScanner({
           aspectRatio: 16 / 9,
           disableFlip: false,
         },
-        (decodedText) => {
+        decodedText => {
           const now = Date.now();
           // Cooldown: prevent rapid duplicate detections
-          if (decodedText === lastDetectedRef.current && now < cooldownRef.current) {
+          if (
+            decodedText === lastDetectedRef.current &&
+            now < cooldownRef.current
+          ) {
             return;
           }
           lastDetectedRef.current = decodedText;
@@ -149,7 +166,7 @@ export function POSCameraScanner({
         },
         () => {
           // QR code not found in this frame — expected, ignore
-        },
+        }
       );
 
       setScanning(true);
@@ -157,30 +174,43 @@ export function POSCameraScanner({
       const msg = err instanceof Error ? err.message : String(err);
 
       // Check if running in an insecure context (HTTP instead of HTTPS)
-      const isInsecure = window.isSecureContext === false
-        || window.location.protocol === 'http:';
+      const isInsecure =
+        window.isSecureContext === false ||
+        window.location.protocol === 'http:';
 
-      if (isInsecure && (
-        msg.includes('not supported') || msg.includes('getUserMedia') ||
-        msg.includes('NotAllowedError') || msg.includes('undefined')
-      )) {
+      if (
+        isInsecure &&
+        (msg.includes('not supported') ||
+          msg.includes('getUserMedia') ||
+          msg.includes('NotAllowedError') ||
+          msg.includes('undefined'))
+      ) {
+        setCameraError('La caméra nécessite une connexion HTTPS sécurisée.');
+      } else if (
+        msg.includes('NotAllowedError') ||
+        msg.includes('Permission')
+      ) {
         setCameraError(
-          'Camera requires HTTPS. Access via https:// instead of http:// ' +
-          '(accept the self-signed certificate warning on first visit).'
+          'Accès à la caméra refusé. Autorisez la caméra puis réessayez.'
         );
-      } else if (msg.includes('NotAllowedError') || msg.includes('Permission')) {
-        setCameraError('Camera permission denied. Please allow camera access and try again.');
       } else if (msg.includes('NotFoundError') || msg.includes('no camera')) {
-        setCameraError('No camera found on this device.');
-      } else if (msg.includes('NotReadableError') || msg.includes('Could not start')) {
-        setCameraError('Camera is already in use by another application.');
-      } else if (msg.includes('not supported') || msg.includes('getUserMedia')) {
+        setCameraError('Aucune caméra détectée sur cet appareil.');
+      } else if (
+        msg.includes('NotReadableError') ||
+        msg.includes('Could not start')
+      ) {
         setCameraError(
-          'Camera streaming is not supported in this browser. ' +
-          'Make sure you are using HTTPS (not HTTP).'
+          'La caméra est déjà utilisée par une autre application.'
+        );
+      } else if (
+        msg.includes('not supported') ||
+        msg.includes('getUserMedia')
+      ) {
+        setCameraError(
+          'La caméra n’est pas prise en charge par ce navigateur. Vérifiez que la page utilise HTTPS.'
         );
       } else {
-        setCameraError(`Camera error: ${msg}`);
+        setCameraError(`Erreur caméra : ${msg}`);
       }
     }
   }, [stopScanner]);
@@ -188,11 +218,11 @@ export function POSCameraScanner({
   // ── Start/stop based on dialog open state + mode ──
   useEffect(() => {
     if (open && mode === 'camera') {
-      startScanner();
+      void startScanner();
     }
 
     return () => {
-      stopScanner();
+      void stopScanner();
     };
   }, [open, mode, startScanner, stopScanner]);
 
@@ -262,155 +292,149 @@ export function POSCameraScanner({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg p-0 overflow-hidden">
-        <DialogHeader className="p-4 pb-2">
-          <DialogTitle className="flex items-center gap-2">
-            <Camera className="size-4" />
-            Scan Barcode
-          </DialogTitle>
-          <DialogDescription>
-            {mode === 'camera'
-              ? 'Point the camera at a product barcode.'
-              : 'Enter the barcode manually below.'}
-          </DialogDescription>
-        </DialogHeader>
+      <POSDialogContent size="default">
+        <POSDialogHeader
+          title="Scanner un code-barres"
+          description={
+            mode === 'camera'
+              ? 'Placez le code-barres du produit devant la caméra.'
+              : 'Saisissez le code-barres manuellement.'
+          }
+          aside={<Camera className="size-6" />}
+        />
 
-        {/* ── Camera view ── */}
-        {mode === 'camera' && (
-          <div className="mx-4 relative">
-            {/* Scanner renders into this div */}
-            <div
-              id={SCANNER_ELEMENT_ID}
-              className="rounded-lg overflow-hidden bg-black min-h-[220px]"
-            />
+        <POSDialogBody className="space-y-5">
+          {/* ── Camera view ── */}
+          {mode === 'camera' && (
+            <div className="relative">
+              {/* Scanner renders into this div */}
+              <div
+                id={SCANNER_ELEMENT_ID}
+                className="rounded-lg overflow-hidden bg-black min-h-[220px]"
+              />
 
-            {/* Loading overlay */}
-            {!scanning && !cameraError && (
-              <div className="absolute inset-0 flex items-center justify-center bg-black/60 rounded-lg">
-                <div className="flex flex-col items-center gap-2 text-white">
-                  <Loader2 className="size-8 animate-spin" />
-                  <p className="text-sm">Starting camera...</p>
+              {/* Loading overlay */}
+              {!scanning && !cameraError && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/60 rounded-lg">
+                  <div className="flex flex-col items-center gap-2 text-white">
+                    <Loader2 className="size-8 animate-spin" />
+                    <p className="text-sm">Démarrage de la caméra…</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Camera error ── */}
+          {cameraError && mode === 'camera' && (
+            <div className="rounded-md border border-destructive/30 bg-destructive/10 p-4 text-destructive">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="size-4 shrink-0 mt-0.5" />
+                <div className="min-w-0 flex-1">
+                  <p className="font-medium">Caméra indisponible</p>
+                  <p className="mt-1 text-sm leading-5 break-words whitespace-pre-wrap">
+                    {cameraError}
+                  </p>
                 </div>
               </div>
-            )}
-          </div>
-        )}
-
-        {/* ── Camera error ── */}
-        {cameraError && mode === 'camera' && (
-          <div className="mx-4 p-3 rounded-lg border border-destructive/30 bg-destructive/10 text-destructive">
-            <div className="flex items-start gap-2">
-              <AlertTriangle className="size-4 shrink-0 mt-0.5" />
-              <div className="min-w-0 flex-1">
-              <p className="font-medium">Camera unavailable</p>
-                <p className="mt-1 text-sm leading-5 break-words whitespace-pre-wrap">{cameraError}</p>
-              </div>
-            </div>
-            <div className="mt-3 flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-h-5 text-xs">
-                {copyState === 'copied' && <span className="text-emerald-700">Error copied</span>}
-                {copyState === 'failed' && <span className="text-destructive">Copy failed. Please copy manually.</span>}
-              </div>
-              <div className="flex w-full gap-2 sm:w-auto">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8 flex-1 sm:flex-none"
-                  onClick={handleCopyError}
-                >
-                  {copyState === 'copied' ? (
-                    <>
-                      <Check className="mr-1 size-3.5" />
-                      Copied
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="mr-1 size-3.5" />
-                      Copy error
-                    </>
+              <div className="mt-3 flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-h-5 text-xs">
+                  {copyState === 'copied' && (
+                    <span className="text-emerald-700">Erreur copiée</span>
                   )}
-                </Button>
+                  {copyState === 'failed' && (
+                    <span className="text-destructive">Copie impossible.</span>
+                  )}
+                </div>
+                <div className="flex w-full gap-2 sm:w-auto">
+                  <Button
+                    variant="outline"
+                    className="h-11 flex-1 sm:flex-none"
+                    onClick={handleCopyError}
+                  >
+                    {copyState === 'copied' ? (
+                      <>
+                        <Check className="mr-1 size-3.5" />
+                        Copié
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="mr-1 size-3.5" />
+                        Copier l’erreur
+                      </>
+                    )}
+                  </Button>
+                  <Button
+                    variant="default"
+                    className="h-11 flex-1 sm:flex-none"
+                    onClick={() => startScanner()}
+                  >
+                    Réessayer
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── Manual entry ── */}
+          {mode === 'manual' && (
+            <div className="space-y-3">
+              <div className="flex gap-2">
+                <Input
+                  placeholder="Saisir le code-barres…"
+                  value={manualBarcode}
+                  onChange={e => setManualBarcode(e.target.value)}
+                  className="flex-1"
+                  autoFocus
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') handleManualSubmit();
+                  }}
+                />
                 <Button
-                  variant="default"
-                  size="sm"
-                  className="h-8 flex-1 sm:flex-none"
-                  onClick={() => startScanner()}
+                  onClick={handleManualSubmit}
+                  disabled={manualBarcode.trim().length < 3}
                 >
-                  Retry
+                  Rechercher
                 </Button>
               </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* ── Manual entry ── */}
-        {mode === 'manual' && (
-          <div className="px-4 space-y-2">
-            <div className="flex gap-2">
-              <Input
-                placeholder="Enter barcode..."
-                value={manualBarcode}
-                onChange={e => setManualBarcode(e.target.value)}
-                className="flex-1"
-                autoFocus
-                onKeyDown={e => {
-                  if (e.key === 'Enter') handleManualSubmit();
-                }}
-              />
-              <Button
-                onClick={handleManualSubmit}
-                disabled={manualBarcode.trim().length < 3}
-              >
-                Search
-              </Button>
+          {/* ── Feedback message ── */}
+          {safeFeedbackMessage && (
+            <div
+              className={`rounded-md p-3 text-center text-sm font-medium ${
+                feedbackType === 'success'
+                  ? 'bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-400'
+                  : 'bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-400'
+              }`}
+            >
+              <p className="break-words whitespace-pre-wrap leading-5">
+                {safeFeedbackMessage}
+              </p>
             </div>
-          </div>
-        )}
+          )}
+        </POSDialogBody>
 
-        {/* ── Feedback message ── */}
-        {safeFeedbackMessage && (
-          <div
-            className={`mx-4 p-2.5 rounded-lg text-sm font-medium text-center ${
-              feedbackType === 'success'
-                ? 'bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-400'
-                : 'bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-400'
-            }`}
-          >
-            <p className="break-words whitespace-pre-wrap leading-5">{safeFeedbackMessage}</p>
-          </div>
-        )}
-
-        {/* ── Bottom controls ── */}
-        <div className="flex items-center justify-between p-4 pt-2">
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5"
-            onClick={handleSwitchMode}
-          >
+        <POSDialogFooter>
+          <POSSecondaryButton onClick={handleSwitchMode}>
             {mode === 'camera' ? (
               <>
-                <Keyboard className="size-3.5" />
-                Manual Entry
+                <Keyboard className="size-4" />
+                Saisie manuelle
               </>
             ) : (
               <>
-                <Camera className="size-3.5" />
-                Use Camera
+                <Camera className="size-4" />
+                Utiliser la caméra
               </>
             )}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="gap-1.5"
-            onClick={() => onOpenChange(false)}
-          >
-            <X className="size-3.5" />
-            Close
-          </Button>
-        </div>
-      </DialogContent>
+          </POSSecondaryButton>
+          <POSPrimaryButton onClick={() => onOpenChange(false)}>
+            Fermer
+          </POSPrimaryButton>
+        </POSDialogFooter>
+      </POSDialogContent>
     </Dialog>
   );
 }
