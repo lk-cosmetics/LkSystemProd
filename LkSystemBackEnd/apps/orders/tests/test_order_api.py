@@ -500,7 +500,7 @@ class OrderAPITests(TestCase):
         second = self.client.post('/api/v1/orders/pos/', payload, format='json')
 
         self.assertEqual(first.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
         self.assertEqual(first.data['id'], second.data['id'])
         self.assertEqual(first.data['ticket_id'], payload['ticket_id'])
         self.assertEqual(Order.objects.filter(client_ticket_uuid=payload['client_ticket_uuid']).count(), 1)
