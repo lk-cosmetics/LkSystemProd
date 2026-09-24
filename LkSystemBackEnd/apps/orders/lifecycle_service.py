@@ -547,6 +547,18 @@ class OrderLifecycleService:
         if order.pos_validated_at:
             raise LifecycleError('Order has already been validated by POS.')
 
+        from apps.sales_channels.cash_session_service import (
+            CashSessionError,
+            CashSessionService,
+        )
+        try:
+            CashSessionService.ensure_open(
+                order.pos_sales_channel or order.sales_channel,
+                actor=actor,
+            )
+        except CashSessionError as exc:
+            raise LifecycleError(str(exc)) from exc
+
         order.pos_validated_at = timezone.now()
         order.pos_validated_by = actor
         if customer_note:
@@ -991,6 +1003,22 @@ class OrderLifecycleService:
             raise LifecycleError('Order return has already been processed.')
         if order.status not in (Order.Status.DONE, Order.Status.PACKAGING):
             raise LifecycleError('Only completed (or in-fulfilment) orders can be returned.')
+
+        # A POS refund is a financial event in today's drawer. It may not be
+        # posted into an already-closed session; on a later day a fresh session
+        # is created automatically with a zero opening float.
+        if order.pos_validated_at:
+            from apps.sales_channels.cash_session_service import (
+                CashSessionError,
+                CashSessionService,
+            )
+            try:
+                CashSessionService.ensure_open(
+                    order.pos_sales_channel or order.sales_channel,
+                    actor=actor,
+                )
+            except CashSessionError as exc:
+                raise LifecycleError(str(exc)) from exc
 
         resolved_return_type = (return_type or Order.ReturnType.RETURNED) or Order.ReturnType.RETURNED
         if resolved_return_type not in dict(Order.ReturnType.choices):

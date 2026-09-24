@@ -373,6 +373,26 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Idempotent retry: the browser may lose the original response after
+        # the transaction commits. Return the existing paid ticket instead of
+        # touching stock, tender data, or a now-closed caisse a second time.
+        if (
+            not _created
+            and order.pos_validated_at
+            and order.payment_status == Order.PaymentStatus.PAID
+        ):
+            return Response(OrderDetailSerializer(order).data, status=status.HTTP_200_OK)
+
+        from apps.sales_channels.cash_session_service import (
+            CashSessionError,
+            CashSessionService,
+        )
+        try:
+            CashSessionService.ensure_open(sales_channel, actor=request.user)
+        except CashSessionError as exc:
+            transaction.set_rollback(True)
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
         try:
             POSPaymentService.apply(
                 order,

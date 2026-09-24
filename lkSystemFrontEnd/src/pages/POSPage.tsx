@@ -15,19 +15,19 @@
  */
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { Loader2, ShoppingCart, AlertTriangle, Wifi, WifiOff, RefreshCw } from 'lucide-react';
+import {
+  Loader2,
+  ShoppingCart,
+  AlertTriangle,
+  Wifi,
+  WifiOff,
+  RefreshCw,
+} from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-} from '@/components/ui/dialog';
+import { Dialog } from '@/components/ui/dialog';
 import {
   Drawer,
   DrawerContent,
@@ -70,26 +70,40 @@ import { POSProductGrid } from './pos/POSProductGrid';
 import { POSCart } from './pos/POSCart';
 import { POSPostOrderDialog } from './pos/POSPostOrderDialog';
 import { POSReceiptPrint } from './pos/POSReceiptPrint';
-import { InvoiceDocument, invoiceFromPOS, printInvoice } from '@/components/invoice';
+import {
+  InvoiceDocument,
+  invoiceFromPOS,
+  printInvoice,
+} from '@/components/invoice';
 import { useCurrentCompany } from '@/hooks/queries/useCompanies';
 import { POSCameraScanner } from './pos/POSCameraScanner';
 import { POSAddClientDialog } from './pos/POSAddClientDialog';
 import { POSCheckoutDialog } from './pos/POSCheckoutDialog';
-import { calculatePOSPayment, roundTND, type POSPaymentMethod } from './pos/posPayment';
+import {
+  POSDialogBody,
+  POSDialogContent,
+  POSDialogFooter,
+  POSDialogHeader,
+  POSPrimaryButton,
+} from './pos/POSDialog';
+import {
+  calculatePOSPayment,
+  roundTND,
+  type POSPaymentMethod,
+} from './pos/posPayment';
 import POSCaisseTab from './pos/POSCaisseTab';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Wallet } from 'lucide-react';
-import {
-  fmtTND,
-  type CartLine,
-  type PrintableOrderData,
-} from './pos/types';
+import { fmtTND, type CartLine, type PrintableOrderData } from './pos/types';
 
 import './pos/pos-print.css';
 
 /* ═══════════════════════════════════════════════════════════════════════ */
 
-function orderLineToCartLine(order: OrderDetail, line: OrderLine): CartLine | null {
+function orderLineToCartLine(
+  order: OrderDetail,
+  line: OrderLine
+): CartLine | null {
   const productId = line.product ?? line.product_id;
   if (!productId) return null;
 
@@ -137,7 +151,7 @@ const readCachedChannels = (): SalesChannel[] => {
   if (typeof window === 'undefined') return [];
   try {
     const raw = window.localStorage.getItem(POS_CHANNEL_CACHE_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
+    const parsed: unknown = raw ? (JSON.parse(raw) as unknown) : [];
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
@@ -152,7 +166,8 @@ const readSelectedChannelId = (): string => {
 const normalizePOSPaymentMethod = (value?: string | null): POSPaymentMethod => {
   const normalized = (value || '').toLowerCase();
   if (normalized.includes('split') || normalized.includes('+')) return 'split';
-  if (normalized.includes('card') || normalized.includes('carte')) return 'card';
+  if (normalized.includes('card') || normalized.includes('carte'))
+    return 'card';
   return 'cash';
 };
 
@@ -195,30 +210,43 @@ const describeRequestError = (err: unknown, fallback: string): string => {
       | undefined;
     if (Array.isArray(packErrors) && packErrors.length) {
       const lines = packErrors
-        .map(p =>
-          p.message ||
-          (p.component_name ? `Le produit ${p.component_name} est insuffisant dans ce pack.` : null)
+        .map(
+          p =>
+            p.message ||
+            (p.component_name
+              ? `Le produit ${p.component_name} est insuffisant dans ce pack.`
+              : null)
         )
         .filter(Boolean);
       const head =
-        typeof obj.message === 'string' ? obj.message
-        : typeof obj.detail === 'string' ? obj.detail
-        : null;
+        typeof obj.message === 'string'
+          ? obj.message
+          : typeof obj.detail === 'string'
+            ? obj.detail
+            : null;
       return [head, ...lines].filter(Boolean).join('\n');
     }
 
     // Common single-message keys (string or string[]).
-    for (const key of ['detail', 'message', 'error', 'non_field_errors'] as const) {
+    for (const key of [
+      'detail',
+      'message',
+      'error',
+      'non_field_errors',
+    ] as const) {
       const val = obj[key];
       if (typeof val === 'string' && val.trim()) return val.trim();
-      if (Array.isArray(val) && typeof val[0] === 'string') return val.join(' ');
+      if (Array.isArray(val) && typeof val[0] === 'string')
+        return val.join(' ');
     }
 
     // Generic DRF field-error dict: { field: ["msg", …] }.
     const fieldLines = Object.entries(obj)
       .map(([field, val]) => {
-        if (Array.isArray(val) && typeof val[0] === 'string') return `${field}: ${val.join(' ')}`;
-        if (typeof val === 'string' && val.trim()) return `${field}: ${val.trim()}`;
+        if (Array.isArray(val) && typeof val[0] === 'string')
+          return `${field}: ${val.join(' ')}`;
+        if (typeof val === 'string' && val.trim())
+          return `${field}: ${val.trim()}`;
         return null;
       })
       .filter(Boolean);
@@ -226,7 +254,11 @@ const describeRequestError = (err: unknown, fallback: string): string => {
   }
 
   // Last resort — the JS error text, unless it's the generic axios noise.
-  if (err instanceof Error && err.message && !GENERIC_AXIOS_RE.test(err.message)) {
+  if (
+    err instanceof Error &&
+    err.message &&
+    !GENERIC_AXIOS_RE.test(err.message)
+  ) {
     return err.message;
   }
   return fallback;
@@ -285,8 +317,12 @@ export default function POSPage() {
   const [posHistoryDateFrom, setPosHistoryDateFrom] = useState('');
   const [posHistoryDateTo, setPosHistoryDateTo] = useState('');
   const [isOnlineMode, setIsOnlineMode] = useState(getBrowserOnlineState);
-  const [offlineProducts, setOfflineProducts] = useState<CachedPOSProduct[]>([]);
-  const [offlinePromotions, setOfflinePromotions] = useState<CachedPOSPromotion[]>([]);
+  const [offlineProducts, setOfflineProducts] = useState<CachedPOSProduct[]>(
+    []
+  );
+  const [offlinePromotions, setOfflinePromotions] = useState<
+    CachedPOSPromotion[]
+  >([]);
   const [promotionsLoading, setPromotionsLoading] = useState(false);
   const [offlineLastSync, setOfflineLastSync] = useState<string | null>(null);
   const [pendingOfflineCount, setPendingOfflineCount] = useState(0);
@@ -305,8 +341,9 @@ export default function POSPage() {
   const [productSearch, setProductSearch] = useState('');
   const debouncedProductSearch = useDebounce(productSearch, 500);
   const [paymentMethod, setPaymentMethod] = useState<POSPaymentMethod>('cash');
-  const [manualDiscountType, setManualDiscountType] =
-    useState<'fixed' | 'percentage'>('fixed');
+  const [manualDiscountType, setManualDiscountType] = useState<
+    'fixed' | 'percentage'
+  >('fixed');
   const [manualDiscountValue, setManualDiscountValue] = useState('');
   const [customerNote, setCustomerNote] = useState('');
 
@@ -319,17 +356,25 @@ export default function POSPage() {
   const [amountReceived, setAmountReceived] = useState(0);
   const [cashAmount, setCashAmount] = useState(0);
   const [cardAmount, setCardAmount] = useState(0);
-  const [discountedPrices, setDiscountedPrices] = useState<Record<number, number>>({});
-  const [activePickupOrder, setActivePickupOrder] = useState<OrderDetail | null>(null);
-  const [activeHistoryOrder, setActiveHistoryOrder] = useState<OrderDetail | null>(null);
-  const [pickupLinePrices, setPickupLinePrices] = useState<Record<number, number>>({});
+  const [discountedPrices, setDiscountedPrices] = useState<
+    Record<number, number>
+  >({});
+  const [activePickupOrder, setActivePickupOrder] =
+    useState<OrderDetail | null>(null);
+  const [activeHistoryOrder, setActiveHistoryOrder] =
+    useState<OrderDetail | null>(null);
+  const [pickupLinePrices, setPickupLinePrices] = useState<
+    Record<number, number>
+  >({});
 
   const applyDiscountedPrices = useCallback((next: Record<number, number>) => {
     setDiscountedPrices(prev => {
       const prevKeys = Object.keys(prev);
       const nextKeys = Object.keys(next);
       if (prevKeys.length === nextKeys.length) {
-        const same = nextKeys.every(key => prev[Number(key)] === next[Number(key)]);
+        const same = nextKeys.every(
+          key => prev[Number(key)] === next[Number(key)]
+        );
         if (same) return prev;
       }
       return next;
@@ -342,12 +387,16 @@ export default function POSPage() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   /* ── Post-order flow ───────────────────────────────────────────────── */
-  const [completedOrder, setCompletedOrder] = useState<OrderDetail | null>(null);
+  const [completedOrder, setCompletedOrder] = useState<OrderDetail | null>(
+    null
+  );
   const [printData, setPrintData] = useState<PrintableOrderData | null>(null);
   // Current company's billing profile drives the invoice header (name,
   // Matricule Fiscale, logo, footer…); falls back to the default logo.
   const { data: invoiceCompany } = useCurrentCompany();
-  const [printMode, setPrintMode] = useState<'receipt' | 'invoice' | null>(null);
+  const [printMode, setPrintMode] = useState<'receipt' | 'invoice' | null>(
+    null
+  );
 
   /* ── Mobile drawer ─────────────────────────────────────────────────── */
   const [cartDrawerOpen, setCartDrawerOpen] = useState(false);
@@ -356,18 +405,24 @@ export default function POSPage() {
   const [cameraOpen, setCameraOpen] = useState(false);
   const [addClientOpen, setAddClientOpen] = useState(false);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
-  const [checkoutStep, setCheckoutStep] = useState<'customer' | 'payment'>('customer');
+  const [checkoutStep, setCheckoutStep] = useState<'customer' | 'payment'>(
+    'customer'
+  );
 
   /* ── Camera scanner feedback ───────────────────────────────────────── */
   const [scanFeedback, setScanFeedback] = useState<string | null>(null);
-  const [scanFeedbackType, setScanFeedbackType] = useState<'success' | 'error' | null>(null);
+  const [scanFeedbackType, setScanFeedbackType] = useState<
+    'success' | 'error' | null
+  >(null);
 
   /* ── Barcode scanner buffer (hardware scanner) ─────────────────────── */
   const barcodeBuffer = useRef('');
   const barcodeStartedAt = useRef(0);
   const barcodeLastKeyAt = useRef(0);
   const barcodeTarget = useRef<EventTarget | null>(null);
-  const barcodeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const barcodeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined
+  );
   const displayCartSnapshot = useRef<Map<number, number>>(new Map());
   const submitLockRef = useRef(false);
 
@@ -382,14 +437,19 @@ export default function POSPage() {
       setChannels(chRes);
       setClients(Array.isArray(clRes) ? clRes : clRes.results);
       try {
-        window.localStorage.setItem(POS_CHANNEL_CACHE_KEY, JSON.stringify(chRes));
+        window.localStorage.setItem(
+          POS_CHANNEL_CACHE_KEY,
+          JSON.stringify(chRes)
+        );
       } catch (cacheErr) {
         console.warn('[POS] Could not cache sales channels:', cacheErr);
       }
       setChannelId(prev => {
-        if (prev && chRes.some(channel => String(channel.id) === prev)) return prev;
+        if (prev && chRes.some(channel => String(channel.id) === prev))
+          return prev;
         const saved = readSelectedChannelId();
-        if (saved && chRes.some(channel => String(channel.id) === saved)) return saved;
+        if (saved && chRes.some(channel => String(channel.id) === saved))
+          return saved;
         return chRes[0] ? String(chRes[0].id) : '';
       });
     } catch (err) {
@@ -400,7 +460,10 @@ export default function POSPage() {
       const cachedChannels = readCachedChannels();
       if (cachedChannels.length > 0) {
         setChannels(cachedChannels);
-        setChannelId(prev => prev || readSelectedChannelId() || String(cachedChannels[0].id));
+        setChannelId(
+          prev =>
+            prev || readSelectedChannelId() || String(cachedChannels[0].id)
+        );
       }
     } finally {
       setDataLoading(false);
@@ -424,9 +487,15 @@ export default function POSPage() {
         page_size: 50,
         ordering: '-sent_to_pos_at,-created_at',
       });
-      const results = Array.isArray(response) ? response : response.results ?? [];
+      const results = Array.isArray(response)
+        ? response
+        : (response.results ?? []);
       setWaitingPOSOrders(results);
-      setWaitingPOSCount(Array.isArray(response) ? results.length : response.count ?? results.length);
+      setWaitingPOSCount(
+        Array.isArray(response)
+          ? results.length
+          : (response.count ?? results.length)
+      );
     } catch (err) {
       console.error('Failed to load waiting POS orders:', err);
       setWaitingPOSOrders([]);
@@ -457,9 +526,15 @@ export default function POSPage() {
         page_size: 60,
         ordering: '-created_at',
       });
-      const results = Array.isArray(response) ? response : response.results ?? [];
+      const results = Array.isArray(response)
+        ? response
+        : (response.results ?? []);
       setPosHistoryOrders(results);
-      setPosHistoryCount(Array.isArray(response) ? results.length : response.count ?? results.length);
+      setPosHistoryCount(
+        Array.isArray(response)
+          ? results.length
+          : (response.count ?? results.length)
+      );
     } catch (err) {
       console.error('Failed to load POS order history:', err);
       setPosHistoryOrders([]);
@@ -467,14 +542,20 @@ export default function POSPage() {
     } finally {
       setPosHistoryLoading(false);
     }
-  }, [channelId, channels, debouncedPOSHistorySearch, posHistoryDateFrom, posHistoryDateTo]);
+  }, [
+    channelId,
+    channels,
+    debouncedPOSHistorySearch,
+    posHistoryDateFrom,
+    posHistoryDateTo,
+  ]);
 
   useEffect(() => {
-    fetchRef();
+    void fetchRef();
   }, [fetchRef]);
 
   useEffect(() => {
-    fetchWaitingPOSOrders();
+    void fetchWaitingPOSOrders();
   }, [fetchWaitingPOSOrders]);
 
   // Real-time waiting POS: refresh the waiting list (+ POS history) the moment
@@ -498,7 +579,7 @@ export default function POSPage() {
   });
 
   useEffect(() => {
-    fetchPOSHistoryOrders();
+    void fetchPOSHistoryOrders();
   }, [fetchPOSHistoryOrders]);
 
   /* ── Channel-filtered products ─────────────────────────────────────── */
@@ -542,7 +623,9 @@ export default function POSPage() {
           await offlinePOSService.savePromotions(salesChannelId, promotions);
         } catch (promoErr) {
           console.warn('[POS] Promotion cache refresh failed:', promoErr);
-          toast.error('Could not refresh promotions. Showing last cached values.');
+          toast.error(
+            'Could not refresh promotions. Showing last cached values.'
+          );
         } finally {
           setPromotionsLoading(false);
         }
@@ -552,7 +635,10 @@ export default function POSPage() {
       setIsOnlineMode(true);
       return true;
     } catch (err) {
-      console.warn('[POS] Product cache refresh failed, using IndexedDB snapshot:', err);
+      console.warn(
+        '[POS] Product cache refresh failed, using IndexedDB snapshot:',
+        err
+      );
       await loadCachedPOSProducts(salesChannelId);
       setIsOnlineMode(!isConnectivityError(err));
       return false;
@@ -633,10 +719,17 @@ export default function POSPage() {
           await offlinePOSService.markTicketSynced(ticket, result.id);
           syncedAny = true;
         } catch (err) {
-          const message = describeRequestError(err, 'Offline ticket sync failed.');
+          const message = describeRequestError(
+            err,
+            'Offline ticket sync failed.'
+          );
           await offlinePOSService.markTicketFailed(ticket, message);
           setErrorMsg(`Ticket ${ticket.ticket_id} could not sync: ${message}`);
-          console.warn('[POS] Offline ticket sync failed:', ticket.ticket_id, err);
+          console.warn(
+            '[POS] Offline ticket sync failed:',
+            ticket.ticket_id,
+            err
+          );
           if (isConnectivityError(err)) {
             setIsOnlineMode(false);
             break;
@@ -648,10 +741,7 @@ export default function POSPage() {
       setSyncingOffline(false);
       await refreshPendingOfflineCount();
       if (syncedAny) {
-        await Promise.all([
-          refreshPOSProductCache(),
-          fetchPOSHistoryOrders(),
-        ]);
+        await Promise.all([refreshPOSProductCache(), fetchPOSHistoryOrders()]);
         notifyCaisseStatsChanged();
       }
     }
@@ -670,7 +760,8 @@ export default function POSPage() {
   }, [isOnlineMode, syncOfflineTickets]);
 
   const productQueryParams = useMemo(() => {
-    if (!channelId || !selectedChannel || !isOnlineMode) return { enabled: false as const };
+    if (!channelId || !selectedChannel || !isOnlineMode)
+      return { enabled: false as const };
     // No ``product_type`` filter here: the POS catalogue must surface every
     // sellable item (``resell_product`` AND ``pack``). The backend list
     // endpoint filters product_type by exact match, so we fetch the brand's
@@ -707,7 +798,7 @@ export default function POSPage() {
       // are handled correctly even when the cache hasn't been refreshed.
       const now = new Date();
       const productPromotions = offlinePromotions.filter(
-        promo => promo.product === product.id && isPromotionLive(promo, now),
+        promo => promo.product === product.id && isPromotionLive(promo, now)
       );
       if (productPromotions.length === 0) return null;
 
@@ -716,7 +807,10 @@ export default function POSPage() {
           const value = Number(promo.default_discount_value || 0);
           if (!Number.isFinite(value) || value <= 0) return originalPrice;
           if (promo.discount_type === 'percentage') {
-            return Math.max(0, originalPrice - (originalPrice * Math.min(value, 100)) / 100);
+            return Math.max(
+              0,
+              originalPrice - (originalPrice * Math.min(value, 100)) / 100
+            );
           }
           return Math.max(0, originalPrice - value);
         })
@@ -735,8 +829,10 @@ export default function POSPage() {
       [...rows].sort((a, b) => {
         const aDiscount = discountedPrices[a.id] ?? getCachedPromotionPrice(a);
         const bDiscount = discountedPrices[b.id] ?? getCachedPromotionPrice(b);
-        const aHasPromo = typeof aDiscount === 'number' && aDiscount < Number(a.sales_price);
-        const bHasPromo = typeof bDiscount === 'number' && bDiscount < Number(b.sales_price);
+        const aHasPromo =
+          typeof aDiscount === 'number' && aDiscount < Number(a.sales_price);
+        const bHasPromo =
+          typeof bDiscount === 'number' && bDiscount < Number(b.sales_price);
         if (aHasPromo !== bHasPromo) return aHasPromo ? -1 : 1;
         return a.name.localeCompare(b.name);
       });
@@ -751,17 +847,18 @@ export default function POSPage() {
       const query = normalizeSearch(productSearch);
       const base = offlineProducts.filter(isSellable);
       const rows = query
-        ? base.filter(product => (
-            product.name.toLowerCase().includes(query) ||
-            (product.barcode || '').toLowerCase().includes(query)
-          ))
+        ? base.filter(
+            product =>
+              product.name.toLowerCase().includes(query) ||
+              (product.barcode || '').toLowerCase().includes(query)
+          )
         : base;
       return sortPromotionsFirst(rows);
     }
 
     if (!productsData?.pages) return [];
     return sortPromotionsFirst(
-      productsData.pages.flatMap(page => page?.results ?? []).filter(isSellable),
+      productsData.pages.flatMap(page => page?.results ?? []).filter(isSellable)
     );
   }, [
     channelId,
@@ -781,19 +878,16 @@ export default function POSPage() {
 
   const cartProductIds = useMemo(
     () => Array.from(new Set(cart.map(l => l.product.id))),
-    [cart],
+    [cart]
   );
 
   // Fetch discounts for visible products + cart items so product cards show promo prices
   const allTrackedProductIds = useMemo(
     () =>
       Array.from(
-        new Set([
-          ...channelProducts.map(p => p.id),
-          ...cartProductIds,
-        ]),
+        new Set([...channelProducts.map(p => p.id), ...cartProductIds])
       ),
-    [channelProducts, cartProductIds],
+    [channelProducts, cartProductIds]
   );
 
   const getUnitPrice = useCallback(
@@ -810,7 +904,7 @@ export default function POSPage() {
       }
       return Number(product.sales_price);
     },
-    [activePickupOrder, discountedPrices, pickupLinePrices],
+    [activePickupOrder, discountedPrices, pickupLinePrices]
   );
 
   /* ── Promotions (POS + WooCommerce channels) ─────────────────────────── */
@@ -820,8 +914,10 @@ export default function POSPage() {
       return;
     }
     if (
-      !channelId || !selectedChannel ||
-      (selectedChannel.channel_type !== 'POS' && selectedChannel.channel_type !== 'WOOCOMMERCE')
+      !channelId ||
+      !selectedChannel ||
+      (selectedChannel.channel_type !== 'POS' &&
+        selectedChannel.channel_type !== 'WOOCOMMERCE')
     ) {
       applyDiscountedPrices({});
       return;
@@ -881,7 +977,7 @@ export default function POSPage() {
       }
     };
 
-    fetchDiscounts();
+    void fetchDiscounts();
 
     return () => {
       cancelled = true;
@@ -900,34 +996,45 @@ export default function POSPage() {
   /* ── Cart quantity map (for product card badges) ───────────────────── */
   const cartQuantities = useMemo(
     () => new Map(cart.map(l => [l.product.id, l.quantity])),
-    [cart],
+    [cart]
   );
   const offlineProductById = useMemo(
     () => new Map(offlineProducts.map(product => [product.id, product])),
-    [offlineProducts],
+    [offlineProducts]
   );
 
   /* ── Cart helpers ──────────────────────────────────────────────────── */
-  const getOfflineAvailableQuantity = useCallback((product: ProductListItem) => {
-    if (product.is_pack && product.pack_items?.length) {
-      const availableSets = product.pack_items.map(item => {
-        const component = offlineProductById.get(item.product_id);
-        const required = Math.max(1, Number(item.quantity || 1));
-        return Math.floor((component?.offline_stock?.available_quantity ?? 0) / required);
-      });
-      return availableSets.length > 0 ? Math.max(0, Math.min(...availableSets)) : 0;
-    }
-    const cached = offlineProductById.get(product.id) || (product as CachedPOSProduct);
-    return cached.offline_stock?.available_quantity ?? 0;
-  }, [offlineProductById]);
+  const getOfflineAvailableQuantity = useCallback(
+    (product: ProductListItem) => {
+      if (product.is_pack && product.pack_items?.length) {
+        const availableSets = product.pack_items.map(item => {
+          const component = offlineProductById.get(item.product_id);
+          const required = Math.max(1, Number(item.quantity || 1));
+          return Math.floor(
+            (component?.offline_stock?.available_quantity ?? 0) / required
+          );
+        });
+        return availableSets.length > 0
+          ? Math.max(0, Math.min(...availableSets))
+          : 0;
+      }
+      const cached =
+        offlineProductById.get(product.id) || (product as CachedPOSProduct);
+      return cached.offline_stock?.available_quantity ?? 0;
+    },
+    [offlineProductById]
+  );
 
-  const getCachedAvailableQuantity = useCallback((product: ProductListItem) => {
-    if (offlineProducts.length === 0) {
-      return isOnlineMode ? null : 0;
-    }
-    const quantity = getOfflineAvailableQuantity(product);
-    return Number.isFinite(quantity) ? Math.max(0, quantity) : null;
-  }, [getOfflineAvailableQuantity, isOnlineMode, offlineProducts.length]);
+  const getCachedAvailableQuantity = useCallback(
+    (product: ProductListItem) => {
+      if (offlineProducts.length === 0) {
+        return isOnlineMode ? null : 0;
+      }
+      const quantity = getOfflineAvailableQuantity(product);
+      return Number.isFinite(quantity) ? Math.max(0, quantity) : null;
+    },
+    [getOfflineAvailableQuantity, isOnlineMode, offlineProducts.length]
+  );
 
   const releasePickupOrder = useCallback(() => {
     setActivePickupOrder(null);
@@ -954,66 +1061,73 @@ export default function POSPage() {
     setClientSkipped(false);
   }, []);
 
-  const addToCart = useCallback((product: ProductListItem) => {
-    if (activePickupOrder) {
-      setErrorMsg('Release the waiting pickup order before adding products manually.');
-      return;
-    }
-    if (!isOnlineMode) {
-      const available = getOfflineAvailableQuantity(product);
-      const currentQuantity = cart.find(l => l.product.id === product.id)?.quantity ?? 0;
-      if (currentQuantity + 1 > available) {
+  const addToCart = useCallback(
+    (product: ProductListItem) => {
+      if (activePickupOrder) {
         setErrorMsg(
-          product.is_pack
-            ? `Stock insuffisant pour le pack ${product.name} (${available} disponible selon les composants).`
-            : `${product.name}: stock insuffisant en mode offline (${available} disponible).`
+          'Release the waiting pickup order before adding products manually.'
         );
         return;
       }
-    }
-    setCart(prev => {
-      const existing = prev.find(l => l.product.id === product.id);
-      if (existing) {
-        return prev.map(l =>
-          l.product.id === product.id
-            ? { ...l, quantity: l.quantity + 1 }
-            : l,
-        );
-      }
-      return [...prev, { product, quantity: 1 }];
-    });
-  }, [activePickupOrder, cart, getOfflineAvailableQuantity, isOnlineMode]);
-
-  const changeQty = useCallback((productId: number, delta: number) => {
-    if (!isOnlineMode && delta > 0) {
-      const line = cart.find(l => l.product.id === productId);
-      if (line) {
-        const available = getOfflineAvailableQuantity(line.product);
-        if (line.quantity + delta > available) {
+      if (!isOnlineMode) {
+        const available = getOfflineAvailableQuantity(product);
+        const currentQuantity =
+          cart.find(l => l.product.id === product.id)?.quantity ?? 0;
+        if (currentQuantity + 1 > available) {
           setErrorMsg(
-            line.product.is_pack
-              ? `Stock insuffisant pour le pack ${line.product.name} (${available} disponible selon les composants).`
-              : `${line.product.name}: stock insuffisant en mode offline (${available} disponible).`
+            product.is_pack
+              ? `Stock insuffisant pour le pack ${product.name} (${available} disponible selon les composants).`
+              : `${product.name}: stock insuffisant en mode offline (${available} disponible).`
           );
           return;
         }
       }
-    }
-    setCart(prev =>
-      prev
-        .map(l =>
-          l.product.id === productId
-            ? { ...l, quantity: Math.max(0, l.quantity + delta) }
-            : l,
-        )
-        .filter(l => l.quantity > 0),
-    );
-  }, [cart, getOfflineAvailableQuantity, isOnlineMode]);
+      setCart(prev => {
+        const existing = prev.find(l => l.product.id === product.id);
+        if (existing) {
+          return prev.map(l =>
+            l.product.id === product.id ? { ...l, quantity: l.quantity + 1 } : l
+          );
+        }
+        return [...prev, { product, quantity: 1 }];
+      });
+    },
+    [activePickupOrder, cart, getOfflineAvailableQuantity, isOnlineMode]
+  );
+
+  const changeQty = useCallback(
+    (productId: number, delta: number) => {
+      if (!isOnlineMode && delta > 0) {
+        const line = cart.find(l => l.product.id === productId);
+        if (line) {
+          const available = getOfflineAvailableQuantity(line.product);
+          if (line.quantity + delta > available) {
+            setErrorMsg(
+              line.product.is_pack
+                ? `Stock insuffisant pour le pack ${line.product.name} (${available} disponible selon les composants).`
+                : `${line.product.name}: stock insuffisant en mode offline (${available} disponible).`
+            );
+            return;
+          }
+        }
+      }
+      setCart(prev =>
+        prev
+          .map(l =>
+            l.product.id === productId
+              ? { ...l, quantity: Math.max(0, l.quantity + delta) }
+              : l
+          )
+          .filter(l => l.quantity > 0)
+      );
+    },
+    [cart, getOfflineAvailableQuantity, isOnlineMode]
+  );
 
   const removeFromCart = useCallback(
     (productId: number) =>
       setCart(prev => prev.filter(l => l.product.id !== productId)),
-    [],
+    []
   );
 
   const clearCart = useCallback(() => {
@@ -1035,17 +1149,27 @@ export default function POSPage() {
     setCardAmount(0);
     setCheckoutOpen(false);
     setCheckoutStep('customer');
-  }, [activeHistoryOrder, activePickupOrder, releaseHistoryOrder, releasePickupOrder]);
+  }, [
+    activeHistoryOrder,
+    activePickupOrder,
+    releaseHistoryOrder,
+    releasePickupOrder,
+  ]);
 
   // Full price total (no promotions) — used to compute savings display
   const cartOriginalTotal = useMemo(
-    () => cart.reduce((sum, l) => sum + l.quantity * Number(l.product.sales_price), 0),
-    [cart],
+    () =>
+      cart.reduce(
+        (sum, l) => sum + l.quantity * Number(l.product.sales_price),
+        0
+      ),
+    [cart]
   );
 
   const promotionCartTotal = useMemo(
-    () => cart.reduce((sum, l) => sum + l.quantity * getUnitPrice(l.product), 0),
-    [cart, getUnitPrice],
+    () =>
+      cart.reduce((sum, l) => sum + l.quantity * getUnitPrice(l.product), 0),
+    [cart, getUnitPrice]
   );
 
   const manualDiscountAmount = useMemo(() => {
@@ -1061,23 +1185,24 @@ export default function POSPage() {
   // Final total — promotions first, then manual cart-level discount.
   const cartTotal = useMemo(
     () => Math.max(0, promotionCartTotal - manualDiscountAmount),
-    [manualDiscountAmount, promotionCartTotal],
+    [manualDiscountAmount, promotionCartTotal]
   );
 
   const cartItemCount = useMemo(
     () => cart.reduce((sum, l) => sum + l.quantity, 0),
-    [cart],
+    [cart]
   );
 
   const paymentBreakdown = useMemo(
-    () => calculatePOSPayment({
-      method: paymentMethod,
-      total: cartTotal,
-      cashAmount,
-      cardAmount,
-      amountReceived,
-    }),
-    [amountReceived, cardAmount, cartTotal, cashAmount, paymentMethod],
+    () =>
+      calculatePOSPayment({
+        method: paymentMethod,
+        total: cartTotal,
+        cashAmount,
+        cardAmount,
+        amountReceived,
+      }),
+    [amountReceived, cardAmount, cartTotal, cashAmount, paymentMethod]
   );
   const changeAmount = paymentBreakdown.change;
 
@@ -1165,137 +1290,158 @@ export default function POSPage() {
     setCheckoutStep('payment');
   }, []);
 
-  const handleSelectWaitingOrder = useCallback(async (order: OrderListItem) => {
-    setSubmitting(true);
-    setErrorMsg(null);
-    try {
-      const detail = await orderService.getById(order.id);
-      const nextCart = detail.lines
-        .map(line => orderLineToCartLine(detail, line))
-        .filter((line): line is CartLine => line !== null);
+  const handleSelectWaitingOrder = useCallback(
+    async (order: OrderListItem) => {
+      setSubmitting(true);
+      setErrorMsg(null);
+      try {
+        const detail = await orderService.getById(order.id);
+        const nextCart = detail.lines
+          .map(line => orderLineToCartLine(detail, line))
+          .filter((line): line is CartLine => line !== null);
 
-      if (nextCart.length !== detail.lines.length || nextCart.length === 0) {
+        if (nextCart.length !== detail.lines.length || nextCart.length === 0) {
+          setErrorMsg(
+            'This pickup order has unlinked products. Link the order lines to local products before POS checkout.'
+          );
+          return;
+        }
+
+        const prices = nextCart.reduce<Record<number, number>>((acc, line) => {
+          acc[line.product.id] = Number(line.product.sales_price);
+          return acc;
+        }, {});
+        const matchedClient = detail.client
+          ? (clients.find(client => client.id === detail.client) ?? null)
+          : null;
+
+        setActivePickupOrder(detail);
+        setPickupLinePrices(prices);
+        setChannelId(String(detail.pos_sales_channel ?? detail.sales_channel));
+        setCart(nextCart);
+        setAmountReceived(0);
+        setCashAmount(Number(detail.total || 0));
+        setCardAmount(0);
+        setPaymentMethod(normalizePOSPaymentMethod(detail.payment_method));
+        setCustomerNote(detail.customer_note || '');
+        setSelectedClient(matchedClient);
+        setClientSkipped(!matchedClient);
+        if (isMobile) setCartDrawerOpen(true);
+      } catch (err: unknown) {
+        const msg =
+          err instanceof Error ? err.message : 'Failed to load waiting order.';
+        setErrorMsg(msg);
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [clients, isMobile]
+  );
+
+  const handleSelectHistoryOrder = useCallback(
+    async (order: OrderListItem) => {
+      if (order.returned_at || order.status === 'returned') {
         setErrorMsg(
-          'This pickup order has unlinked products. Link the order lines to local products before POS checkout.'
+          'This POS ticket is already returned and cannot be edited.'
         );
         return;
       }
+      setSubmitting(true);
+      setErrorMsg(null);
+      try {
+        const detail = await orderService.getById(order.id);
+        const nextCart = (detail.lines ?? [])
+          .map(line => orderLineToCartLine(detail, line))
+          .filter((line): line is CartLine => Boolean(line));
 
-      const prices = nextCart.reduce<Record<number, number>>((acc, line) => {
-        acc[line.product.id] = Number(line.product.sales_price);
-        return acc;
-      }, {});
-      const matchedClient = detail.client
-        ? clients.find(client => client.id === detail.client) ?? null
-        : null;
+        if (nextCart.length === 0) {
+          setErrorMsg('This POS order has no editable product lines.');
+          return;
+        }
 
-      setActivePickupOrder(detail);
-      setPickupLinePrices(prices);
-      setChannelId(String(detail.pos_sales_channel ?? detail.sales_channel));
-      setCart(nextCart);
-      setAmountReceived(0);
-      setCashAmount(Number(detail.total || 0));
-      setCardAmount(0);
-      setPaymentMethod(normalizePOSPaymentMethod(detail.payment_method));
-      setCustomerNote(detail.customer_note || '');
-      setSelectedClient(matchedClient);
-      setClientSkipped(!matchedClient);
-      if (isMobile) setCartDrawerOpen(true);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to load waiting order.';
-      setErrorMsg(msg);
-    } finally {
-      setSubmitting(false);
-    }
-  }, [clients, isMobile]);
+        const matchedClient = detail.client
+          ? (clients.find(client => client.id === detail.client) ?? null)
+          : null;
+        const discountValue = Number(detail.discount_value || 0);
 
-  const handleSelectHistoryOrder = useCallback(async (order: OrderListItem) => {
-    if (order.returned_at || order.status === 'returned') {
-      setErrorMsg('This POS ticket is already returned and cannot be edited.');
-      return;
-    }
-    setSubmitting(true);
-    setErrorMsg(null);
-    try {
-      const detail = await orderService.getById(order.id);
-      const nextCart = (detail.lines ?? [])
-        .map(line => orderLineToCartLine(detail, line))
-        .filter((line): line is CartLine => Boolean(line));
+        setActivePickupOrder(null);
+        setPickupLinePrices({});
+        setActiveHistoryOrder(detail);
+        setChannelId(String(detail.sales_channel));
+        setCart(nextCart);
+        setAmountReceived(Number(detail.amount_received || detail.total || 0));
+        setCashAmount(Number(detail.cash_amount || 0));
+        setCardAmount(Number(detail.card_amount || 0));
+        setPaymentMethod(normalizePOSPaymentMethod(detail.payment_method));
+        setManualDiscountType(
+          detail.discount_type === 'PERCENTAGE' ? 'percentage' : 'fixed'
+        );
+        setManualDiscountValue(discountValue > 0 ? String(discountValue) : '');
+        setCustomerNote(detail.customer_note || '');
+        setSelectedClient(matchedClient);
+        setClientSkipped(!matchedClient);
+        if (isMobile) setCartDrawerOpen(true);
+      } catch (err: unknown) {
+        const msg =
+          err instanceof Error
+            ? err.message
+            : 'Failed to load POS order history.';
+        setErrorMsg(msg);
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [clients, isMobile]
+  );
 
-      if (nextCart.length === 0) {
-        setErrorMsg('This POS order has no editable product lines.');
+  const handleReturnHistoryOrder = useCallback(
+    async (order: OrderListItem | OrderDetail) => {
+      if (!order?.id || returningOrderId) return;
+      if (order.returned_at || order.status === 'returned') {
+        setErrorMsg('This POS ticket has already been returned.');
         return;
       }
 
-      const matchedClient = detail.client
-        ? clients.find(client => client.id === detail.client) ?? null
-        : null;
-      const discountValue = Number(detail.discount_value || 0);
+      const ticket = order.ticket_id || order.order_number;
+      const confirmed = window.confirm(
+        `Return POS ticket #${ticket}?\n\nStock will be restored for this POS location. This will not increase the client WooCommerce return count.`
+      );
+      if (!confirmed) return;
 
-      setActivePickupOrder(null);
-      setPickupLinePrices({});
-      setActiveHistoryOrder(detail);
-      setChannelId(String(detail.sales_channel));
-      setCart(nextCart);
-      setAmountReceived(Number(detail.amount_received || detail.total || 0));
-      setCashAmount(Number(detail.cash_amount || 0));
-      setCardAmount(Number(detail.card_amount || 0));
-      setPaymentMethod(normalizePOSPaymentMethod(detail.payment_method));
-      setManualDiscountType(detail.discount_type === 'PERCENTAGE' ? 'percentage' : 'fixed');
-      setManualDiscountValue(discountValue > 0 ? String(discountValue) : '');
-      setCustomerNote(detail.customer_note || '');
-      setSelectedClient(matchedClient);
-      setClientSkipped(!matchedClient);
-      if (isMobile) setCartDrawerOpen(true);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to load POS order history.';
-      setErrorMsg(msg);
-    } finally {
-      setSubmitting(false);
-    }
-  }, [clients, isMobile]);
-
-  const handleReturnHistoryOrder = useCallback(async (order: OrderListItem | OrderDetail) => {
-    if (!order?.id || returningOrderId) return;
-    if (order.returned_at || order.status === 'returned') {
-      setErrorMsg('This POS ticket has already been returned.');
-      return;
-    }
-
-    const ticket = order.ticket_id || order.order_number;
-    const confirmed = window.confirm(
-      `Return POS ticket #${ticket}?\n\nStock will be restored for this POS location. This will not increase the client WooCommerce return count.`
-    );
-    if (!confirmed) return;
-
-    setReturningOrderId(order.id);
-    setErrorMsg(null);
-    try {
-      await orderService.processReturn(order.id, { returnReason: 'Returned from POS history' });
-      if (activeHistoryOrder?.id === order.id) {
-        releaseHistoryOrder();
+      setReturningOrderId(order.id);
+      setErrorMsg(null);
+      try {
+        await orderService.processReturn(order.id, {
+          returnReason: 'Returned from POS history',
+        });
+        if (activeHistoryOrder?.id === order.id) {
+          releaseHistoryOrder();
+        }
+        await Promise.all([
+          fetchPOSHistoryOrders(),
+          channelId ? refreshPOSProductCache() : Promise.resolve(false),
+        ]);
+        notifyCaisseStatsChanged();
+        setScanFeedback(`✓ Ticket #${ticket} returned and stock restored`);
+        setScanFeedbackType('success');
+      } catch (err: unknown) {
+        setErrorMsg(
+          describeRequestError(err, 'Failed to return this POS ticket.')
+        );
+      } finally {
+        setReturningOrderId(null);
       }
-      await Promise.all([
-        fetchPOSHistoryOrders(),
-        channelId ? refreshPOSProductCache() : Promise.resolve(false),
-      ]);
-      notifyCaisseStatsChanged();
-      setScanFeedback(`✓ Ticket #${ticket} returned and stock restored`);
-      setScanFeedbackType('success');
-    } catch (err: unknown) {
-      setErrorMsg(describeRequestError(err, 'Failed to return this POS ticket.'));
-    } finally {
-      setReturningOrderId(null);
-    }
-  }, [
-    activeHistoryOrder?.id,
-    channelId,
-    fetchPOSHistoryOrders,
-    notifyCaisseStatsChanged,
-    refreshPOSProductCache,
-    releaseHistoryOrder,
-    returningOrderId,
-  ]);
+    },
+    [
+      activeHistoryOrder?.id,
+      channelId,
+      fetchPOSHistoryOrders,
+      notifyCaisseStatsChanged,
+      refreshPOSProductCache,
+      releaseHistoryOrder,
+      returningOrderId,
+    ]
+  );
 
   /* ── Barcode handler (shared by hardware scanner + camera) ─────────── */
   const handleBarcodeDetected = useCallback(
@@ -1307,7 +1453,7 @@ export default function POSPage() {
 
       // 1. Try local match first (faster, no network)
       const localMatch = channelProducts.find(
-        p => p.barcode?.toLowerCase() === cleanBarcode.toLowerCase(),
+        p => p.barcode?.toLowerCase() === cleanBarcode.toLowerCase()
       );
       if (localMatch) {
         addToCart(localMatch);
@@ -1345,7 +1491,9 @@ export default function POSPage() {
             (!channelId || Number(channelId) === order.sales_channel)
           ) {
             await handleSelectHistoryOrder(order as unknown as OrderListItem);
-            setScanFeedback(`✓ Ticket ${order.ticket_id || order.order_number} opened`);
+            setScanFeedback(
+              `✓ Ticket ${order.ticket_id || order.order_number} opened`
+            );
             setScanFeedbackType('success');
             return;
           }
@@ -1356,13 +1504,17 @@ export default function POSPage() {
               search: cleanBarcode,
               page_size: 1,
             });
-            const [order] = Array.isArray(response) ? response : response.results ?? [];
+            const [order] = Array.isArray(response)
+              ? response
+              : (response.results ?? []);
             if (
               order &&
               (!channelId || Number(channelId) === order.sales_channel)
             ) {
               await handleSelectHistoryOrder(order);
-              setScanFeedback(`✓ Ticket ${order.ticket_id || order.order_number} opened`);
+              setScanFeedback(
+                `✓ Ticket ${order.ticket_id || order.order_number} opened`
+              );
               setScanFeedbackType('success');
               return;
             }
@@ -1376,7 +1528,13 @@ export default function POSPage() {
       setScanFeedback(`✗ Barcode "${cleanBarcode}" not found`);
       setScanFeedbackType('error');
     },
-    [addToCart, channelId, channelProducts, handleSelectHistoryOrder, isOnlineMode],
+    [
+      addToCart,
+      channelId,
+      channelProducts,
+      handleSelectHistoryOrder,
+      isOnlineMode,
+    ]
   );
 
   /* ── Hardware barcode scanner (keyboard input detection) ────────────── */
@@ -1393,7 +1551,9 @@ export default function POSPage() {
       const target = barcodeTarget.current;
 
       if (target instanceof HTMLInputElement) {
-        const placeholder = (target.getAttribute('placeholder') || '').toLowerCase();
+        const placeholder = (
+          target.getAttribute('placeholder') || ''
+        ).toLowerCase();
         if (target.type === 'number') {
           setAmountReceived(0);
         }
@@ -1415,18 +1575,27 @@ export default function POSPage() {
       }
     };
 
-    const flushBarcodeBuffer = (submittedByEnter: boolean, event?: KeyboardEvent) => {
+    const flushBarcodeBuffer = (
+      submittedByEnter: boolean,
+      event?: KeyboardEvent
+    ) => {
       const barcode = barcodeBuffer.current.trim();
       if (!barcode) {
         resetBarcodeBuffer();
         return false;
       }
 
-      const finishedAt = submittedByEnter ? Date.now() : barcodeLastKeyAt.current;
+      const finishedAt = submittedByEnter
+        ? Date.now()
+        : barcodeLastKeyAt.current;
       const elapsed = Math.max(1, finishedAt - barcodeStartedAt.current);
       const averageMsPerChar = elapsed / Math.max(1, barcode.length);
-      const minLength = submittedByEnter ? SCANNER_ENTER_MIN_LENGTH : SCANNER_AUTO_MIN_LENGTH;
-      const maxAverageMs = submittedByEnter ? SCANNER_ENTER_MAX_AVG_MS : SCANNER_AUTO_MAX_AVG_MS;
+      const minLength = submittedByEnter
+        ? SCANNER_ENTER_MIN_LENGTH
+        : SCANNER_AUTO_MIN_LENGTH;
+      const maxAverageMs = submittedByEnter
+        ? SCANNER_ENTER_MAX_AVG_MS
+        : SCANNER_AUTO_MAX_AVG_MS;
       const looksLikeScanner =
         barcode.length >= minLength &&
         averageMsPerChar <= maxAverageMs &&
@@ -1459,7 +1628,10 @@ export default function POSPage() {
       if (target?.isContentEditable) return;
 
       const now = Date.now();
-      if (!barcodeBuffer.current || now - barcodeLastKeyAt.current > SCANNER_RESET_GAP_MS) {
+      if (
+        !barcodeBuffer.current ||
+        now - barcodeLastKeyAt.current > SCANNER_RESET_GAP_MS
+      ) {
         barcodeBuffer.current = '';
         barcodeStartedAt.current = now;
         barcodeTarget.current = e.target;
@@ -1536,7 +1708,9 @@ export default function POSPage() {
         notifyCaisseStatsChanged();
         if (isMobile) setCartDrawerOpen(false);
       } catch (err: unknown) {
-        setErrorMsg(describeRequestError(err, 'Could not complete this pickup order.'));
+        setErrorMsg(
+          describeRequestError(err, 'Could not complete this pickup order.')
+        );
       } finally {
         setSubmitting(false);
       }
@@ -1557,13 +1731,18 @@ export default function POSPage() {
           safeManualDiscount <= 0
             ? 0
             : manualDiscountType === 'percentage'
-              ? Math.min(editSubtotal, (editSubtotal * Math.min(safeManualDiscount, 100)) / 100)
+              ? Math.min(
+                  editSubtotal,
+                  (editSubtotal * Math.min(safeManualDiscount, 100)) / 100
+                )
               : Math.min(editSubtotal, safeManualDiscount);
 
         const updated = await orderService.editOrder(activeHistoryOrder.id, {
           lines: cart.map(line => {
             const originalLine = activeHistoryOrder.lines?.find(
-              existing => existing.product === line.product.id || existing.product_id === line.product.id
+              existing =>
+                existing.product === line.product.id ||
+                existing.product_id === line.product.id
             );
             return {
               id: originalLine?.id,
@@ -1605,10 +1784,7 @@ export default function POSPage() {
         setCompletedOrder(updated);
 
         releaseHistoryOrder();
-        await Promise.all([
-          fetchPOSHistoryOrders(),
-          refreshPOSProductCache(),
-        ]);
+        await Promise.all([fetchPOSHistoryOrders(), refreshPOSProductCache()]);
         notifyCaisseStatsChanged();
         if (isMobile) setCartDrawerOpen(false);
       } catch (err: unknown) {
@@ -1651,7 +1827,7 @@ export default function POSPage() {
 
     const submitSubtotal = cart.reduce(
       (sum, l) => sum + l.quantity * getSubmitPrice(l.product),
-      0,
+      0
     );
     const rawManualDiscount = Number(manualDiscountValue || 0);
     const safeManualDiscount = Number.isFinite(rawManualDiscount)
@@ -1661,7 +1837,10 @@ export default function POSPage() {
       safeManualDiscount <= 0
         ? 0
         : manualDiscountType === 'percentage'
-          ? Math.min(submitSubtotal, (submitSubtotal * Math.min(safeManualDiscount, 100)) / 100)
+          ? Math.min(
+              submitSubtotal,
+              (submitSubtotal * Math.min(safeManualDiscount, 100)) / 100
+            )
           : Math.min(submitSubtotal, safeManualDiscount);
     const submitTotal = Math.max(0, submitSubtotal - submitManualDiscount);
 
@@ -1681,7 +1860,9 @@ export default function POSPage() {
       }
       setAmountReceived(0);
       setSubmitting(false);
-      toast.info('Les promotions ont changé. Vérifiez le nouveau total avant de confirmer.');
+      toast.info(
+        'Les promotions ont changé. Vérifiez le nouveau total avant de confirmer.'
+      );
       return;
     }
 
@@ -1697,7 +1878,11 @@ export default function POSPage() {
             last_name: selectedClient.last_name,
             phone: selectedClient.phone ?? undefined,
             city: '',
-            state: selectedClient.governorate || selectedClient.state || currentChannel?.state || '',
+            state:
+              selectedClient.governorate ||
+              selectedClient.state ||
+              currentChannel?.state ||
+              '',
             address_1: selectedClient.address || currentChannel?.address || '',
           }
         : undefined,
@@ -1732,22 +1917,28 @@ export default function POSPage() {
       total: submitTotal.toFixed(2),
     };
 
-    const queueCurrentTicketOffline = async (notice?: string): Promise<boolean> => {
-      const stockCheck = await offlinePOSService.validateLocalStock(Number(channelId), cart);
+    const queueCurrentTicketOffline = async (
+      notice?: string
+    ): Promise<boolean> => {
+      const stockCheck = await offlinePOSService.validateLocalStock(
+        Number(channelId),
+        cart
+      );
       if (!stockCheck.ok) {
         setErrorMsg(stockCheck.message);
         return false;
       }
 
-      const queued: OfflineTicket = await offlinePOSService.queueTicketAndApplySale(
-        {
-          ...ticketIdentity,
-          sales_channel: Number(channelId),
-          payload,
-          created_at: new Date().toISOString(),
-        },
-        cart,
-      );
+      const queued: OfflineTicket =
+        await offlinePOSService.queueTicketAndApplySale(
+          {
+            ...ticketIdentity,
+            sales_channel: Number(channelId),
+            payload,
+            created_at: new Date().toISOString(),
+          },
+          cart
+        );
 
       await loadCachedPOSProducts(Number(channelId));
       await refreshPendingOfflineCount();
@@ -1881,7 +2072,8 @@ export default function POSPage() {
       try {
         await queueCurrentTicketOffline();
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'Failed to save offline ticket.';
+        const msg =
+          err instanceof Error ? err.message : 'Failed to save offline ticket.';
         setErrorMsg(msg);
       } finally {
         setSubmitting(false);
@@ -1921,39 +2113,62 @@ export default function POSPage() {
       setSelectedClient(null);
       setClientSkipped(false);
       void customerDisplayService.showTotal(0);
-      await Promise.all([
-        fetchPOSHistoryOrders(),
-        refreshPOSProductCache(),
-      ]);
+      await Promise.all([fetchPOSHistoryOrders(), refreshPOSProductCache()]);
       notifyCaisseStatsChanged();
       if (isMobile) setCartDrawerOpen(false);
     } catch (err: unknown) {
       if (isConnectivityError(err)) {
         setIsOnlineMode(false);
         try {
-          await queueCurrentTicketOffline('Connexion perdue. Ticket enregistré en mode offline.');
+          await queueCurrentTicketOffline(
+            'Connexion perdue. Ticket enregistré en mode offline.'
+          );
           return;
         } catch (offlineErr: unknown) {
-          const msg = offlineErr instanceof Error
-            ? offlineErr.message
-            : 'Connexion perdue et sauvegarde offline impossible.';
+          const msg =
+            offlineErr instanceof Error
+              ? offlineErr.message
+              : 'Connexion perdue et sauvegarde offline impossible.';
           setErrorMsg(msg);
           return;
         }
       }
-      setErrorMsg(describeRequestError(err, 'Could not place the order. Please try again.'));
+      setErrorMsg(
+        describeRequestError(
+          err,
+          'Could not place the order. Please try again.'
+        )
+      );
     } finally {
       setSubmitting(false);
     }
   }, [
-    activeHistoryOrder, activePickupOrder,
-    channelId, cart, selectedClient, channels,
-    paymentMethod, paymentBreakdown, customerNote, amountReceived, changeAmount,
-    manualDiscountType, manualDiscountValue,
-    isMobile, getUnitPrice, releaseHistoryOrder, releasePickupOrder, fetchPOSHistoryOrders, fetchWaitingPOSOrders,
-    cashierName, cartOriginalTotal, isOnlineMode,
-    loadCachedPOSProducts, refreshPendingOfflineCount,
-    refreshPOSProductCache, notifyCaisseStatsChanged,
+    activeHistoryOrder,
+    activePickupOrder,
+    channelId,
+    cart,
+    selectedClient,
+    channels,
+    paymentMethod,
+    paymentBreakdown,
+    customerNote,
+    amountReceived,
+    changeAmount,
+    manualDiscountType,
+    manualDiscountValue,
+    isMobile,
+    getUnitPrice,
+    releaseHistoryOrder,
+    releasePickupOrder,
+    fetchPOSHistoryOrders,
+    fetchWaitingPOSOrders,
+    cashierName,
+    cartOriginalTotal,
+    isOnlineMode,
+    loadCachedPOSProducts,
+    refreshPendingOfflineCount,
+    refreshPOSProductCache,
+    notifyCaisseStatsChanged,
   ]);
 
   const runSubmitOnce = useCallback(async () => {
@@ -2030,13 +2245,16 @@ export default function POSPage() {
         changeAmount: printData.changeAmount,
         cashier: printData.cashierName,
         displaySubtotal:
-          Number(printData.order.total || 0) + Number(printData.discountTotal || 0),
+          Number(printData.order.total || 0) +
+          Number(printData.discountTotal || 0),
         discountTotal: Number(printData.discountTotal || 0),
-      }),
+      })
     );
 
     if (!sentToBridge) {
-      console.warn('[POS] print bridge offline — falling back to browser print');
+      console.warn(
+        '[POS] print bridge offline — falling back to browser print'
+      );
       handlePrint('receipt');
     }
   }, [handlePrint, printData]);
@@ -2057,25 +2275,33 @@ export default function POSPage() {
   }, []);
 
   /* ── Channel change handler ────────────────────────────────────────── */
-  const handleChannelChange = useCallback((v: string) => {
-    if (activePickupOrder) {
-      releasePickupOrder();
-    }
-    if (activeHistoryOrder) {
-      releaseHistoryOrder();
-    }
-    try {
-      window.localStorage.setItem(POS_SELECTED_CHANNEL_KEY, v);
-    } catch (cacheErr) {
-      console.warn('[POS] Could not persist selected channel:', cacheErr);
-    }
-    setChannelId(v);
-    setCart([]);
-    setAmountReceived(0);
-    setCashAmount(0);
-    setCardAmount(0);
-    setManualDiscountValue('');
-  }, [activeHistoryOrder, activePickupOrder, releaseHistoryOrder, releasePickupOrder]);
+  const handleChannelChange = useCallback(
+    (v: string) => {
+      if (activePickupOrder) {
+        releasePickupOrder();
+      }
+      if (activeHistoryOrder) {
+        releaseHistoryOrder();
+      }
+      try {
+        window.localStorage.setItem(POS_SELECTED_CHANNEL_KEY, v);
+      } catch (cacheErr) {
+        console.warn('[POS] Could not persist selected channel:', cacheErr);
+      }
+      setChannelId(v);
+      setCart([]);
+      setAmountReceived(0);
+      setCashAmount(0);
+      setCardAmount(0);
+      setManualDiscountValue('');
+    },
+    [
+      activeHistoryOrder,
+      activePickupOrder,
+      releaseHistoryOrder,
+      releasePickupOrder,
+    ]
+  );
 
   /* ── Shared cart props ─────────────────────────────────────────────── */
   const canAddClient = !!channelId && !!selectedChannel;
@@ -2092,7 +2318,7 @@ export default function POSPage() {
   const pickupOrderMeta = activePickupOrder
     ? `${activePickupOrder.client_name || 'Walk-in pickup'} · ${activePickupOrder.billing_phone || activePickupOrder.client_phone || 'No phone'}`
     : undefined;
-  
+
   const cartProps = {
     cart,
     cartTotal,
@@ -2117,11 +2343,15 @@ export default function POSPage() {
     lockedOrderMeta: activeHistoryOrder
       ? 'Scan products to add, use quantity controls, or remove lines.'
       : pickupOrderMeta,
-    onReleaseLockedOrder: activeHistoryOrder ? releaseHistoryOrder : releasePickupOrder,
+    onReleaseLockedOrder: activeHistoryOrder
+      ? releaseHistoryOrder
+      : releasePickupOrder,
     onReturnLockedOrder: activeHistoryOrder
       ? () => void handleReturnHistoryOrder(activeHistoryOrder)
       : undefined,
-    returningLockedOrder: activeHistoryOrder ? returningOrderId === activeHistoryOrder.id : false,
+    returningLockedOrder: activeHistoryOrder
+      ? returningOrderId === activeHistoryOrder.id
+      : false,
     submitLabel: activePickupOrder
       ? 'Checkout Pickup'
       : activeHistoryOrder
@@ -2157,12 +2387,17 @@ export default function POSPage() {
                 variant={isOnlineMode ? 'default' : 'destructive'}
                 className="gap-1.5"
               >
-                {isOnlineMode ? <Wifi className="size-3.5" /> : <WifiOff className="size-3.5" />}
+                {isOnlineMode ? (
+                  <Wifi className="size-3.5" />
+                ) : (
+                  <WifiOff className="size-3.5" />
+                )}
                 {isOnlineMode ? 'Mode en ligne' : 'Mode offline'}
               </Badge>
               <Badge variant="secondary" className="gap-1.5">
                 <ShoppingCart className="size-3.5" />
-                {pendingOfflineCount} ticket{pendingOfflineCount === 1 ? '' : 's'} en attente
+                {pendingOfflineCount} ticket
+                {pendingOfflineCount === 1 ? '' : 's'} en attente
               </Badge>
               {promotionsLoading ? (
                 <Badge variant="outline" className="gap-1.5 animate-pulse">
@@ -2184,14 +2419,20 @@ export default function POSPage() {
               }}
               disabled={!channelId || syncingOffline}
             >
-              <RefreshCw className={`size-3.5 ${syncingOffline ? 'animate-spin' : ''}`} />
+              <RefreshCw
+                className={`size-3.5 ${syncingOffline ? 'animate-spin' : ''}`}
+              />
               Sync
             </Button>
           </div>
 
           {/* Tabs: sales/checkout workflow (Ventes) vs. cash-register
               management — fond, alimentation, dépenses & solde (Caisse). */}
-          <Tabs value={posTab} onValueChange={v => setPosTab(v as 'caisse' | 'depenses')} className="flex min-h-0 flex-1 flex-col">
+          <Tabs
+            value={posTab}
+            onValueChange={v => setPosTab(v as 'caisse' | 'depenses')}
+            className="flex min-h-0 flex-1 flex-col"
+          >
             <TabsList className="mb-2 shrink-0 self-start">
               <TabsTrigger value="caisse" className="gap-1.5">
                 <ShoppingCart className="size-3.5" /> Ventes
@@ -2201,7 +2442,10 @@ export default function POSPage() {
               </TabsTrigger>
             </TabsList>
 
-            <TabsContent value="caisse" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+            <TabsContent
+              value="caisse"
+              className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
+            >
               <POSProductGrid
                 channels={channels}
                 channelId={channelId}
@@ -2213,7 +2457,9 @@ export default function POSPage() {
                 onAddToCart={addToCart}
                 onCameraScan={() => setCameraOpen(true)}
                 isLoading={offlineProducts.length === 0 && isProductsLoading}
-                isFetchingNextPage={offlineProducts.length === 0 && isFetchingNextPage}
+                isFetchingNextPage={
+                  offlineProducts.length === 0 && isFetchingNextPage
+                }
                 hasNextPage={offlineProducts.length === 0 && hasNextPage}
                 fetchNextPage={fetchNextPage}
                 getPrice={getUnitPrice}
@@ -2237,12 +2483,17 @@ export default function POSPage() {
                 onHistoryDateToChange={setPosHistoryDateTo}
                 selectedHistoryOrderId={activeHistoryOrder?.id ?? null}
                 onSelectHistoryOrder={handleSelectHistoryOrder}
-                onReturnHistoryOrder={order => void handleReturnHistoryOrder(order)}
+                onReturnHistoryOrder={order =>
+                  void handleReturnHistoryOrder(order)
+                }
                 onRefreshHistoryOrders={fetchPOSHistoryOrders}
               />
             </TabsContent>
 
-            <TabsContent value="depenses" className="mt-0 min-h-0 flex-1 overflow-y-auto">
+            <TabsContent
+              value="depenses"
+              className="mt-0 min-h-0 flex-1 overflow-y-auto"
+            >
               <POSCaisseTab
                 channelId={channelId ? Number(channelId) : null}
                 channelName={selectedChannel?.name}
@@ -2365,20 +2616,30 @@ export default function POSPage() {
 
       {/* ── Error dialog ─────────────────────────────────────────────── */}
       <Dialog open={!!errorMsg} onOpenChange={() => setErrorMsg(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-destructive">
-              <AlertTriangle className="size-5" />
-              Error
-            </DialogTitle>
-            <DialogDescription className="whitespace-pre-line">{errorMsg}</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setErrorMsg(null)}>
-              Close
-            </Button>
-          </DialogFooter>
-        </DialogContent>
+        <POSDialogContent size="compact">
+          <POSDialogHeader
+            title="Opération impossible"
+            description="Vérifiez les informations ci-dessous avant de réessayer."
+            aside={
+              <span className="flex size-11 items-center justify-center rounded-md bg-destructive/10 text-destructive">
+                <AlertTriangle className="size-5" />
+              </span>
+            }
+          />
+          <POSDialogBody>
+            <p
+              role="alert"
+              className="whitespace-pre-line rounded-md border border-destructive/30 bg-destructive/5 px-4 py-4 text-base leading-6 text-destructive"
+            >
+              {errorMsg}
+            </p>
+          </POSDialogBody>
+          <POSDialogFooter className="sm:justify-end">
+            <POSPrimaryButton onClick={() => setErrorMsg(null)}>
+              Compris
+            </POSPrimaryButton>
+          </POSDialogFooter>
+        </POSDialogContent>
       </Dialog>
 
       {/* ── Hidden print targets ─────────────────────────────────────── */}
@@ -2386,7 +2647,9 @@ export default function POSPage() {
         <POSReceiptPrint data={printData} />
       )}
       {printMode === 'invoice' && printData && (
-        <InvoiceDocument data={invoiceFromPOS(printData, invoiceCompany ?? null)} />
+        <InvoiceDocument
+          data={invoiceFromPOS(printData, invoiceCompany ?? null)}
+        />
       )}
     </>
   );

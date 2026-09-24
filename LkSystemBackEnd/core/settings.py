@@ -181,6 +181,14 @@ TIME_ZONE = 'UTC'
 USE_I18N = True
 USE_TZ = True
 
+# POS business dates are deliberately independent from the server timezone.
+# Tunisia does not currently observe daylight-saving time, but using an IANA
+# zone keeps day boundaries correct if the deployment host runs in UTC.
+POS_BUSINESS_TIME_ZONE = config(
+    'POS_BUSINESS_TIME_ZONE',
+    default='Africa/Tunis',
+)
+
 # =============================================================================
 # STATIC & MEDIA FILES
 # =============================================================================

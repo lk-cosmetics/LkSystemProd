@@ -239,8 +239,68 @@ class WebhookTokenSerializer(serializers.Serializer):
 # ──────────────────────────────────────────────────────────────────────
 
 from .models import (  # noqa: E402
-    CashMovement, EXPENSE_CATEGORIES, DEPOSIT_CATEGORIES, CATEGORY_LABELS,
+    CashMovement, CashSession, EXPENSE_CATEGORIES, DEPOSIT_CATEGORIES,
+    CATEGORY_LABELS,
 )
+from .cash_session_service import CashSessionService  # noqa: E402
+
+
+def _cash_summary_payload(summary):
+    money_fields = {
+        'gross_sales', 'revenue', 'cash_sales', 'card_sales',
+        'cash_refunds', 'card_refunds', 'refunds', 'opening', 'cash_added',
+        'manual_cash_in', 'manual_cash_out', 'funding_total', 'expenses',
+        'net_balance', 'cash_balance', 'expected_cash_live',
+    }
+    payload = {
+        key: str(value) if key in money_fields else value
+        for key, value in summary.items()
+        if key != 'by_category'
+    }
+    payload['by_category'] = [
+        {'category': row['category'], 'total': str(row['total'])}
+        for row in summary.get('by_category', [])
+    ]
+    return payload
+
+
+class CashSessionSerializer(serializers.ModelSerializer):
+    sales_channel_name = serializers.CharField(source='sales_channel.name', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    opened_by_name = serializers.CharField(source='opened_by.get_full_name', read_only=True, default=None)
+    closed_by_name = serializers.CharField(source='closed_by.get_full_name', read_only=True, default=None)
+    summary = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CashSession
+        fields = [
+            'id', 'company', 'sales_channel', 'sales_channel_name',
+            'business_date', 'opening_cash', 'opening_cash_set',
+            'status', 'status_display', 'opened_at', 'opened_by', 'opened_by_name',
+            'closing_cash_expected', 'closing_cash_actual', 'cash_difference',
+            'closing_note', 'closed_at', 'closed_by', 'closed_by_name',
+            'summary', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_summary(self, obj):
+        return _cash_summary_payload(
+            CashSessionService.summarize(
+                obj.sales_channel,
+                obj.business_date,
+                session=obj,
+            )
+        )
+
+
+class CashSessionOpenSerializer(serializers.Serializer):
+    sales_channel = serializers.PrimaryKeyRelatedField(queryset=SalesChannel.objects.all())
+    opening_cash = serializers.DecimalField(max_digits=14, decimal_places=3, min_value=0)
+
+
+class CashSessionCloseSerializer(serializers.Serializer):
+    closing_cash_actual = serializers.DecimalField(max_digits=14, decimal_places=3, min_value=0)
+    closing_note = serializers.CharField(required=False, allow_blank=True, max_length=1000)
 
 
 class CashMovementSerializer(serializers.ModelSerializer):

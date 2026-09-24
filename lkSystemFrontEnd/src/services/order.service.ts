@@ -5,11 +5,13 @@
 import { apiClient } from './axios';
 import type {
   OrderDetail,
+  OrderListItem,
   OrderEditRequest,
   OrderLogEntry,
   POSOrderCreateRequest,
   OrderSummary,
   OrderStatus,
+  PaginatedResponse,
   SalesChannel,
 } from '@/types';
 
@@ -229,8 +231,11 @@ export interface BulkOrderResponse {
 
 export const orderService = {
   /** List orders with filters. */
-  async getAll(params?: OrderListParams) {
-    const { data } = await apiClient.get('/api/v1/orders/', { params });
+  async getAll(params?: OrderListParams): Promise<OrderListItem[] | PaginatedResponse<OrderListItem>> {
+    const { data } = await apiClient.get<OrderListItem[] | PaginatedResponse<OrderListItem>>(
+      '/api/v1/orders/',
+      { params },
+    );
     return data;
   },
 
@@ -583,7 +588,7 @@ export const orderService = {
   },
 
   async submitDelivery(id: number, opts?: { force?: boolean }) {
-    const { data } = await apiClient.post(
+    const { data } = await apiClient.post<unknown>(
       `/api/v1/orders/${id}/submit-delivery/`,
       { force: opts?.force ?? false }
     );

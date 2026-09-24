@@ -4,9 +4,10 @@ LkSystem Sales Channels App - URL Configuration
 
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import SalesChannelViewSet, CashMovementViewSet
+from .views import SalesChannelViewSet, CashMovementViewSet, CashSessionViewSet
 
 router = DefaultRouter()
+router.register(r'cash-sessions', CashSessionViewSet, basename='cashsession')
 router.register(r'cash-movements', CashMovementViewSet, basename='cashmovement')
 router.register(r'', SalesChannelViewSet, basename='saleschannel')
 

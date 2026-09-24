@@ -7,24 +7,30 @@ import {
   Split,
   UserRound,
 } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
+import type { KeyboardEventHandler } from 'react';
 import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
+import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Textarea } from '@/components/ui/textarea';
-import { cn } from '@/lib/utils';
 import type { Client } from '@/types';
+import {
+  POSActionCard,
+  POSDialogBody,
+  POSDialogContent,
+  POSDialogFooter,
+  POSDialogHeader,
+  POSPrimaryButton,
+  POSSecondaryButton,
+  POSStepIndicator,
+} from './POSDialog';
 import { POSCustomerSection } from './POSCustomerSection';
-import { calculatePOSPayment, roundTND, type POSPaymentMethod } from './posPayment';
+import {
+  calculatePOSPayment,
+  roundTND,
+  type POSPaymentMethod,
+} from './posPayment';
 import { fmtTND } from './types';
 
 type CheckoutStep = 'customer' | 'payment';
@@ -58,21 +64,67 @@ interface POSCheckoutDialogProps {
   onConfirm: () => void;
 }
 
-const PAYMENT_METHODS: Array<{
-  value: POSPaymentMethod;
-  label: string;
-  description: string;
-  icon: typeof Banknote;
-}> = [
-  { value: 'cash', label: 'Espèces', description: 'Montant reçu et monnaie', icon: Banknote },
-  { value: 'card', label: 'Carte', description: 'Total réglé par carte', icon: CreditCard },
-  { value: 'split', label: 'Espèces + carte', description: 'Répartir le paiement', icon: Split },
+const PAYMENT_METHODS = [
+  {
+    value: 'cash' as const,
+    label: 'Espèces',
+    description: 'Saisir le montant reçu et calculer la monnaie',
+    icon: Banknote,
+  },
+  {
+    value: 'card' as const,
+    label: 'Carte',
+    description: 'Régler automatiquement la totalité par carte',
+    icon: CreditCard,
+  },
+  {
+    value: 'split' as const,
+    label: 'Espèces + carte',
+    description: 'Répartir le total entre les deux moyens',
+    icon: Split,
+  },
 ];
 
 const safeAmount = (raw: string) => {
   const parsed = Number(raw.replace(',', '.'));
   return roundTND(Number.isFinite(parsed) ? Math.max(0, parsed) : 0);
 };
+
+function MoneyInput({
+  id,
+  label,
+  value,
+  onChange,
+  autoFocus,
+}: {
+  id: string;
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+  autoFocus?: boolean;
+}) {
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={id} className="text-sm font-semibold">
+        {label}
+      </Label>
+      <div className="relative">
+        <Input
+          id={id}
+          inputMode="decimal"
+          autoFocus={autoFocus}
+          value={value || ''}
+          onChange={event => onChange(safeAmount(event.target.value))}
+          placeholder="0.000"
+          className="h-13 pr-14 text-xl font-semibold tabular-nums"
+        />
+        <span className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-sm font-semibold text-muted-foreground">
+          TND
+        </span>
+      </div>
+    </div>
+  );
+}
 
 export function POSCheckoutDialog({
   open,
@@ -137,47 +189,69 @@ export function POSCheckoutDialog({
     }
   };
 
-  const handleCashPortionChange = (raw: string) => {
-    const cash = Math.min(total, safeAmount(raw));
+  const handleCashPart = (value: number) => {
+    const cash = Math.min(total, value);
     onCashAmountChange(cash);
     onCardAmountChange(roundTND(Math.max(0, total - cash)));
     if (amountReceived < cash) onAmountReceivedChange(cash);
   };
 
-  const handleCardPortionChange = (raw: string) => {
-    const card = Math.min(total, safeAmount(raw));
+  const handleCardPart = (value: number) => {
+    const card = Math.min(total, value);
     const cash = roundTND(Math.max(0, total - card));
     onCardAmountChange(card);
     onCashAmountChange(cash);
     if (amountReceived < cash) onAmountReceivedChange(cash);
   };
 
-  return (
-    <Dialog open={open} onOpenChange={openState => !submitting && onOpenChange(openState)}>
-      <DialogContent className="flex max-h-[92dvh] w-[calc(100vw-1rem)] max-w-2xl flex-col overflow-hidden p-0 sm:w-full">
-        <DialogHeader className="shrink-0 border-b px-4 py-4 sm:px-6">
-          <div className="flex items-start justify-between gap-4 pr-6">
-            <div>
-              <DialogTitle className="text-lg">Encaissement</DialogTitle>
-              <DialogDescription className="mt-1">
-                {itemCount} article{itemCount === 1 ? '' : 's'} · {fmtTND(total)} TND
-              </DialogDescription>
-            </div>
-            <div className="flex items-center gap-1 text-xs">
-              <Badge variant={step === 'customer' ? 'default' : 'secondary'}>1 Client</Badge>
-              <span className="text-muted-foreground">→</span>
-              <Badge variant={step === 'payment' ? 'default' : 'secondary'}>2 Paiement</Badge>
-            </div>
-          </div>
-        </DialogHeader>
+  const handleKeyDown: KeyboardEventHandler<HTMLDivElement> = event => {
+    if (
+      event.key !== 'Enter' ||
+      step !== 'payment' ||
+      !payment.valid ||
+      submitting
+    )
+      return;
+    if (event.target instanceof HTMLTextAreaElement || event.shiftKey) return;
+    event.preventDefault();
+    onConfirm();
+  };
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
+  const canContinue = Boolean(selectedClient || clientSkipped);
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={next => !submitting && onOpenChange(next)}
+    >
+      <POSDialogContent size="payment" onKeyDown={handleKeyDown}>
+        <POSDialogHeader
+          title="Encaissement"
+          description={`${itemCount} article${itemCount === 1 ? '' : 's'} · ${fmtTND(total)} TND`}
+          aside={
+            <POSStepIndicator
+              current={step === 'customer' ? 1 : 2}
+              steps={['Client', 'Paiement']}
+            />
+          }
+        />
+
+        <POSDialogBody>
           {step === 'customer' ? (
-            <div className="space-y-4">
+            <section
+              className="space-y-5"
+              aria-labelledby="checkout-customer-title"
+            >
               <div>
-                <h3 className="text-sm font-semibold">Associer un client</h3>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Recherchez par nom, téléphone ou e-mail, créez un client, ou continuez sans client.
+                <h3
+                  id="checkout-customer-title"
+                  className="text-base font-semibold"
+                >
+                  Client
+                </h3>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Sélectionnez une fiche, créez un client ou continuez sans
+                  association.
                 </p>
               </div>
               <POSCustomerSection
@@ -190,199 +264,229 @@ export function POSCheckoutDialog({
                 onAddClientClick={onAddClient}
                 canAddClient={canAddClient}
               />
-              {(selectedClient || clientSkipped) && (
-                <Button className="w-full" onClick={() => onStepChange('payment')}>
-                  Continuer vers le paiement
-                </Button>
-              )}
-            </div>
+            </section>
           ) : (
-            <div className="space-y-5">
-              <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/25 px-3 py-2.5">
-                <div className="flex min-w-0 items-center gap-2">
-                  <UserRound className="size-4 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">
-                      {selectedClient?.full_name || 'Client de passage'}
-                    </p>
-                    <p className="truncate text-xs text-muted-foreground">
-                      {selectedClient?.phone || selectedClient?.email || 'Aucun client associé'}
-                    </p>
-                  </div>
+            <section
+              className="space-y-6"
+              aria-labelledby="checkout-payment-title"
+            >
+              <div className="flex flex-col gap-4 border-b pb-5 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase text-muted-foreground">
+                    Total à payer
+                  </p>
+                  <h3
+                    id="checkout-payment-title"
+                    className="mt-1 text-3xl font-bold tabular-nums sm:text-4xl"
+                  >
+                    {fmtTND(total)}{' '}
+                    <span className="text-lg font-semibold">TND</span>
+                  </h3>
                 </div>
-                <Button variant="ghost" size="sm" onClick={() => onStepChange('customer')}>
-                  Modifier
-                </Button>
+                <button
+                  type="button"
+                  onClick={() => onStepChange('customer')}
+                  className="flex min-w-0 items-center gap-3 rounded-md border px-3 py-2 text-left hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <UserRound className="size-5 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-semibold">
+                      {selectedClient?.full_name || 'Client de passage'}
+                    </span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      Modifier le client
+                    </span>
+                  </span>
+                </button>
               </div>
 
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <div className="grid gap-3 lg:grid-cols-3">
                 {PAYMENT_METHODS.map(method => {
                   const Icon = method.icon;
-                  const active = paymentMethod === method.value;
                   return (
-                    <button
+                    <POSActionCard
                       key={method.value}
-                      type="button"
+                      icon={<Icon className="size-5" />}
+                      title={method.label}
+                      description={method.description}
+                      selected={paymentMethod === method.value}
                       onClick={() => handleMethodChange(method.value)}
-                      className={cn(
-                        'flex min-h-20 items-center gap-3 rounded-md border p-3 text-left transition-colors',
-                        active
-                          ? 'border-primary bg-primary text-primary-foreground'
-                          : 'bg-background hover:border-foreground/30 hover:bg-muted/40',
-                      )}
-                    >
-                      <Icon className="size-5 shrink-0" />
-                      <span className="min-w-0">
-                        <span className="block text-sm font-semibold">{method.label}</span>
-                        <span className={cn('mt-0.5 block text-[11px]', active ? 'text-primary-foreground/75' : 'text-muted-foreground')}>
-                          {method.description}
-                        </span>
-                      </span>
-                    </button>
+                      className="lg:min-h-32 lg:flex-col lg:items-start"
+                    />
                   );
                 })}
               </div>
 
-              <div className="rounded-md border p-4">
-                <div className="mb-4 flex items-end justify-between gap-4">
-                  <span className="text-sm text-muted-foreground">Total à payer</span>
-                  <span className="text-2xl font-bold tabular-nums">{fmtTND(total)} TND</span>
-                </div>
-
-                {paymentMethod === 'cash' && (
-                  <div className="space-y-3">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="pos-amount-received">Montant reçu</Label>
-                      <Input
-                        id="pos-amount-received"
-                        inputMode="decimal"
-                        autoFocus
-                        value={amountReceived || ''}
-                        onChange={event => onAmountReceivedChange(safeAmount(event.target.value))}
-                        placeholder="0.000"
-                        className="h-12 text-xl font-semibold tabular-nums"
-                      />
-                    </div>
+              <div className="rounded-md border p-5 sm:p-6">
+                {paymentMethod === 'cash' ? (
+                  <div className="space-y-5">
+                    <MoneyInput
+                      id="pos-amount-received"
+                      label="Montant reçu"
+                      value={amountReceived}
+                      onChange={onAmountReceivedChange}
+                      autoFocus
+                    />
                     <div className="flex flex-wrap gap-2">
-                      <Button type="button" size="sm" variant="outline" onClick={() => onAmountReceivedChange(roundTND(total))}>
-                        Exact
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-11 px-4"
+                        onClick={() => onAmountReceivedChange(roundTND(total))}
+                      >
+                        Montant exact
                       </Button>
                       {[5, 10, 20, 50].map(extra => (
                         <Button
                           key={extra}
                           type="button"
-                          size="sm"
                           variant="outline"
-                          onClick={() => onAmountReceivedChange(roundTND(total + extra))}
+                          className="h-11 px-4"
+                          onClick={() =>
+                            onAmountReceivedChange(roundTND(total + extra))
+                          }
                         >
                           +{extra}
                         </Button>
                       ))}
                     </div>
                   </div>
-                )}
+                ) : null}
 
-                {paymentMethod === 'card' && (
-                  <div className="flex items-center justify-between rounded-md bg-muted/40 px-3 py-3">
-                    <span className="text-sm">Montant carte</span>
-                    <span className="font-semibold tabular-nums">{fmtTND(total)} TND</span>
-                  </div>
-                )}
-
-                {paymentMethod === 'split' && (
-                  <div className="space-y-4">
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <div className="space-y-1.5">
-                        <Label htmlFor="pos-cash-portion">Part espèces</Label>
-                        <Input
-                          id="pos-cash-portion"
-                          inputMode="decimal"
-                          value={cashAmount || ''}
-                          onChange={event => handleCashPortionChange(event.target.value)}
-                          placeholder="0.000"
-                          className="h-11 text-base font-semibold tabular-nums"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label htmlFor="pos-card-portion">Part carte</Label>
-                        <Input
-                          id="pos-card-portion"
-                          inputMode="decimal"
-                          value={cardAmount || ''}
-                          onChange={event => handleCardPortionChange(event.target.value)}
-                          placeholder="0.000"
-                          className="h-11 text-base font-semibold tabular-nums"
-                        />
-                      </div>
+                {paymentMethod === 'card' ? (
+                  <div className="flex items-center justify-between gap-4 rounded-md bg-muted/40 px-4 py-5">
+                    <div>
+                      <p className="text-sm font-semibold">Montant carte</p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        La totalité est affectée automatiquement.
+                      </p>
                     </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="pos-split-received">Espèces reçues</Label>
-                      <Input
-                        id="pos-split-received"
-                        inputMode="decimal"
-                        value={amountReceived || ''}
-                        onChange={event => onAmountReceivedChange(safeAmount(event.target.value))}
-                        placeholder="0.000"
-                        className="h-11 text-base font-semibold tabular-nums"
+                    <p className="text-xl font-bold tabular-nums">
+                      {fmtTND(total)} TND
+                    </p>
+                  </div>
+                ) : null}
+
+                {paymentMethod === 'split' ? (
+                  <div className="space-y-5">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <MoneyInput
+                        id="pos-cash-portion"
+                        label="Part espèces"
+                        value={cashAmount}
+                        onChange={handleCashPart}
+                        autoFocus
+                      />
+                      <MoneyInput
+                        id="pos-card-portion"
+                        label="Part carte"
+                        value={cardAmount}
+                        onChange={handleCardPart}
                       />
                     </div>
+                    <MoneyInput
+                      id="pos-split-received"
+                      label="Espèces réellement reçues"
+                      value={amountReceived}
+                      onChange={onAmountReceivedChange}
+                    />
                   </div>
-                )}
+                ) : null}
 
-                <Separator className="my-4" />
-                <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                  <span className="text-muted-foreground">Total affecté</span>
-                  <span className="text-right font-medium tabular-nums">{fmtTND(payment.totalPaid)} TND</span>
-                  <span className="text-muted-foreground">Reste</span>
-                  <span className="text-right font-medium tabular-nums">{fmtTND(payment.remaining)} TND</span>
-                  {(paymentMethod === 'cash' || paymentMethod === 'split') && (
+                <Separator className="my-5" />
+                <dl className="grid grid-cols-2 gap-x-5 gap-y-3 text-sm">
+                  <dt className="text-muted-foreground">Total affecté</dt>
+                  <dd className="text-right font-semibold tabular-nums">
+                    {fmtTND(payment.totalPaid)} TND
+                  </dd>
+                  <dt className="text-muted-foreground">Reste à affecter</dt>
+                  <dd className="text-right font-semibold tabular-nums">
+                    {fmtTND(payment.remaining)} TND
+                  </dd>
+                  {paymentMethod !== 'card' ? (
                     <>
-                      <span className="text-muted-foreground">Monnaie à rendre</span>
-                      <span className="text-right font-semibold tabular-nums text-emerald-600">{fmtTND(payment.change)} TND</span>
+                      <dt className="self-end text-base font-semibold">
+                        Monnaie à rendre
+                      </dt>
+                      <dd className="text-right text-2xl font-bold tabular-nums text-emerald-700">
+                        {fmtTND(payment.change)} TND
+                      </dd>
                     </>
-                  )}
-                </div>
+                  ) : null}
+                </dl>
               </div>
 
-              {payment.error && (
+              {payment.error ? (
                 <div
                   role="alert"
-                  className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+                  className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm font-medium text-destructive"
                 >
                   {payment.error}
                 </div>
-              )}
+              ) : null}
 
-              <div className="space-y-1.5">
-                <Label htmlFor="pos-checkout-note">Note de vente (optionnelle)</Label>
+              <div className="space-y-2">
+                <Label
+                  htmlFor="pos-checkout-note"
+                  className="text-sm font-semibold"
+                >
+                  Note de vente{' '}
+                  <span className="font-normal text-muted-foreground">
+                    (optionnelle)
+                  </span>
+                </Label>
                 <Textarea
                   id="pos-checkout-note"
                   rows={2}
                   value={customerNote}
                   onChange={event => onCustomerNoteChange(event.target.value)}
-                  placeholder="Information utile sur cette vente..."
-                  className="resize-none"
+                  placeholder="Information utile sur cette vente…"
+                  className="resize-none text-base"
                 />
               </div>
-            </div>
+            </section>
           )}
-        </div>
+        </POSDialogBody>
 
-        {step === 'payment' && (
-          <DialogFooter className="shrink-0 border-t px-4 py-3 sm:px-6">
-            <Button variant="outline" onClick={() => onStepChange('customer')} disabled={submitting}>
-              <ArrowLeft className="size-4" /> Client
-            </Button>
-            <Button className="min-w-44" onClick={onConfirm} disabled={!payment.valid || submitting}>
-              {submitting ? (
-                <><Loader2 className="size-4 animate-spin" /> Traitement...</>
-              ) : (
-                <><CheckCircle2 className="size-4" /> Confirmer le paiement</>
-              )}
-            </Button>
-          </DialogFooter>
-        )}
-      </DialogContent>
+        <POSDialogFooter>
+          {step === 'customer' ? (
+            <>
+              <POSSecondaryButton onClick={() => onOpenChange(false)}>
+                Annuler
+              </POSSecondaryButton>
+              <POSPrimaryButton
+                disabled={!canContinue}
+                onClick={() => onStepChange('payment')}
+              >
+                Continuer vers le paiement
+              </POSPrimaryButton>
+            </>
+          ) : (
+            <>
+              <POSSecondaryButton
+                onClick={() => onStepChange('customer')}
+                disabled={submitting}
+              >
+                <ArrowLeft className="size-4" /> Retour
+              </POSSecondaryButton>
+              <POSPrimaryButton
+                onClick={onConfirm}
+                disabled={!payment.valid || submitting}
+              >
+                {submitting ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" /> Traitement…
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="size-4" /> Confirmer le paiement
+                  </>
+                )}
+              </POSPrimaryButton>
+            </>
+          )}
+        </POSDialogFooter>
+      </POSDialogContent>
     </Dialog>
   );
 }

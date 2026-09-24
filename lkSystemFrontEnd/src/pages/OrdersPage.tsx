@@ -633,9 +633,13 @@ export default function OrdersPage() {
         }),
         orderService.getSummary(sharedFilters),
       ]);
-      const paginated = !Array.isArray(ordersRes) && Array.isArray(ordersRes.results);
-      setOrders(paginated ? ordersRes.results : ordersRes);
-      setTotalOrders(paginated ? ordersRes.count : ordersRes.length);
+      if (Array.isArray(ordersRes)) {
+        setOrders(ordersRes);
+        setTotalOrders(ordersRes.length);
+      } else {
+        setOrders(ordersRes.results);
+        setTotalOrders(ordersRes.count);
+      }
       setSummary(summaryRes);
     } catch (err) {
       console.error('Failed to fetch orders', err);

@@ -1,4 +1,9 @@
-import type { ProductListItem, OrderDetail, SalesChannel, Client } from '@/types';
+import type {
+  ProductListItem,
+  OrderDetail,
+  SalesChannel,
+  Client,
+} from '@/types';
 
 /* ── Cart ──────────────────────────────────────────────────────────────── */
 
@@ -35,7 +40,8 @@ export function getEffectivePrice(product: ProductListItem): number {
   return Number(product.sales_price);
 }
 
-/** Format a number as TND with 3 decimals. */
-export function fmtTND(n: number): string {
-  return n.toFixed(3);
+/** Format an API decimal or local number as TND with 3 decimals. */
+export function fmtTND(amount: number | string | null | undefined): string {
+  const value = Number(amount);
+  return (Number.isFinite(value) ? value : 0).toFixed(3);
 }

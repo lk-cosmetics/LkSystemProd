@@ -52,20 +52,26 @@ export interface CashMovementCreate {
   occurred_at?: string;
 }
 
-export const EXPENSE_CATEGORY_OPTIONS: { value: ExpenseCategory; label: string }[] = [
-  { value: 'SUPPLIES',    label: 'Fournitures' },
-  { value: 'UTILITY',     label: 'Facture (eau, élec, internet)' },
-  { value: 'TRANSPORT',   label: 'Transport / Livraison' },
-  { value: 'SALARY',      label: 'Salaire' },
+export const EXPENSE_CATEGORY_OPTIONS: {
+  value: ExpenseCategory;
+  label: string;
+}[] = [
+  { value: 'SUPPLIES', label: 'Fournitures' },
+  { value: 'UTILITY', label: 'Facture (eau, élec, internet)' },
+  { value: 'TRANSPORT', label: 'Transport / Livraison' },
+  { value: 'SALARY', label: 'Salaire' },
   { value: 'MAINTENANCE', label: 'Maintenance / Réparation' },
-  { value: 'REFUND',      label: 'Remboursement client' },
-  { value: 'OTHER',       label: 'Autre' },
+  { value: 'REFUND', label: 'Remboursement client' },
+  { value: 'OTHER', label: 'Autre' },
 ];
 
-export const DEPOSIT_CATEGORY_OPTIONS: { value: DepositCategory; label: string }[] = [
+export const DEPOSIT_CATEGORY_OPTIONS: {
+  value: DepositCategory;
+  label: string;
+}[] = [
   { value: 'OPENING', label: 'Fond de caisse (ouverture)' },
-  { value: 'TOP_UP',  label: 'Alimentation (ajout)' },
-  { value: 'OTHER',   label: 'Autre' },
+  { value: 'TOP_UP', label: 'Alimentation (ajout)' },
+  { value: 'OTHER', label: 'Autre' },
 ];
 
 /* ── Caisse aggregate read shapes (unchanged) ──────────────────────────── */
@@ -79,6 +85,8 @@ export interface CaisseStats {
   revenue_count: number;
   cash_sales: string;
   card_sales: string;
+  cash_refunds: string;
+  card_refunds: string;
   opening: string;
   cash_added: string;
   funding_total: string;
@@ -99,6 +107,9 @@ export interface CaisseHistoryRow {
   revenue: string;
   revenue_count: number;
   cash_sales: string;
+  card_sales: string;
+  cash_refunds: string;
+  card_refunds: string;
   expenses: string;
   expenses_count: number;
   funding_total: string;
@@ -119,7 +130,7 @@ export interface CaisseMovement {
   id: string;
   type: CaisseMovementType;
   type_display: string;
-  occurred_at: string;        // full ISO datetime
+  occurred_at: string; // full ISO datetime
   amount: string;
   direction: 'in' | 'out';
   detail: string;
@@ -138,6 +149,64 @@ export interface CaisseJournal {
 }
 
 const BASE = '/api/v1/sales-channels/cash-movements/';
+const SESSION_BASE = '/api/v1/sales-channels/cash-sessions/';
+
+export interface CashSessionSummary {
+  gross_sales: string;
+  revenue: string;
+  revenue_count: number;
+  cash_sales: string;
+  card_sales: string;
+  cash_refunds: string;
+  card_refunds: string;
+  refunds: string;
+  opening: string;
+  cash_added: string;
+  manual_cash_in: string;
+  manual_cash_out: string;
+  funding_total: string;
+  funding_count: number;
+  expenses: string;
+  expenses_count: number;
+  net_balance: string;
+  cash_balance: string;
+  expected_cash_live: string;
+  by_category: { category: ExpenseCategory; total: string }[];
+}
+
+export interface CashSession {
+  id: number;
+  company: number;
+  sales_channel: number;
+  sales_channel_name: string;
+  business_date: string;
+  opening_cash: string;
+  opening_cash_set: boolean;
+  status: 'OPEN' | 'CLOSED';
+  status_display: string;
+  opened_at: string;
+  opened_by: number | null;
+  opened_by_name: string | null;
+  closing_cash_expected: string | null;
+  closing_cash_actual: string | null;
+  cash_difference: string | null;
+  closing_note: string;
+  closed_at: string | null;
+  closed_by: number | null;
+  closed_by_name: string | null;
+  summary: CashSessionSummary;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CurrentCashSession {
+  business_date: string;
+  sales_channel: number;
+  sales_channel_name: string;
+  currency: 'TND';
+  session: CashSession | null;
+  summary: CashSessionSummary;
+}
 
 export const cashMovementService = {
   /** List movements. Pass ``type`` to get one side (expense / deposit). */
@@ -148,11 +217,15 @@ export const cashMovementService = {
       date_from?: string;
       date_to?: string;
       category?: CashMovementCategory;
-    } = {},
+    } = {}
   ): Promise<CashMovement[]> {
-    const { data } = await apiClient.get(BASE, { params });
+    const { data } = await apiClient.get<
+      CashMovement[] | { results?: CashMovement[] }
+    >(BASE, { params });
     // DRF paginated response shape — also handle bare list fallback.
-    return (data as { results?: CashMovement[] }).results ?? (data as CashMovement[]);
+    return (
+      (data as { results?: CashMovement[] }).results ?? (data as CashMovement[])
+    );
   },
 
   async create(payload: CashMovementCreate): Promise<CashMovement> {
@@ -160,7 +233,7 @@ export const cashMovementService = {
       ...payload,
       occurred_at: payload.occurred_at ?? new Date().toISOString(),
     };
-    const { data } = await apiClient.post(BASE, body);
+    const { data } = await apiClient.post<CashMovement>(BASE, body);
     return data;
   },
 
@@ -169,19 +242,26 @@ export const cashMovementService = {
   },
 
   async caisseStats(salesChannel: number, date?: string): Promise<CaisseStats> {
-    const params: Record<string, string | number> = { sales_channel: salesChannel };
+    const params: Record<string, string | number> = {
+      sales_channel: salesChannel,
+    };
     if (date) params.date = date;
-    const { data } = await apiClient.get(`${BASE}caisse-stats/`, { params });
+    const { data } = await apiClient.get<CaisseStats>(`${BASE}caisse-stats/`, {
+      params,
+    });
     return data;
   },
 
   async caisseHistory(
     salesChannel: number,
-    params: { date_from?: string; date_to?: string } = {},
+    params: { date_from?: string; date_to?: string } = {}
   ): Promise<CaisseHistoryRow[]> {
-    const { data } = await apiClient.get(`${BASE}caisse-history/`, {
-      params: { sales_channel: salesChannel, ...params },
-    });
+    const { data } = await apiClient.get<CaisseHistoryRow[]>(
+      `${BASE}caisse-history/`,
+      {
+        params: { sales_channel: salesChannel, ...params },
+      }
+    );
     return data;
   },
 
@@ -189,11 +269,71 @@ export const cashMovementService = {
    *  (incl. their deletion reversals), each with a full timestamp, newest first. */
   async caisseJournal(
     salesChannel: number,
-    params: { date_from?: string; date_to?: string } = {},
+    params: { date_from?: string; date_to?: string } = {}
   ): Promise<CaisseJournal> {
-    const { data } = await apiClient.get(`${BASE}caisse-journal/`, {
+    const { data } = await apiClient.get<CaisseJournal>(
+      `${BASE}caisse-journal/`,
+      {
+        params: { sales_channel: salesChannel, ...params },
+      }
+    );
+    return data;
+  },
+};
+
+export const cashSessionService = {
+  async current(
+    salesChannel: number,
+    date?: string
+  ): Promise<CurrentCashSession> {
+    const params: Record<string, string | number> = {
+      sales_channel: salesChannel,
+    };
+    if (date) params.date = date;
+    const { data } = await apiClient.get<CurrentCashSession>(
+      `${SESSION_BASE}current/`,
+      { params }
+    );
+    return data;
+  },
+
+  async list(
+    salesChannel: number,
+    params: { date_from?: string; date_to?: string } = {}
+  ): Promise<CashSession[]> {
+    const { data } = await apiClient.get<
+      CashSession[] | { results?: CashSession[] }
+    >(SESSION_BASE, {
       params: { sales_channel: salesChannel, ...params },
     });
+    return (
+      (data as { results?: CashSession[] }).results ?? (data as CashSession[])
+    );
+  },
+
+  async open(
+    salesChannel: number,
+    openingCash: number | string
+  ): Promise<CashSession> {
+    const { data } = await apiClient.post<CashSession>(`${SESSION_BASE}open/`, {
+      sales_channel: salesChannel,
+      opening_cash: openingCash,
+    });
+    return data;
+  },
+
+  async close(
+    sessionId: number,
+    actualCash: number | string,
+    note = ''
+  ): Promise<CashSession> {
+    const { data } = await apiClient.post<CashSession>(
+      `${SESSION_BASE}${sessionId}/close/`,
+      {
+        closing_cash_actual: actualCash,
+        closing_note: note,
+      }
+    );
     return data;
   },
 };

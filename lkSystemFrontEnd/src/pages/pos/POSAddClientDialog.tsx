@@ -1,27 +1,28 @@
-/**
- * POSAddClientDialog – Quick inline client creation for POS flow.
- * Minimal fields: first_name, last_name, phone, email.
- * Fast submit → returns the newly created Client.
- */
-import { useState, useCallback } from 'react';
-import { AlertTriangle, Loader2, UserPlus } from 'lucide-react';
-import { toast } from 'sonner';
-import { Button } from '@/components/ui/button';
+import { useCallback, useState } from 'react';
+import {
+  AlertTriangle,
+  Building2,
+  CheckCircle2,
+  Loader2,
+  UserPlus,
+  UserRound,
+} from 'lucide-react';
+import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-} from '@/components/ui/dialog';
-import { clientService } from '@/services/client.service';
-import { TUNISIA_GOVERNORATES } from '@/constants/tunisia';
 import { SearchSelect } from '@/components/ui/search-select';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { TUNISIA_GOVERNORATES } from '@/constants/tunisia';
+import { cn } from '@/lib/utils';
+import { clientService } from '@/services/client.service';
 import type { Client, SalesChannel } from '@/types';
+import {
+  POSDialogBody,
+  POSDialogContent,
+  POSDialogFooter,
+  POSDialogHeader,
+  POSPrimaryButton,
+  POSSecondaryButton,
+} from './POSDialog';
 
 interface POSAddClientDialogProps {
   open: boolean;
@@ -41,21 +42,33 @@ interface POSClientForm {
   state: string;
 }
 
-/** Turn an API error into the backend's clear message (not "Request failed with
- *  status code 400"): reads DRF {detail}/{message} + field-error dicts. */
-function extractClientError(err: unknown): string {
-  const data = (err as { response?: { data?: unknown } } | null)?.response?.data;
+const EMPTY_FORM: POSClientForm = {
+  first_name: '',
+  last_name: '',
+  phone: '',
+  email: '',
+  client_type: 'PERSON',
+  matricule_fiscale: '',
+  date_of_birth: '',
+  state: '',
+};
+
+function extractClientError(error: unknown): string {
+  const data = (error as { response?: { data?: unknown } } | null)?.response
+    ?.data;
   if (typeof data === 'string' && data) return data;
   if (data && typeof data === 'object') {
-    const d = data as Record<string, unknown>;
-    const direct = d.detail ?? d.message ?? d.error;
+    const record = data as Record<string, unknown>;
+    const direct = record.detail ?? record.message ?? record.error;
     if (typeof direct === 'string' && direct) return direct;
-    for (const value of Object.values(d)) {
+    for (const value of Object.values(record)) {
       if (typeof value === 'string' && value) return value;
       if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
     }
   }
-  return err instanceof Error ? err.message : 'Failed to create client.';
+  return error instanceof Error
+    ? error.message
+    : 'Impossible d’ajouter ce client.';
 }
 
 export function POSAddClientDialog({
@@ -64,226 +77,298 @@ export function POSAddClientDialog({
   channel,
   onClientCreated,
 }: POSAddClientDialogProps) {
-  const [form, setForm] = useState<POSClientForm>({
-    first_name: '',
-    last_name: '',
-    phone: '',
-    email: '',
-    client_type: 'PERSON',
-    matricule_fiscale: '',
-    date_of_birth: '',
-    state: '',
-  });
+  const [form, setForm] = useState<POSClientForm>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [existingClient, setExistingClient] = useState<Client | null>(null);
 
-  const resetForm = useCallback(() => {
-    setForm({ first_name: '', last_name: '', phone: '', email: '', client_type: 'PERSON', matricule_fiscale: '', date_of_birth: '', state: '' });
+  const reset = useCallback(() => {
+    setForm(EMPTY_FORM);
     setError('');
+    setExistingClient(null);
   }, []);
 
-  const handleClose = useCallback(
-    (v: boolean) => {
-      if (!v) resetForm();
-      onOpenChange(v);
+  const handleOpenChange = useCallback(
+    (next: boolean) => {
+      if (!next && !saving) reset();
+      if (!saving) onOpenChange(next);
     },
-    [onOpenChange, resetForm],
+    [onOpenChange, reset, saving]
   );
 
-  const handleSubmit = useCallback(async () => {
-    if (!form.first_name.trim() && !form.phone.trim()) {
-      setError('At least a name or phone number is required.');
+  const update = <Key extends keyof POSClientForm>(
+    key: Key,
+    value: POSClientForm[Key]
+  ) => {
+    setForm(previous => ({ ...previous, [key]: value }));
+    setError('');
+    setExistingClient(null);
+  };
+
+  const useExisting = () => {
+    if (!existingClient) return;
+    onClientCreated(existingClient);
+    reset();
+    onOpenChange(false);
+  };
+
+  const submit = useCallback(async () => {
+    if (!channel) {
+      setError('Sélectionnez un point de vente avant de créer un client.');
       return;
     }
-    if (!channel) {
-      setError('No sales channel selected.');
+    if (!form.first_name.trim() && !form.last_name.trim()) {
+      setError('Saisissez au moins un prénom ou un nom.');
+      return;
+    }
+    if (!form.phone.trim()) {
+      setError(
+        'Le numéro de téléphone est obligatoire pour éviter les doublons.'
+      );
       return;
     }
 
     setSaving(true);
     setError('');
+    setExistingClient(null);
     try {
-      // ✨ Use createFromPOS endpoint with brand auto-assignment
-      const created = await clientService.createFromPOS({
-        sales_channel: channel.id,  // ✨ Brand extracted from this
+      const client = await clientService.createFromPOS({
+        sales_channel: channel.id,
         first_name: form.first_name.trim(),
         last_name: form.last_name.trim(),
         phone: form.phone.trim(),
         email: form.email.trim(),
         client_type: form.client_type,
-        matricule_fiscale: form.client_type === 'COMPANY' ? form.matricule_fiscale.trim() : '',
+        matricule_fiscale:
+          form.client_type === 'COMPANY' ? form.matricule_fiscale.trim() : '',
         date_of_birth: form.date_of_birth || null,
         state: form.state,
-        // Note: NO need to send brand_id, source, or company
-        // They are auto-assigned by the backend
       });
-      onClientCreated(created);
-      if (created.is_blocked) {
-        setError('Client is blocked because they reached the return threshold.');
+
+      if (client.existing) {
+        setExistingClient(client);
+        setError(
+          'Un client avec ce numéro existe déjà. Utilisez sa fiche existante.'
+        );
         return;
       }
-      // If the customer was already on file, the backend returns the existing
-      // record (no duplicate) — tell the cashier we selected it for them.
-      toast[created.existing ? 'info' : 'success'](
-        created.existing
-          ? 'This client already exists — selected for this order.'
-          : 'Client added and selected.',
-      );
-      handleClose(false);
-    } catch (err: unknown) {
-      setError(extractClientError(err));
+      onClientCreated(client);
+      reset();
+      onOpenChange(false);
+    } catch (requestError) {
+      setError(extractClientError(requestError));
     } finally {
       setSaving(false);
     }
-  }, [form, channel, onClientCreated, handleClose]);
-
-  const updateField = <Field extends keyof POSClientForm>(
-    field: Field,
-    value: POSClientForm[Field],
-  ) =>
-    setForm(prev => ({ ...prev, [field]: value }));
+  }, [channel, form, onClientCreated, onOpenChange, reset]);
 
   return (
-    <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <UserPlus className="size-4" />
-            Add New Client
-          </DialogTitle>
-          <DialogDescription>
-            Quick client registration for this order.
-          </DialogDescription>
-        </DialogHeader>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <POSDialogContent size="default">
+        <POSDialogHeader
+          title="Nouveau client"
+          description="Créez une fiche complète sans ralentir l’encaissement. Le téléphone est vérifié automatiquement."
+          aside={
+            <span className="flex size-11 items-center justify-center rounded-md border bg-muted/40">
+              <UserPlus className="size-5" />
+            </span>
+          }
+        />
 
-        <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
-          The system checks existing clients by normalized phone. For example +21624512995 and 24512995 are treated as the same number.
-        </div>
+        <POSDialogBody>
+          <form
+            id="pos-add-client-form"
+            className="space-y-5"
+            onSubmit={event => {
+              event.preventDefault();
+              void submit();
+            }}
+          >
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-semibold">Type de client</legend>
+              <div className="grid grid-cols-2 gap-3">
+                {(
+                  [
+                    ['PERSON', 'Particulier', UserRound],
+                    ['COMPANY', 'Entreprise', Building2],
+                  ] as const
+                ).map(([value, label, Icon]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => update('client_type', value)}
+                    className={cn(
+                      'flex h-12 items-center justify-center gap-2 rounded-md border text-sm font-semibold outline-none hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring',
+                      form.client_type === value &&
+                        'border-foreground bg-foreground text-background'
+                    )}
+                    aria-pressed={form.client_type === value}
+                  >
+                    <Icon className="size-4" /> {label}
+                  </button>
+                ))}
+              </div>
+            </fieldset>
 
-        <div className="grid grid-cols-2 gap-3 py-2">
-          <div className="col-span-2">
-            <Label className="text-xs">Client Type</Label>
-            <Select value={form.client_type} onValueChange={value => updateField('client_type', value as 'PERSON' | 'COMPANY')}>
-              <SelectTrigger className="h-9 mt-1">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="PERSON">Person</SelectItem>
-                <SelectItem value="COMPANY">Company</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          {form.client_type === 'COMPANY' && (
-            <div className="col-span-2">
-              <Label className="text-xs">Matricule Fiscale</Label>
-              <Input
-                value={form.matricule_fiscale}
-                onChange={e => updateField('matricule_fiscale', e.target.value)}
-                placeholder="Tax ID — appears on the client's invoices"
-                className="h-9 mt-1"
-                onKeyDown={e => e.key === 'Enter' && handleSubmit()}
-              />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="pos-client-first-name">Prénom</Label>
+                <Input
+                  id="pos-client-first-name"
+                  value={form.first_name}
+                  onChange={event => update('first_name', event.target.value)}
+                  placeholder="Prénom"
+                  autoFocus
+                  className="h-12 text-base"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="pos-client-last-name">Nom</Label>
+                <Input
+                  id="pos-client-last-name"
+                  value={form.last_name}
+                  onChange={event => update('last_name', event.target.value)}
+                  placeholder="Nom"
+                  className="h-12 text-base"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="pos-client-phone">
+                  Téléphone <span className="text-destructive">*</span>
+                </Label>
+                <Input
+                  id="pos-client-phone"
+                  type="tel"
+                  value={form.phone}
+                  onChange={event => update('phone', event.target.value)}
+                  placeholder="+216 XX XXX XXX"
+                  className="h-12 text-base"
+                />
+                <p className="text-xs text-muted-foreground">
+                  +21624512995 et 24512995 sont reconnus comme le même numéro.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="pos-client-email">
+                  E-mail{' '}
+                  <span className="font-normal text-muted-foreground">
+                    (optionnel)
+                  </span>
+                </Label>
+                <Input
+                  id="pos-client-email"
+                  type="email"
+                  value={form.email}
+                  onChange={event => update('email', event.target.value)}
+                  placeholder="client@example.com"
+                  className="h-12 text-base"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="pos-client-birth-date">Date de naissance</Label>
+                <Input
+                  id="pos-client-birth-date"
+                  type="date"
+                  value={form.date_of_birth}
+                  onChange={event =>
+                    update('date_of_birth', event.target.value)
+                  }
+                  className="h-12 text-base"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Gouvernorat</Label>
+                <SearchSelect
+                  value={form.state}
+                  onChange={value => update('state', value)}
+                  options={TUNISIA_GOVERNORATES.map(governorate => ({
+                    label: governorate,
+                    value: governorate,
+                  }))}
+                  placeholder="Rechercher un gouvernorat…"
+                  className="h-12 text-base"
+                />
+              </div>
+              {form.client_type === 'COMPANY' ? (
+                <div className="space-y-2 sm:col-span-2">
+                  <Label htmlFor="pos-client-tax-id">Matricule fiscal</Label>
+                  <Input
+                    id="pos-client-tax-id"
+                    value={form.matricule_fiscale}
+                    onChange={event =>
+                      update('matricule_fiscale', event.target.value)
+                    }
+                    placeholder="Identifiant fiscal de l’entreprise"
+                    className="h-12 text-base"
+                  />
+                </div>
+              ) : null}
             </div>
-          )}
-          <div>
-            <Label className="text-xs">First Name</Label>
-            <Input
-              value={form.first_name}
-              onChange={e => updateField('first_name', e.target.value)}
-              placeholder="First name"
-              className="h-9 mt-1"
-              autoFocus
-              onKeyDown={e => e.key === 'Enter' && handleSubmit()}
-            />
-          </div>
-          <div>
-            <Label className="text-xs">Last Name</Label>
-            <Input
-              value={form.last_name}
-              onChange={e => updateField('last_name', e.target.value)}
-              placeholder="Last name"
-              className="h-9 mt-1"
-              onKeyDown={e => e.key === 'Enter' && handleSubmit()}
-            />
-          </div>
-          <div>
-            <Label className="text-xs">Phone</Label>
-            <Input
-              value={form.phone}
-              onChange={e => updateField('phone', e.target.value)}
-              placeholder="+216 XX XXX XXX"
-              className="h-9 mt-1"
-              type="tel"
-              onKeyDown={e => e.key === 'Enter' && handleSubmit()}
-            />
-          </div>
-          <div>
-            <Label className="text-xs">Email (optional)</Label>
-            <Input
-              value={form.email}
-              onChange={e => updateField('email', e.target.value)}
-              placeholder="email@example.com"
-              className="h-9 mt-1"
-              type="email"
-              onKeyDown={e => e.key === 'Enter' && handleSubmit()}
-            />
-          </div>
-          <div>
-            <Label className="text-xs">Date of Birth</Label>
-            <Input
-              value={form.date_of_birth}
-              onChange={e => updateField('date_of_birth', e.target.value)}
-              className="h-9 mt-1"
-              type="date"
-            />
-          </div>
-          <div>
-            <Label className="text-xs">Governorate</Label>
-            <div className="mt-1">
-              <SearchSelect
-                value={form.state}
-                onChange={value => updateField('state', value)}
-                options={TUNISIA_GOVERNORATES.map(governorate => ({
-                  label: governorate,
-                  value: governorate,
-                }))}
-                placeholder="Search governorate..."
-                className="h-9"
-              />
-            </div>
-          </div>
-        </div>
 
-        {error && (
-          <div className="flex gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-sm text-amber-800">
-            <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-            <span>{error}</span>
-          </div>
-        )}
+            {error ? (
+              <div
+                role="alert"
+                className={cn(
+                  'flex items-start gap-3 rounded-md border px-4 py-3 text-sm',
+                  existingClient
+                    ? 'border-amber-300 bg-amber-50 text-amber-900'
+                    : 'border-destructive/30 bg-destructive/5 text-destructive'
+                )}
+              >
+                <AlertTriangle className="mt-0.5 size-5 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold">{error}</p>
+                  {existingClient ? (
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+                      <span>
+                        {existingClient.full_name} · {existingClient.phone}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={useExisting}
+                        className="font-semibold underline underline-offset-4"
+                      >
+                        Utiliser ce client
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+          </form>
+        </POSDialogBody>
 
-        <DialogFooter className="gap-2 sm:gap-0">
-          <Button
-            variant="outline"
-            onClick={() => handleClose(false)}
+        <POSDialogFooter>
+          <POSSecondaryButton
+            type="button"
+            onClick={() => handleOpenChange(false)}
             disabled={saving}
           >
-            Cancel
-          </Button>
-          <Button onClick={handleSubmit} disabled={saving} className="gap-1.5">
-            {saving ? (
-              <>
-                <Loader2 className="size-4 animate-spin" />
-                Saving...
-              </>
-            ) : (
-              <>
-                <UserPlus className="size-4" />
-                Add Client
-              </>
-            )}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
+            Annuler
+          </POSSecondaryButton>
+          {existingClient ? (
+            <POSPrimaryButton type="button" onClick={useExisting}>
+              <CheckCircle2 className="size-4" /> Utiliser ce client
+            </POSPrimaryButton>
+          ) : (
+            <POSPrimaryButton
+              type="submit"
+              form="pos-add-client-form"
+              disabled={saving}
+            >
+              {saving ? (
+                <>
+                  <Loader2 className="size-4 animate-spin" /> Vérification…
+                </>
+              ) : (
+                <>
+                  <UserPlus className="size-4" /> Ajouter le client
+                </>
+              )}
+            </POSPrimaryButton>
+          )}
+        </POSDialogFooter>
+      </POSDialogContent>
     </Dialog>
   );
 }

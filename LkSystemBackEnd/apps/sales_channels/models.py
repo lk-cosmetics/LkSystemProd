@@ -190,6 +190,105 @@ from decimal import Decimal
 from django.conf import settings
 
 
+class CashSession(models.Model):
+    """One auditable cash-register session per sales point and business day.
+
+    Sales and refunds stay on their source orders; manual drawer movements stay
+    in :class:`CashMovement`. This model stores only the opening fact and the
+    immutable closing snapshot so yesterday is never reset or recomputed away.
+    """
+
+    class Status(models.TextChoices):
+        OPEN = "OPEN", "Open"
+        CLOSED = "CLOSED", "Closed"
+
+    company = models.ForeignKey(
+        "company.Company",
+        on_delete=models.CASCADE,
+        related_name="cash_sessions",
+    )
+    sales_channel = models.ForeignKey(
+        "sales_channels.SalesChannel",
+        on_delete=models.CASCADE,
+        related_name="cash_sessions",
+    )
+    business_date = models.DateField(db_index=True)
+    opening_cash = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        default=Decimal("0.000"),
+    )
+    opening_cash_set = models.BooleanField(
+        default=False,
+        help_text="True after a cashier explicitly confirms the opening float.",
+    )
+    status = models.CharField(
+        max_length=8,
+        choices=Status.choices,
+        default=Status.OPEN,
+        db_index=True,
+    )
+    opened_at = models.DateTimeField()
+    opened_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="cash_sessions_opened",
+    )
+    closing_cash_expected = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        null=True,
+        blank=True,
+    )
+    closing_cash_actual = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        null=True,
+        blank=True,
+    )
+    cash_difference = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        null=True,
+        blank=True,
+    )
+    closing_note = models.TextField(blank=True, default="")
+    closed_at = models.DateTimeField(null=True, blank=True)
+    closed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="cash_sessions_closed",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = "sales_channels"
+        db_table = "pos_cash_session"
+        ordering = ["-business_date", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["sales_channel", "business_date"],
+                name="unique_cash_session_per_channel_day",
+            ),
+            models.CheckConstraint(
+                check=models.Q(opening_cash__gte=Decimal("0.000")),
+                name="cash_session_opening_non_negative",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["company", "business_date"]),
+            models.Index(fields=["sales_channel", "status", "business_date"]),
+        ]
+
+    def __str__(self):
+        return f"{self.sales_channel} - {self.business_date} ({self.status})"
+
+
 # Sub-categories, scoped by movement type. ``OTHER`` is shared. The model keeps
 # ``category`` as a plain CharField (valid values depend on ``movement_type``),
 # so validation + display labels live in code rather than a single DB enum.

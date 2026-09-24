@@ -1,6 +1,7 @@
-import { memo } from 'react';
-import { Minus, Plus, Trash2 } from 'lucide-react';
+import { memo, useState } from 'react';
+import { Minus, Package, Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { getMediaUrl } from '@/utils/helpers';
 import { getEffectivePrice, fmtTND } from './types';
 import type { CartLine } from './types';
 
@@ -19,20 +20,42 @@ export const POSCartItem = memo(function POSCartItem({
   getPrice,
   readOnly = false,
 }: POSCartItemProps) {
+  const [imageFailed, setImageFailed] = useState(false);
   const originalPrice = getEffectivePrice(line.product);
   const unitPrice = getPrice ? getPrice(line.product) : originalPrice;
   const hasDiscount = unitPrice < originalPrice - 0.001;
   const lineTotal = fmtTND(line.quantity * unitPrice);
+  const imageUrl = getMediaUrl(line.product.image || line.product.image_url);
+  const showImage = Boolean(imageUrl) && !imageFailed;
 
   return (
-    <div className="group rounded-md border bg-background px-2.5 py-2 shadow-sm transition-colors hover:bg-muted/30">
-      <div className="flex items-start gap-2">
+    <div className="group py-2.5 transition-colors hover:bg-muted/20">
+      <div className="flex items-start gap-2.5">
+        <div className="flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-sm bg-muted">
+          {showImage ? (
+            <img
+              src={imageUrl ?? undefined}
+              alt=""
+              className="h-full w-full object-cover"
+              loading="lazy"
+              onError={() => setImageFailed(true)}
+            />
+          ) : (
+            <Package
+              className="size-5 text-muted-foreground/40"
+              aria-hidden="true"
+            />
+          )}
+        </div>
+
         <div className="min-w-0 flex-1">
-          <p className="line-clamp-2 text-xs font-semibold leading-snug">
+          <p className="line-clamp-2 text-xs font-semibold leading-snug text-foreground">
             {line.product.name}
           </p>
           <div className="mt-1 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
-            <span className={`text-[11px] font-semibold tabular-nums ${hasDiscount ? 'text-rose-600' : 'text-muted-foreground'}`}>
+            <span
+              className={`text-[11px] font-semibold tabular-nums ${hasDiscount ? 'text-rose-600' : 'text-muted-foreground'}`}
+            >
               {fmtTND(unitPrice)} TND
             </span>
             {hasDiscount && (
@@ -56,7 +79,7 @@ export const POSCartItem = memo(function POSCartItem({
         )}
       </div>
 
-      <div className="mt-2 flex items-center justify-between gap-2">
+      <div className="mt-2 flex items-center justify-between gap-2 pl-[4.125rem]">
         {readOnly ? (
           <span className="inline-flex h-7 min-w-12 items-center justify-center rounded-full border bg-muted/40 px-2 text-xs font-semibold tabular-nums">
             x{line.quantity}
@@ -89,8 +112,13 @@ export const POSCartItem = memo(function POSCartItem({
 
         <div className="min-w-0 text-right">
           <p className="text-[10px] text-muted-foreground">Line total</p>
-          <p className={`text-sm font-bold tabular-nums leading-tight ${hasDiscount ? 'text-rose-600' : ''}`}>
-            {lineTotal} <span className="text-[10px] font-medium text-muted-foreground">TND</span>
+          <p
+            className={`text-sm font-bold tabular-nums leading-tight ${hasDiscount ? 'text-rose-600' : ''}`}
+          >
+            {lineTotal}{' '}
+            <span className="text-[10px] font-medium text-muted-foreground">
+              TND
+            </span>
           </p>
         </div>
       </div>

@@ -78,13 +78,16 @@ export function POSCart({
 }: POSCartProps) {
   const hasItems = cart.length > 0;
   const savings = Math.max(0, cartOriginalTotal - cartTotal);
-  const promotionSavings = Math.max(0, cartOriginalTotal - cartTotal - manualDiscountAmount);
+  const promotionSavings = Math.max(
+    0,
+    cartOriginalTotal - cartTotal - manualDiscountAmount
+  );
   const hasDiscount = savings > 0.001;
   const hasManualDiscount = manualDiscountAmount > 0.001;
   const hasPromotionDiscount = promotionSavings > 0.001;
   const itemAreaClass = compact
-    ? 'max-h-[32dvh] shrink-0 -mx-1 overflow-y-auto pr-1'
-    : 'max-h-[15rem] shrink-0 -mx-1 overflow-y-auto pr-1';
+    ? 'min-h-[7rem] flex-1 overflow-y-auto overscroll-contain pr-1'
+    : 'min-h-[8rem] flex-1 overflow-y-auto overscroll-contain pr-1';
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
@@ -169,7 +172,13 @@ export function POSCart({
       )}
 
       {/* ── Items list ──────────────────────────────────────────────── */}
-      <div className={hasItems ? itemAreaClass : 'shrink-0 rounded-md border bg-background/60'}>
+      <div
+        className={
+          hasItems
+            ? itemAreaClass
+            : 'flex min-h-0 flex-1 items-center justify-center rounded-md border bg-background/60'
+        }
+      >
         {!hasItems ? (
           <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
             <ShoppingCart className="size-8 mb-2 opacity-30" />
@@ -177,7 +186,7 @@ export function POSCart({
             <p className="text-xs mt-1">Tap a product to add it</p>
           </div>
         ) : (
-          <div className="space-y-2 px-1 py-1">
+          <div className="divide-y rounded-md border bg-background px-2">
             {cart.map(line => (
               <POSCartItem
                 key={line.product.id}
@@ -197,7 +206,7 @@ export function POSCart({
         <>
           <Separator className="shrink-0" />
 
-          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+          <div className="mt-auto max-h-[48dvh] shrink-0 space-y-3 overflow-y-auto overscroll-contain pr-1">
             {!readOnlyCart && (
               <div className="rounded-md border bg-muted/20 p-2">
                 <div className="mb-2 flex items-center justify-between gap-2">
@@ -205,7 +214,9 @@ export function POSCart({
                   <div className="flex rounded-md border bg-background p-0.5">
                     <Button
                       type="button"
-                      variant={manualDiscountType === 'fixed' ? 'default' : 'ghost'}
+                      variant={
+                        manualDiscountType === 'fixed' ? 'default' : 'ghost'
+                      }
                       size="xs"
                       className="h-6 px-2 text-[11px]"
                       onClick={() => onManualDiscountTypeChange('fixed')}
@@ -214,7 +225,11 @@ export function POSCart({
                     </Button>
                     <Button
                       type="button"
-                      variant={manualDiscountType === 'percentage' ? 'default' : 'ghost'}
+                      variant={
+                        manualDiscountType === 'percentage'
+                          ? 'default'
+                          : 'ghost'
+                      }
                       size="xs"
                       className="h-6 px-2 text-[11px]"
                       onClick={() => onManualDiscountTypeChange('percentage')}
@@ -231,10 +246,17 @@ export function POSCart({
                     step={manualDiscountType === 'percentage' ? 1 : 0.001}
                     value={manualDiscountValue}
                     onChange={e => onManualDiscountValueChange(e.target.value)}
-                    placeholder={manualDiscountType === 'percentage' ? 'Discount %' : 'Discount amount'}
+                    placeholder={
+                      manualDiscountType === 'percentage'
+                        ? 'Discount %'
+                        : 'Discount amount'
+                    }
                     className="h-9 text-sm"
                   />
-                  <Badge variant="outline" className="h-9 shrink-0 px-2 tabular-nums">
+                  <Badge
+                    variant="outline"
+                    className="h-9 shrink-0 px-2 tabular-nums"
+                  >
                     -{fmtTND(manualDiscountAmount)}
                   </Badge>
                 </div>
@@ -243,7 +265,6 @@ export function POSCart({
 
             {/* ── Totals & Submit ─────────────────────────────────────── */}
             <div className="border-t pt-3 space-y-1.5">
-
               {/* Subtotal row — only when a discount applies */}
               {hasDiscount && (
                 <div className="flex justify-between items-baseline text-sm text-muted-foreground">
@@ -282,7 +303,9 @@ export function POSCart({
               {/* Total */}
               <div className="flex justify-between items-baseline pt-0.5">
                 <span className="text-sm text-muted-foreground">Total</span>
-                <span className={`text-xl font-bold tabular-nums ${hasDiscount ? 'text-green-600' : ''}`}>
+                <span
+                  className={`text-xl font-bold tabular-nums ${hasDiscount ? 'text-green-600' : ''}`}
+                >
                   {fmtTND(cartTotal)}{' '}
                   <span className="text-sm font-normal text-muted-foreground">
                     TND

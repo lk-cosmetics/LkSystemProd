@@ -293,16 +293,21 @@ from datetime import datetime, time, timedelta
 from django.db.models import Case, DecimalField, F, Q, Sum, Value, When
 from django.utils import timezone
 from rest_framework import status as http_status
-from .models import CashMovement
-from .serializers import CashMovementSerializer
+from .models import CashMovement, CashSession
+from .serializers import (
+    CashMovementSerializer,
+    CashSessionCloseSerializer,
+    CashSessionOpenSerializer,
+    CashSessionSerializer,
+    _cash_summary_payload,
+)
+from .cash_session_service import CashSessionError, CashSessionService
 
 
 def _day_bounds(day):
     """Return (start, end) timezone-aware datetimes for a given local date."""
-    tz = timezone.get_current_timezone()
-    start = timezone.make_aware(datetime.combine(day, time.min), tz)
-    end = timezone.make_aware(datetime.combine(day, time.max), tz)
-    return start, end
+    start, next_day = CashSessionService.day_bounds(day)
+    return start, next_day - timedelta(microseconds=1)
 
 
 @extend_schema_view(
@@ -379,6 +384,15 @@ class CashMovementViewSet(viewsets.ModelViewSet):
         if allowed_channel_ids is not None and sc.id not in allowed_channel_ids:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('You do not have access to this POS caisse.')
+        try:
+            CashSessionService.ensure_open(
+                sc,
+                actor=self.request.user if self.request.user.is_authenticated else None,
+                moment=serializer.validated_data.get('occurred_at'),
+            )
+        except CashSessionError as exc:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError(str(exc)) from exc
         serializer.save(
             company_id=sc.brand.company_id,
             created_by=self.request.user if self.request.user.is_authenticated else None,
@@ -387,6 +401,14 @@ class CashMovementViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         # Soft delete so the movement stays in the caisse history as a reversing
         # entry; it stops counting toward the till balance.
+        day = CashSessionService.business_date(instance.occurred_at)
+        session = CashSession.objects.filter(
+            sales_channel=instance.sales_channel,
+            business_date=day,
+        ).first()
+        if session and session.status == CashSession.Status.CLOSED:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError('Une opération d\'une caisse clôturée ne peut pas être supprimée.')
         instance.is_deleted = True
         instance.deleted_at = timezone.now()
         instance.deleted_by = (
@@ -437,67 +459,12 @@ class CashMovementViewSet(viewsets.ModelViewSet):
         not the till. ``net_balance`` is kept (all-method revenue − expenses) for
         backward compatibility.
         """
-        revenue_qs = self._revenue_queryset(channel, start, end)
-        # Split payments contribute only their cash portion to the physical
-        # drawer and only their card portion to bank/card turnover. Historical
-        # rows (which predate tender fields) keep the old total-based fallback.
-        cash_q = Q(payment_method__iexact='cash') | Q(payment_method='')
-        money_field = DecimalField(max_digits=14, decimal_places=3)
-        cash_sales = revenue_qs.aggregate(t=Sum(Case(
-            When(payment_method__iexact='split', then=F('cash_amount')),
-            When(cash_q, then=F('total')),
-            default=Value(Decimal('0.000')),
-            output_field=money_field,
-        )))['t'] or Decimal('0')
-        card_sales = revenue_qs.aggregate(t=Sum(Case(
-            When(payment_method__iexact='split', then=F('card_amount')),
-            When(cash_q, then=Value(Decimal('0.000'))),
-            default=F('total'),
-            output_field=money_field,
-        )))['t'] or Decimal('0')
-        revenue_total = revenue_qs.aggregate(t=Sum('total'))['t'] or Decimal('0')
-        revenue_count = revenue_qs.count()
-
-        # Expenses (cash out) — exclude soft-deleted (a deleted dépense no
-        # longer counts toward the balance).
-        expense_qs = CashMovement.objects.filter(
-            sales_channel=channel, movement_type=CashMovement.Type.EXPENSE,
-            occurred_at__gte=start, occurred_at__lte=end, is_deleted=False,
-        )
-        expenses_total = expense_qs.aggregate(t=Sum('amount'))['t'] or Decimal('0')
-        refunds = (
-            expense_qs.filter(category='REFUND')
-            .aggregate(t=Sum('amount'))['t'] or Decimal('0')
-        )
-        expenses_count = expense_qs.count()
-        by_category = list(
-            expense_qs.values('category').annotate(total=Sum('amount')).order_by('-total')
-        )
-
-        # Alimentations / deposits (cash in) — exclude soft-deleted.
-        deposit_qs = CashMovement.objects.filter(
-            sales_channel=channel, movement_type=CashMovement.Type.DEPOSIT,
-            occurred_at__gte=start, occurred_at__lte=end, is_deleted=False,
-        )
-        funding_total = deposit_qs.aggregate(t=Sum('amount'))['t'] or Decimal('0')
-        opening = (
-            deposit_qs.filter(category='OPENING')
-            .aggregate(t=Sum('amount'))['t'] or Decimal('0')
-        )
-        cash_added = funding_total - opening
-        funding_count = deposit_qs.count()
-
-        return {
-            'revenue': revenue_total, 'revenue_count': revenue_count,
-            'cash_sales': cash_sales, 'card_sales': card_sales,
-            'expenses': expenses_total, 'expenses_count': expenses_count,
-            'refunds': refunds,
-            'opening': opening, 'cash_added': cash_added,
-            'funding_total': funding_total, 'funding_count': funding_count,
-            'net_balance': revenue_total - expenses_total,
-            'cash_balance': funding_total + cash_sales - expenses_total,
-            'by_category': by_category,
-        }
+        day = CashSessionService.business_date(start)
+        session = CashSession.objects.filter(
+            sales_channel=channel,
+            business_date=day,
+        ).first()
+        return CashSessionService.summarize(channel, day, session=session)
 
     @action(detail=False, methods=['get'], url_path='caisse-stats')
     def caisse_stats(self, request):
@@ -524,7 +491,7 @@ class CashMovementViewSet(viewsets.ModelViewSet):
             except ValueError:
                 return Response({'detail': 'Invalid date.'}, status=http_status.HTTP_400_BAD_REQUEST)
         else:
-            day = timezone.localdate()
+            day = CashSessionService.business_date()
         start, end = _day_bounds(day)
 
         b = self._caisse_breakdown(channel, start, end)
@@ -538,6 +505,8 @@ class CashMovementViewSet(viewsets.ModelViewSet):
             'revenue_count': b['revenue_count'],
             'cash_sales': str(b['cash_sales']),
             'card_sales': str(b['card_sales']),
+            'cash_refunds': str(b['cash_refunds']),
+            'card_refunds': str(b['card_refunds']),
             # Cash in — alimentation de caisse
             'opening': str(b['opening']),
             'cash_added': str(b['cash_added']),
@@ -569,7 +538,7 @@ class CashMovementViewSet(viewsets.ModelViewSet):
         if response is not None:
             return response
 
-        today = timezone.localdate()
+        today = CashSessionService.business_date()
         date_to_arg = request.query_params.get('date_to')
         date_from_arg = request.query_params.get('date_from')
         try:
@@ -598,6 +567,9 @@ class CashMovementViewSet(viewsets.ModelViewSet):
                 'revenue': str(b['revenue']),
                 'revenue_count': b['revenue_count'],
                 'cash_sales': str(b['cash_sales']),
+                'card_sales': str(b['card_sales']),
+                'cash_refunds': str(b['cash_refunds']),
+                'card_refunds': str(b['card_refunds']),
                 'expenses': str(b['expenses']),
                 'expenses_count': b['expenses_count'],
                 'funding_total': str(b['funding_total']),
@@ -626,7 +598,7 @@ class CashMovementViewSet(viewsets.ModelViewSet):
         if response is not None:
             return response
 
-        today = timezone.localdate()
+        today = CashSessionService.business_date()
         date_to_arg = request.query_params.get('date_to')
         date_from_arg = request.query_params.get('date_from')
         try:
@@ -751,3 +723,117 @@ class CashMovementViewSet(viewsets.ModelViewSet):
             'date_to': date_to.isoformat(),
             'movements': movements[:500],
         })
+
+
+class CashSessionViewSet(viewsets.ReadOnlyModelViewSet):
+    """Open, inspect, and close immutable daily POS cash sessions."""
+
+    serializer_class = CashSessionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def _allowed_channel_ids(self):
+        from apps.rbac.services import visible_sales_channel_ids
+
+        return visible_sales_channel_ids(self.request.user)
+
+    def get_queryset(self):
+        queryset = CashSession.objects.select_related(
+            'sales_channel', 'sales_channel__brand', 'opened_by', 'closed_by',
+        )
+        allowed = self._allowed_channel_ids()
+        if allowed is not None:
+            queryset = queryset.filter(sales_channel_id__in=allowed)
+        channel_id = self.request.query_params.get('sales_channel')
+        if channel_id:
+            queryset = queryset.filter(sales_channel_id=channel_id)
+        date_from = self.request.query_params.get('date_from')
+        date_to = self.request.query_params.get('date_to')
+        if date_from:
+            queryset = queryset.filter(business_date__gte=date_from)
+        if date_to:
+            queryset = queryset.filter(business_date__lte=date_to)
+        return queryset
+
+    def _channel(self, raw_id):
+        try:
+            channel = SalesChannel.objects.select_related('brand__company').get(pk=raw_id)
+        except (SalesChannel.DoesNotExist, TypeError, ValueError):
+            return None, Response(
+                {'detail': 'Sales channel not found.'},
+                status=http_status.HTTP_404_NOT_FOUND,
+            )
+        allowed = self._allowed_channel_ids()
+        if allowed is not None and channel.id not in allowed:
+            return None, Response(
+                {'detail': 'You do not have access to this POS caisse.'},
+                status=http_status.HTTP_403_FORBIDDEN,
+            )
+        return channel, None
+
+    @action(detail=False, methods=['get'], url_path='current')
+    def current(self, request):
+        channel_id = request.query_params.get('sales_channel')
+        if not channel_id:
+            return Response(
+                {'detail': 'sales_channel query parameter is required.'},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+        channel, error = self._channel(channel_id)
+        if error is not None:
+            return error
+        date_arg = request.query_params.get('date')
+        try:
+            day = datetime.fromisoformat(date_arg).date() if date_arg else CashSessionService.business_date()
+        except ValueError:
+            return Response({'detail': 'Invalid date.'}, status=http_status.HTTP_400_BAD_REQUEST)
+
+        session = self.get_queryset().filter(
+            sales_channel=channel,
+            business_date=day,
+        ).first()
+        summary = CashSessionService.summarize(channel, day, session=session)
+        return Response({
+            'business_date': day.isoformat(),
+            'sales_channel': channel.id,
+            'sales_channel_name': channel.name,
+            'currency': 'TND',
+            'session': self.get_serializer(session).data if session else None,
+            'summary': _cash_summary_payload(summary),
+        })
+
+    @action(detail=False, methods=['post'], url_path='open')
+    def open_session(self, request):
+        serializer = CashSessionOpenSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        channel = serializer.validated_data['sales_channel']
+        allowed = self._allowed_channel_ids()
+        if allowed is not None and channel.id not in allowed:
+            return Response(
+                {'detail': 'You do not have access to this POS caisse.'},
+                status=http_status.HTTP_403_FORBIDDEN,
+            )
+        try:
+            session = CashSessionService.open(
+                channel,
+                opening_cash=serializer.validated_data['opening_cash'],
+                actor=request.user,
+            )
+        except CashSessionError as exc:
+            return Response({'detail': str(exc)}, status=http_status.HTTP_400_BAD_REQUEST)
+        return Response(self.get_serializer(session).data, status=http_status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='close')
+    def close_session(self, request, pk=None):
+        session = self.get_object()
+        serializer = CashSessionCloseSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            session = CashSessionService.close(
+                session,
+                actual_cash=serializer.validated_data['closing_cash_actual'],
+                note=serializer.validated_data.get('closing_note', ''),
+                actor=request.user,
+            )
+        except CashSessionError as exc:
+            return Response({'detail': str(exc)}, status=http_status.HTTP_400_BAD_REQUEST)
+        return Response(self.get_serializer(session).data)
