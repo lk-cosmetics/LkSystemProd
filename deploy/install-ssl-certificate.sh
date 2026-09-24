@@ -123,6 +123,28 @@ else
   fi
 fi
 
+# ── Install the deploy hook FIRST ──────────────────────────────────────────
+# Order matters. The certonly call below can itself trigger a renewal, and
+# certbot runs whatever deploy hook is on disk AT THAT MOMENT. Installing the
+# hook afterwards would let a stale hook handle that first renewal - which is
+# exactly the no-op 'docker compose up -d frontend' this change exists to kill,
+# leaving nginx serving the old certificate until someone reloads it by hand.
+cat >/etc/default/lksystem-ssl <<EOF
+# Non-secret deployment coordinates for the LkSystem TLS renewal hook.
+# Written by deploy/install-ssl-certificate.sh - safe to edit.
+LKSYSTEM_DIR=$ROOT_DIR
+LKSYSTEM_COMPOSE_FILE=$COMPOSE_FILE
+LKSYSTEM_ENV_FILE=$ENV_FILE
+FRONTEND_CONTAINER=$FRONTEND_CONTAINER
+SSL_RENEWAL_LOG=$RENEWAL_LOG
+EOF
+chmod 644 /etc/default/lksystem-ssl
+
+install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
+install -m 755 "$ROOT_DIR/deploy/letsencrypt-deploy-hook.sh" \
+  /etc/letsencrypt/renewal-hooks/deploy/lksystem-reload.sh
+log "Deploy hook installed at /etc/letsencrypt/renewal-hooks/deploy/lksystem-reload.sh"
+
 # ── Issue (or keep) the certificate ────────────────────────────────────────
 LIVE_DIR="/etc/letsencrypt/live/$DOMAIN"
 if [[ -f "$LIVE_DIR/fullchain.pem" ]]; then
@@ -216,23 +238,6 @@ PYEOF
 else
   log "WARNING: $RENEWAL_CONF not found - certbot may be using a different cert name."
 fi
-
-# ── Install the deploy hook (reloads nginx after every renewal) ────────────
-cat >/etc/default/lksystem-ssl <<EOF
-# Non-secret deployment coordinates for the LkSystem TLS renewal hook.
-# Written by deploy/install-ssl-certificate.sh - safe to edit.
-LKSYSTEM_DIR=$ROOT_DIR
-LKSYSTEM_COMPOSE_FILE=$COMPOSE_FILE
-LKSYSTEM_ENV_FILE=$ENV_FILE
-FRONTEND_CONTAINER=$FRONTEND_CONTAINER
-SSL_RENEWAL_LOG=$RENEWAL_LOG
-EOF
-chmod 644 /etc/default/lksystem-ssl
-
-install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
-install -m 755 "$ROOT_DIR/deploy/letsencrypt-deploy-hook.sh" \
-  /etc/letsencrypt/renewal-hooks/deploy/lksystem-reload.sh
-log "Deploy hook installed at /etc/letsencrypt/renewal-hooks/deploy/lksystem-reload.sh"
 
 # ── Make sure something actually runs `certbot renew` on a schedule ────────
 # The Debian/Ubuntu certbot package ships either a systemd timer or a cron

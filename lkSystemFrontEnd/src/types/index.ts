@@ -1433,6 +1433,11 @@ export interface OrderListItem {
   order_source_display: string;
   payment_status: PaymentStatus;
   payment_method: string;
+  cash_amount: string;
+  card_amount: string;
+  amount_received: string;
+  change_returned: string;
+  total_paid: string;
   return_type: 'NONE' | 'CANCELLED_REFUSED' | 'RETURNED' | 'EXCHANGED' | 'DAMAGED' | 'MISSING' | 'OTHER';
   packaged_at: string | null;
   packaged_by: number | null;
@@ -1722,6 +1727,9 @@ export interface POSOrderCreateRequest {
   line_items: POSLineItemInput[];
   payment_method?: string;
   payment_method_title?: string;
+  cash_amount?: string;
+  card_amount?: string;
+  amount_received?: string;
   customer_note?: string;
   status?: 'pending' | 'processing' | 'completed';
   /** Manual orders only — social channel the order came in on. */

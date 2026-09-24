@@ -26,6 +26,7 @@ const paymentLabel = (method: string): string => {
   switch (method) {
     case 'cash':          return 'Espèces';
     case 'card':          return 'Carte';
+    case 'split':         return 'Espèces + carte';
     case 'bank_transfer': return 'Virement';
     default:              return method;
   }
@@ -43,6 +44,8 @@ export function POSReceiptPrint({ data }: { data: PrintableOrderData }) {
     paymentMethod,
     amountReceived,
     changeAmount,
+    cashAmount,
+    cardAmount,
     cashierName,
     discountTotal,
     ticketNumber,
@@ -174,7 +177,19 @@ export function POSReceiptPrint({ data }: { data: PrintableOrderData }) {
           <span>Paiement</span>
           <span className="r-amount">{paymentLabel(paymentMethod)}</span>
         </div>
-        {paymentMethod === 'cash' && amountReceived > 0 && (
+        {paymentMethod === 'split' && (
+          <>
+            <div className="r-row">
+              <span>Espèces</span>
+              <span className="r-amount">{fmtReceiptMoney(Number(cashAmount || 0))}</span>
+            </div>
+            <div className="r-row">
+              <span>Carte</span>
+              <span className="r-amount">{fmtReceiptMoney(Number(cardAmount || 0))}</span>
+            </div>
+          </>
+        )}
+        {(paymentMethod === 'cash' || paymentMethod === 'split') && amountReceived > 0 && (
           <>
             <div className="r-row">
               <span>Reçu</span>

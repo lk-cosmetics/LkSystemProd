@@ -74,7 +74,8 @@ import { InvoiceDocument, invoiceFromPOS, printInvoice } from '@/components/invo
 import { useCurrentCompany } from '@/hooks/queries/useCompanies';
 import { POSCameraScanner } from './pos/POSCameraScanner';
 import { POSAddClientDialog } from './pos/POSAddClientDialog';
-import { POSClientPromptDialog } from './pos/POSClientPromptDialog';
+import { POSCheckoutDialog } from './pos/POSCheckoutDialog';
+import { calculatePOSPayment, roundTND, type POSPaymentMethod } from './pos/posPayment';
 import POSCaisseTab from './pos/POSCaisseTab';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Wallet } from 'lucide-react';
@@ -146,6 +147,19 @@ const readCachedChannels = (): SalesChannel[] => {
 const readSelectedChannelId = (): string => {
   if (typeof window === 'undefined') return '';
   return window.localStorage.getItem(POS_SELECTED_CHANNEL_KEY) || '';
+};
+
+const normalizePOSPaymentMethod = (value?: string | null): POSPaymentMethod => {
+  const normalized = (value || '').toLowerCase();
+  if (normalized.includes('split') || normalized.includes('+')) return 'split';
+  if (normalized.includes('card') || normalized.includes('carte')) return 'card';
+  return 'cash';
+};
+
+const paymentMethodTitle = (method: POSPaymentMethod) => {
+  if (method === 'card') return 'Card';
+  if (method === 'split') return 'Cash + Card';
+  return 'Cash';
 };
 
 const GENERIC_AXIOS_RE = /^request failed with status code/i;
@@ -290,7 +304,7 @@ export default function POSPage() {
   const [channelId, setChannelId] = useState(() => readSelectedChannelId());
   const [productSearch, setProductSearch] = useState('');
   const debouncedProductSearch = useDebounce(productSearch, 500);
-  const [paymentMethod, setPaymentMethod] = useState('cash');
+  const [paymentMethod, setPaymentMethod] = useState<POSPaymentMethod>('cash');
   const [manualDiscountType, setManualDiscountType] =
     useState<'fixed' | 'percentage'>('fixed');
   const [manualDiscountValue, setManualDiscountValue] = useState('');
@@ -303,6 +317,8 @@ export default function POSPage() {
   /* ── Cart ───────────────────────────────────────────────────────────── */
   const [cart, setCart] = useState<CartLine[]>([]);
   const [amountReceived, setAmountReceived] = useState(0);
+  const [cashAmount, setCashAmount] = useState(0);
+  const [cardAmount, setCardAmount] = useState(0);
   const [discountedPrices, setDiscountedPrices] = useState<Record<number, number>>({});
   const [activePickupOrder, setActivePickupOrder] = useState<OrderDetail | null>(null);
   const [activeHistoryOrder, setActiveHistoryOrder] = useState<OrderDetail | null>(null);
@@ -339,7 +355,8 @@ export default function POSPage() {
   /* ── Dialog states ─────────────────────────────────────────────────── */
   const [cameraOpen, setCameraOpen] = useState(false);
   const [addClientOpen, setAddClientOpen] = useState(false);
-  const [clientPromptOpen, setClientPromptOpen] = useState(false);
+  const [checkoutOpen, setCheckoutOpen] = useState(false);
+  const [checkoutStep, setCheckoutStep] = useState<'customer' | 'payment'>('customer');
 
   /* ── Camera scanner feedback ───────────────────────────────────────── */
   const [scanFeedback, setScanFeedback] = useState<string | null>(null);
@@ -352,6 +369,7 @@ export default function POSPage() {
   const barcodeTarget = useRef<EventTarget | null>(null);
   const barcodeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const displayCartSnapshot = useRef<Map<number, number>>(new Map());
+  const submitLockRef = useRef(false);
 
   /* ── Load reference data ───────────────────────────────────────────── */
   const fetchRef = useCallback(async () => {
@@ -916,6 +934,8 @@ export default function POSPage() {
     setPickupLinePrices({});
     setCart([]);
     setAmountReceived(0);
+    setCashAmount(0);
+    setCardAmount(0);
     setCustomerNote('');
     setSelectedClient(null);
     setClientSkipped(false);
@@ -925,6 +945,8 @@ export default function POSPage() {
     setActiveHistoryOrder(null);
     setCart([]);
     setAmountReceived(0);
+    setCashAmount(0);
+    setCardAmount(0);
     setCustomerNote('');
     setManualDiscountValue('');
     setManualDiscountType('fixed');
@@ -1005,6 +1027,14 @@ export default function POSPage() {
     }
     setCart([]);
     setManualDiscountValue('');
+    setCustomerNote('');
+    setSelectedClient(null);
+    setClientSkipped(false);
+    setAmountReceived(0);
+    setCashAmount(0);
+    setCardAmount(0);
+    setCheckoutOpen(false);
+    setCheckoutStep('customer');
   }, [activeHistoryOrder, activePickupOrder, releaseHistoryOrder, releasePickupOrder]);
 
   // Full price total (no promotions) — used to compute savings display
@@ -1039,10 +1069,17 @@ export default function POSPage() {
     [cart],
   );
 
-  const changeAmount = useMemo(
-    () => Math.max(0, amountReceived - cartTotal),
-    [amountReceived, cartTotal],
+  const paymentBreakdown = useMemo(
+    () => calculatePOSPayment({
+      method: paymentMethod,
+      total: cartTotal,
+      cashAmount,
+      cardAmount,
+      amountReceived,
+    }),
+    [amountReceived, cardAmount, cartTotal, cashAmount, paymentMethod],
   );
+  const changeAmount = paymentBreakdown.change;
 
   /* ── Local LED8 customer-display bridge ────────────────────────────── */
 
@@ -1081,7 +1118,7 @@ export default function POSPage() {
 
   // Collect label on cash amount entered
   useEffect(() => {
-    if (paymentMethod !== 'cash') return;
+    if (paymentMethod === 'card') return;
     if (amountReceived <= 0) return;
     const timer = window.setTimeout(() => {
       void customerDisplayService.showCollect(amountReceived);
@@ -1091,14 +1128,14 @@ export default function POSPage() {
 
   // Change label once payment >= total
   useEffect(() => {
-    if (paymentMethod !== 'cash') return;
-    if (amountReceived < cartTotal) return;
+    if (paymentMethod === 'card') return;
+    if (!paymentBreakdown.valid) return;
     if (changeAmount <= 0) return;
     const timer = window.setTimeout(() => {
       void customerDisplayService.showChange(changeAmount);
     }, 200);
     return () => window.clearTimeout(timer);
-  }, [changeAmount, amountReceived, cartTotal, paymentMethod]);
+  }, [changeAmount, amountReceived, paymentBreakdown.valid, paymentMethod]);
 
   /* ── Customer handlers ─────────────────────────────────────────────── */
   const handleSelectClient = useCallback((client: Client) => {
@@ -1125,6 +1162,7 @@ export default function POSPage() {
     });
     setSelectedClient(client);
     setClientSkipped(false);
+    setCheckoutStep('payment');
   }, []);
 
   const handleSelectWaitingOrder = useCallback(async (order: OrderListItem) => {
@@ -1155,8 +1193,10 @@ export default function POSPage() {
       setPickupLinePrices(prices);
       setChannelId(String(detail.pos_sales_channel ?? detail.sales_channel));
       setCart(nextCart);
-      setAmountReceived(Number(detail.total || 0));
-      setPaymentMethod(detail.payment_method || 'cash');
+      setAmountReceived(0);
+      setCashAmount(Number(detail.total || 0));
+      setCardAmount(0);
+      setPaymentMethod(normalizePOSPaymentMethod(detail.payment_method));
       setCustomerNote(detail.customer_note || '');
       setSelectedClient(matchedClient);
       setClientSkipped(!matchedClient);
@@ -1197,14 +1237,10 @@ export default function POSPage() {
       setActiveHistoryOrder(detail);
       setChannelId(String(detail.sales_channel));
       setCart(nextCart);
-      setAmountReceived(Number(detail.total || 0));
-      setPaymentMethod(
-        detail.payment_method?.toLowerCase().includes('card')
-          ? 'card'
-          : detail.payment_method?.toLowerCase().includes('transfer')
-            ? 'bank_transfer'
-            : 'cash'
-      );
+      setAmountReceived(Number(detail.amount_received || detail.total || 0));
+      setCashAmount(Number(detail.cash_amount || 0));
+      setCardAmount(Number(detail.card_amount || 0));
+      setPaymentMethod(normalizePOSPaymentMethod(detail.payment_method));
       setManualDiscountType(detail.discount_type === 'PERCENTAGE' ? 'percentage' : 'fixed');
       setManualDiscountValue(discountValue > 0 ? String(discountValue) : '');
       setCustomerNote(detail.customer_note || '');
@@ -1467,12 +1503,10 @@ export default function POSPage() {
       try {
         const result = await orderService.checkoutPOS(activePickupOrder.id, {
           payment_method: paymentMethod,
-          payment_method_title:
-            paymentMethod === 'cash'
-              ? 'Cash'
-              : paymentMethod === 'card'
-                ? 'Card'
-                : 'Bank Transfer',
+          payment_method_title: paymentMethodTitle(paymentMethod),
+          cash_amount: paymentBreakdown.cashAmount.toFixed(3),
+          card_amount: paymentBreakdown.cardAmount.toFixed(3),
+          amount_received: paymentBreakdown.amountReceived.toFixed(3),
           customer_note: customerNote,
         });
 
@@ -1483,12 +1517,15 @@ export default function POSPage() {
           paymentMethod,
           amountReceived,
           changeAmount,
+          cashAmount: paymentBreakdown.cashAmount,
+          cardAmount: paymentBreakdown.cardAmount,
           cashierName,
           discountTotal: Math.max(0, cartOriginalTotal - cartTotal),
           ticketNumber: result.ticket_id || result.order_number,
           logoSrc: currentChannel?.brand_logo ?? undefined,
         });
         setCompletedOrder(result);
+        setCheckoutOpen(false);
         releasePickupOrder();
         void customerDisplayService.showTotal(0);
         await Promise.all([
@@ -1628,6 +1665,26 @@ export default function POSPage() {
           : Math.min(submitSubtotal, safeManualDiscount);
     const submitTotal = Math.max(0, submitSubtotal - submitManualDiscount);
 
+    // A promotion may start/end while the checkout is open. Never charge a
+    // stale amount: refresh the visible total and make the cashier confirm the
+    // new tender instead of silently submitting a different value.
+    if (Math.abs(roundTND(submitTotal) - roundTND(cartTotal)) > 0.0005) {
+      if (paymentMethod === 'cash') {
+        setCashAmount(roundTND(submitTotal));
+        setCardAmount(0);
+      } else if (paymentMethod === 'card') {
+        setCashAmount(0);
+        setCardAmount(roundTND(submitTotal));
+      } else {
+        setCashAmount(0);
+        setCardAmount(roundTND(submitTotal));
+      }
+      setAmountReceived(0);
+      setSubmitting(false);
+      toast.info('Les promotions ont changé. Vérifiez le nouveau total avant de confirmer.');
+      return;
+    }
+
     const ticketIdentity = createOfflineTicketIdentity();
     const payload: POSOrderCreateRequest = {
       sales_channel: Number(channelId),
@@ -1653,12 +1710,10 @@ export default function POSPage() {
         total: (l.quantity * getSubmitPrice(l.product)).toFixed(2),
       })),
       payment_method: paymentMethod,
-      payment_method_title:
-        paymentMethod === 'cash'
-          ? 'Cash'
-          : paymentMethod === 'card'
-            ? 'Card'
-            : 'Bank Transfer',
+      payment_method_title: paymentMethodTitle(paymentMethod),
+      cash_amount: paymentBreakdown.cashAmount.toFixed(3),
+      card_amount: paymentBreakdown.cardAmount.toFixed(3),
+      amount_received: paymentBreakdown.amountReceived.toFixed(3),
       customer_note: customerNote,
       status: 'completed',
       discount_type:
@@ -1718,12 +1773,12 @@ export default function POSPage() {
         status: 'COMPLETED',
         source: 'POS',
         payment_status: 'PAID',
-        payment_method:
-          paymentMethod === 'cash'
-            ? 'Cash'
-            : paymentMethod === 'card'
-              ? 'Card'
-              : 'Bank Transfer',
+        payment_method: paymentMethod,
+        cash_amount: paymentBreakdown.cashAmount.toFixed(3),
+        card_amount: paymentBreakdown.cardAmount.toFixed(3),
+        amount_received: paymentBreakdown.amountReceived.toFixed(3),
+        change_returned: paymentBreakdown.change.toFixed(3),
+        total_paid: paymentBreakdown.totalPaid.toFixed(3),
         billing_phone: selectedClient?.phone ?? '',
         currency: 'TND',
         subtotal: submitSubtotal.toFixed(2),
@@ -1798,16 +1853,22 @@ export default function POSPage() {
         paymentMethod,
         amountReceived,
         changeAmount,
+        cashAmount: paymentBreakdown.cashAmount,
+        cardAmount: paymentBreakdown.cardAmount,
         cashierName,
         discountTotal: Math.max(0, cartOriginalTotal - submitTotal),
         ticketNumber: queued.ticket_id,
         logoSrc: currentChannel?.brand_logo ?? undefined,
       });
       setCompletedOrder(localOrder);
+      setCheckoutOpen(false);
 
       setCart([]);
       setCustomerNote('');
       setManualDiscountValue('');
+      setAmountReceived(0);
+      setCashAmount(0);
+      setCardAmount(0);
       setSelectedClient(null);
       setClientSkipped(false);
       void customerDisplayService.showTotal(0);
@@ -1839,6 +1900,8 @@ export default function POSPage() {
         paymentMethod,
         amountReceived,
         changeAmount,
+        cashAmount: paymentBreakdown.cashAmount,
+        cardAmount: paymentBreakdown.cardAmount,
         cashierName,
         discountTotal: Math.max(0, cartOriginalTotal - submitTotal),
         ticketNumber: result.ticket_id || result.order_number,
@@ -1846,11 +1909,15 @@ export default function POSPage() {
       });
 
       setCompletedOrder(result);
+      setCheckoutOpen(false);
 
       // Reset form state
       setCart([]);
       setCustomerNote('');
       setManualDiscountValue('');
+      setAmountReceived(0);
+      setCashAmount(0);
+      setCardAmount(0);
       setSelectedClient(null);
       setClientSkipped(false);
       void customerDisplayService.showTotal(0);
@@ -1881,7 +1948,7 @@ export default function POSPage() {
   }, [
     activeHistoryOrder, activePickupOrder,
     channelId, cart, selectedClient, channels,
-    paymentMethod, customerNote, amountReceived, changeAmount,
+    paymentMethod, paymentBreakdown, customerNote, amountReceived, changeAmount,
     manualDiscountType, manualDiscountValue,
     isMobile, getUnitPrice, releaseHistoryOrder, releasePickupOrder, fetchPOSHistoryOrders, fetchWaitingPOSOrders,
     cashierName, cartOriginalTotal, isOnlineMode,
@@ -1889,25 +1956,32 @@ export default function POSPage() {
     refreshPOSProductCache, notifyCaisseStatsChanged,
   ]);
 
-  const handleSubmit = useCallback(() => {
-    if (activePickupOrder || activeHistoryOrder) {
-      executeSubmit();
-      return;
+  const runSubmitOnce = useCallback(async () => {
+    if (submitLockRef.current) return;
+    submitLockRef.current = true;
+    try {
+      await executeSubmit();
+    } finally {
+      submitLockRef.current = false;
     }
-    // If customer not selected AND not skipped → show prompt
-    if (!selectedClient && !clientSkipped) {
-      setClientPromptOpen(true);
-      return;
-    }
-    executeSubmit();
-  }, [activeHistoryOrder, activePickupOrder, selectedClient, clientSkipped, executeSubmit]);
-
-  // Called from the prompt dialog when user chooses "Skip"
-  const handlePromptSkipAndSubmit = useCallback(() => {
-    setClientSkipped(true);
-    // Need to execute submit after state update
-    setTimeout(() => executeSubmit(), 0);
   }, [executeSubmit]);
+
+  const handleSubmit = useCallback(() => {
+    if (activeHistoryOrder) {
+      void runSubmitOnce();
+      return;
+    }
+    if (paymentMethod === 'cash') {
+      setCashAmount(roundTND(cartTotal));
+      setCardAmount(0);
+    } else if (paymentMethod === 'card') {
+      setCashAmount(0);
+      setCardAmount(roundTND(cartTotal));
+    }
+    setCheckoutStep('customer');
+    setCheckoutOpen(true);
+    if (isMobile) setCartDrawerOpen(false);
+  }, [activeHistoryOrder, cartTotal, isMobile, paymentMethod, runSubmitOnce]);
 
   /* ── Print handlers ────────────────────────────────────────────────── */
   const handlePrint = useCallback((mode: 'receipt' | 'invoice') => {
@@ -1972,6 +2046,8 @@ export default function POSPage() {
     setPrintData(null);
     setPrintMode(null);
     setAmountReceived(0);
+    setCashAmount(0);
+    setCardAmount(0);
   }, []);
 
   useEffect(() => {
@@ -1996,11 +2072,20 @@ export default function POSPage() {
     setChannelId(v);
     setCart([]);
     setAmountReceived(0);
+    setCashAmount(0);
+    setCardAmount(0);
     setManualDiscountValue('');
   }, [activeHistoryOrder, activePickupOrder, releaseHistoryOrder, releasePickupOrder]);
 
   /* ── Shared cart props ─────────────────────────────────────────────── */
   const canAddClient = !!channelId && !!selectedChannel;
+  const handleCheckoutAddClient = () => {
+    if (!canAddClient) {
+      setErrorMsg('Select a sales channel before adding a client.');
+      return;
+    }
+    setAddClientOpen(true);
+  };
   const pickupOrderLabel = activePickupOrder
     ? `Pickup checkout ${activePickupOrder.order_number}`
     : undefined;
@@ -2017,32 +2102,11 @@ export default function POSPage() {
     onRemove: removeFromCart,
     onClearCart: clearCart,
     getPrice: getUnitPrice,
-    clients,
-    selectedClient,
-    clientSkipped,
-    onSelectClient: handleSelectClient,
-    onSkipClient: handleSkipClient,
-    onClearClient: handleClearClient,
-    onAddClientClick: () => {
-      // ✨ Validate channel is selected before opening dialog
-      if (!canAddClient) {
-        setErrorMsg('⚠️ Sales Channel Required: Please select a sales channel first before adding a client.');
-        return;
-      }
-      setAddClientOpen(true);
-    },
-    canAddClient,  // ✨ Pass to component so it can disable button
-    paymentMethod,
-    onPaymentMethodChange: setPaymentMethod,
     manualDiscountType,
     manualDiscountValue,
     manualDiscountAmount,
     onManualDiscountTypeChange: setManualDiscountType,
     onManualDiscountValueChange: setManualDiscountValue,
-    customerNote,
-    onNoteChange: setCustomerNote,
-    amountReceived,
-    onAmountReceivedChange: setAmountReceived,
     onSubmit: handleSubmit,
     submitting,
     disabled: cart.length === 0 || !channelId,
@@ -2062,7 +2126,7 @@ export default function POSPage() {
       ? 'Checkout Pickup'
       : activeHistoryOrder
         ? 'Update & Print Ticket'
-        : 'Place Order',
+        : 'Checkout',
     submittingLabel: activePickupOrder
       ? 'Validating pickup checkout...'
       : activeHistoryOrder
@@ -2261,13 +2325,34 @@ export default function POSPage() {
         onClientCreated={handleClientCreated}
       />
 
-      {/* ── Client prompt dialog (order validation) ────────────────── */}
-      <POSClientPromptDialog
-        open={clientPromptOpen}
-        onOpenChange={setClientPromptOpen}
-        onSelectClient={handleClearClient} // Opens customer section in default state
-        onAddClient={() => setAddClientOpen(true)}
-        onSkip={handlePromptSkipAndSubmit}
+      {/* ── Two-step customer + payment checkout ───────────────────── */}
+      <POSCheckoutDialog
+        open={checkoutOpen}
+        onOpenChange={setCheckoutOpen}
+        step={checkoutStep}
+        onStepChange={setCheckoutStep}
+        total={cartTotal}
+        itemCount={cartItemCount}
+        clients={clients}
+        selectedClient={selectedClient}
+        clientSkipped={clientSkipped}
+        onSelectClient={handleSelectClient}
+        onSkipClient={handleSkipClient}
+        onClearClient={handleClearClient}
+        onAddClient={handleCheckoutAddClient}
+        canAddClient={canAddClient}
+        paymentMethod={paymentMethod}
+        onPaymentMethodChange={setPaymentMethod}
+        cashAmount={cashAmount}
+        onCashAmountChange={setCashAmount}
+        cardAmount={cardAmount}
+        onCardAmountChange={setCardAmount}
+        amountReceived={amountReceived}
+        onAmountReceivedChange={setAmountReceived}
+        customerNote={customerNote}
+        onCustomerNoteChange={setCustomerNote}
+        submitting={submitting}
+        onConfirm={() => void runSubmitOnce()}
       />
 
       {/* ── Post-order dialog ────────────────────────────────────────── */}

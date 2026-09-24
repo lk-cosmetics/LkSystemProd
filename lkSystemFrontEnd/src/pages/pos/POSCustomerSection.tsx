@@ -45,11 +45,16 @@ export const POSCustomerSection = memo(function POSCustomerSection({
 
   const filtered = query.trim()
     ? clients.filter(c => {
-        const q = query.toLowerCase();
+        const q = query.trim().toLowerCase();
+        const queryPhone = q.replace(/\D/g, '').replace(/^216/, '');
+        const clientPhone = (c.phone_normalized || c.phone || '')
+          .replace(/\D/g, '')
+          .replace(/^216/, '');
         return (
           c.full_name?.toLowerCase().includes(q) ||
           c.email?.toLowerCase().includes(q) ||
-          c.phone?.includes(q)
+          c.phone?.includes(q) ||
+          (queryPhone.length > 0 && clientPhone.includes(queryPhone))
         );
       })
     : clients;

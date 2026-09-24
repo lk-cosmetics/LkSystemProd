@@ -266,6 +266,23 @@ class Order(models.Model):
     payment_status = models.CharField(
         max_length=20, choices=PaymentStatus.choices, default=PaymentStatus.UNPAID,
     )
+    # POS tender breakdown. ``cash_amount`` and ``card_amount`` are the amounts
+    # allocated to the sale total; ``amount_received`` is the physical cash
+    # handed over and may be higher than ``cash_amount`` when change is due.
+    # Keeping these values separate makes split payments auditable and lets the
+    # caisse report count only the money that actually entered the drawer.
+    cash_amount = models.DecimalField(
+        max_digits=14, decimal_places=3, default=Decimal('0.000'),
+    )
+    card_amount = models.DecimalField(
+        max_digits=14, decimal_places=3, default=Decimal('0.000'),
+    )
+    amount_received = models.DecimalField(
+        max_digits=14, decimal_places=3, default=Decimal('0.000'),
+    )
+    change_returned = models.DecimalField(
+        max_digits=14, decimal_places=3, default=Decimal('0.000'),
+    )
     currency = models.CharField(max_length=5, default='TND')
 
     # ── Totals ───────────────────────────────────────────────────────────────

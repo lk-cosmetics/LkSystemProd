@@ -13,6 +13,7 @@ from rest_framework.test import APITestCase
 
 from apps.brands.models import Brand
 from apps.company.models import Company
+from apps.orders.models import Order
 from apps.sales_channels.models import CashMovement, SalesChannel
 
 User = get_user_model()
@@ -94,6 +95,32 @@ class CashMovementTests(APITestCase):
         self.assertEqual(Decimal(s['opening']), Decimal('100.000'))
         self.assertEqual(Decimal(s['expenses']), Decimal('30.000'))
         self.assertEqual(Decimal(s['cash_balance']), Decimal('120.000'))
+
+    def test_split_sale_separates_cash_drawer_and_card_turnover(self):
+        Order.objects.create(
+            company=self.company,
+            brand=self.brand,
+            sales_channel=self.channel,
+            pos_sales_channel=self.channel,
+            order_number='SPLIT-CAISSE-001',
+            source=Order.Source.POS,
+            status=Order.Status.DONE,
+            payment_status=Order.PaymentStatus.PAID,
+            payment_method='split',
+            total=Decimal('120.00'),
+            cash_amount=Decimal('50.000'),
+            card_amount=Decimal('70.000'),
+            amount_received=Decimal('60.000'),
+            change_returned=Decimal('10.000'),
+            pos_validated_at=timezone.now(),
+        )
+
+        stats = self._stats()
+
+        self.assertEqual(Decimal(stats['revenue']), Decimal('120.000'))
+        self.assertEqual(Decimal(stats['cash_sales']), Decimal('50.000'))
+        self.assertEqual(Decimal(stats['card_sales']), Decimal('70.000'))
+        self.assertEqual(Decimal(stats['cash_balance']), Decimal('50.000'))
 
     # ── Soft delete: balance drops, history keeps a reversal ────────────
     def test_delete_is_soft_and_drops_from_balance(self):

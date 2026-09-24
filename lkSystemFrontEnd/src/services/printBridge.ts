@@ -162,6 +162,7 @@ const mapPaymentMethod = (m: string): string => {
   switch (m) {
     case 'cash':           return 'Espèce';
     case 'card':           return 'Carte';
+    case 'split':          return 'Espèce + carte';
     case 'bank_transfer':  return 'Virement';
     default:               return m;
   }
@@ -188,7 +189,7 @@ export function buildReceiptPayload(opts: {
     discountTotal,
   } = opts;
   const d = new Date(order.created_at);
-  const isCash = paymentMethod === 'cash';
+  const usesCash = paymentMethod === 'cash' || paymentMethod === 'split';
   const ticketNumber = order.ticket_id || order.order_number;
 
   return {
@@ -214,8 +215,8 @@ export function buildReceiptPayload(opts: {
     tax: Number(order.tax_total),
     total: Number(order.total),
     payment_method: mapPaymentMethod(paymentMethod),
-    paid: isCash ? amountReceived : undefined,
-    change: isCash ? changeAmount : undefined,
+    paid: usesCash ? amountReceived : undefined,
+    change: usesCash ? changeAmount : undefined,
     qr_data: ticketNumber,
   };
 }

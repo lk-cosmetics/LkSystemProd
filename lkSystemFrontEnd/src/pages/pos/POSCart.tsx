@@ -1,8 +1,5 @@
 import {
   ShoppingCart,
-  CreditCard,
-  Banknote,
-  Building2,
   Loader2,
   Receipt,
   Trash2,
@@ -15,22 +12,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
-import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
 import { POSCartItem } from './POSCartItem';
-import { POSCalculator } from './POSCalculator';
-import { POSCustomerSection } from './POSCustomerSection';
 import { fmtTND } from './types';
-import type { Client } from '@/types';
 import type { CartLine } from './types';
-
-/* ── Payment options ───────────────────────────────────────────────────── */
-
-const PAYMENT_METHODS = [
-  { value: 'cash', label: 'Cash', icon: Banknote },
-  { value: 'card', label: 'Card', icon: CreditCard },
-  { value: 'bank_transfer', label: 'Transfer', icon: Building2 },
-] as const;
 
 /* ── Props ─────────────────────────────────────────────────────────────── */
 
@@ -43,27 +28,11 @@ interface POSCartProps {
   onRemove: (productId: number) => void;
   onClearCart: () => void;
   getPrice?: (product: CartLine['product']) => number;
-  /* Customer handling */
-  clients: Client[];
-  selectedClient: Client | null;
-  clientSkipped: boolean;
-  onSelectClient: (client: Client) => void;
-  onSkipClient: () => void;
-  onClearClient: () => void;
-  onAddClientClick: () => void;
-  canAddClient?: boolean;
-  /* Payment & checkout */
-  paymentMethod: string;
-  onPaymentMethodChange: (value: string) => void;
   manualDiscountType: 'fixed' | 'percentage';
   manualDiscountValue: string;
   manualDiscountAmount: number;
   onManualDiscountTypeChange: (value: 'fixed' | 'percentage') => void;
   onManualDiscountValueChange: (value: string) => void;
-  customerNote: string;
-  onNoteChange: (value: string) => void;
-  amountReceived: number;
-  onAmountReceivedChange: (amount: number) => void;
   onSubmit: () => void;
   submitting: boolean;
   disabled: boolean;
@@ -89,25 +58,11 @@ export function POSCart({
   onRemove,
   onClearCart,
   getPrice,
-  clients,
-  selectedClient,
-  clientSkipped,
-  onSelectClient,
-  onSkipClient,
-  onClearClient,
-  onAddClientClick,
-  canAddClient = true,
-  paymentMethod,
-  onPaymentMethodChange,
   manualDiscountType,
   manualDiscountValue,
   manualDiscountAmount,
   onManualDiscountTypeChange,
   onManualDiscountValueChange,
-  customerNote,
-  onNoteChange,
-  amountReceived,
-  onAmountReceivedChange,
   onSubmit,
   submitting,
   disabled,
@@ -243,46 +198,6 @@ export function POSCart({
           <Separator className="shrink-0" />
 
           <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
-            {/* Customer */}
-            {!readOnlyCart && (
-              <div>
-                <Label className="text-xs mb-1.5 block">Customer</Label>
-                <POSCustomerSection
-                  clients={clients}
-                  selectedClient={selectedClient}
-                  clientSkipped={clientSkipped}
-                  onSelectClient={onSelectClient}
-                  onSkipClient={onSkipClient}
-                  onClearClient={onClearClient}
-                  onAddClientClick={onAddClientClick}
-                  canAddClient={canAddClient}
-                />
-              </div>
-            )}
-
-            {/* Payment Method */}
-            <div>
-              <Label className="text-xs mb-1 block">Payment</Label>
-              <div className="flex gap-1.5">
-                {PAYMENT_METHODS.map(pm => {
-                  const Icon = pm.icon;
-                  const isActive = paymentMethod === pm.value;
-                  return (
-                    <Button
-                      key={pm.value}
-                      variant={isActive ? 'default' : 'outline'}
-                      size="sm"
-                      className="flex-1 gap-1.5 h-8 text-xs"
-                      onClick={() => onPaymentMethodChange(pm.value)}
-                    >
-                      <Icon className="size-3.5" />
-                      {pm.label}
-                    </Button>
-                  );
-                })}
-              </div>
-            </div>
-
             {!readOnlyCart && (
               <div className="rounded-md border bg-muted/20 p-2">
                 <div className="mb-2 flex items-center justify-between gap-2">
@@ -324,28 +239,6 @@ export function POSCart({
                   </Badge>
                 </div>
               </div>
-            )}
-
-            {/* Note */}
-            <div>
-              <Label className="text-xs mb-1 block">Note</Label>
-              <Textarea
-                rows={compact ? 1 : 2}
-                value={customerNote}
-                onChange={e => onNoteChange(e.target.value)}
-                placeholder="Optional note..."
-                className="text-sm resize-none"
-              />
-            </div>
-
-            {/* Calculator (cash only) */}
-            {paymentMethod === 'cash' && (
-              <POSCalculator
-                total={cartTotal}
-                amountReceived={amountReceived}
-                onAmountChange={onAmountReceivedChange}
-                compact={compact}
-              />
             )}
 
             {/* ── Totals & Submit ─────────────────────────────────────── */}
@@ -411,7 +304,7 @@ export function POSCart({
                 ) : (
                   <>
                     <Receipt className="size-4" />
-                    {submitLabel ?? 'Place Order'} — {fmtTND(cartTotal)} TND
+                    {submitLabel ?? 'Checkout'} — {fmtTND(cartTotal)} TND
                   </>
                 )}
               </Button>

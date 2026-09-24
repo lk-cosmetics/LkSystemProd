@@ -290,7 +290,7 @@ Only works for channels with type = WOOCOMMERCE.
 
 from decimal import Decimal
 from datetime import datetime, time, timedelta
-from django.db.models import Sum, Q
+from django.db.models import Case, DecimalField, F, Q, Sum, Value, When
 from django.utils import timezone
 from rest_framework import status as http_status
 from .models import CashMovement
@@ -438,11 +438,24 @@ class CashMovementViewSet(viewsets.ModelViewSet):
         backward compatibility.
         """
         revenue_qs = self._revenue_queryset(channel, start, end)
-        # Cash = explicit 'cash' or legacy/empty (the POS default is cash).
+        # Split payments contribute only their cash portion to the physical
+        # drawer and only their card portion to bank/card turnover. Historical
+        # rows (which predate tender fields) keep the old total-based fallback.
         cash_q = Q(payment_method__iexact='cash') | Q(payment_method='')
-        cash_sales = revenue_qs.filter(cash_q).aggregate(t=Sum('total'))['t'] or Decimal('0')
-        card_sales = revenue_qs.exclude(cash_q).aggregate(t=Sum('total'))['t'] or Decimal('0')
-        revenue_total = cash_sales + card_sales
+        money_field = DecimalField(max_digits=14, decimal_places=3)
+        cash_sales = revenue_qs.aggregate(t=Sum(Case(
+            When(payment_method__iexact='split', then=F('cash_amount')),
+            When(cash_q, then=F('total')),
+            default=Value(Decimal('0.000')),
+            output_field=money_field,
+        )))['t'] or Decimal('0')
+        card_sales = revenue_qs.aggregate(t=Sum(Case(
+            When(payment_method__iexact='split', then=F('card_amount')),
+            When(cash_q, then=Value(Decimal('0.000'))),
+            default=F('total'),
+            output_field=money_field,
+        )))['t'] or Decimal('0')
+        revenue_total = revenue_qs.aggregate(t=Sum('total'))['t'] or Decimal('0')
         revenue_count = revenue_qs.count()
 
         # Expenses (cash out) — exclude soft-deleted (a deleted dépense no
@@ -649,6 +662,10 @@ class CashMovementViewSet(viewsets.ModelViewSet):
                 'amount': str(o.total), 'direction': 'in',
                 'detail': o.order_number, 'payment_method': method or 'cash',
                 'is_cash': method.lower() in ('', 'cash', 'espèces', 'especes'),
+                'cash_amount': str(o.cash_amount),
+                'card_amount': str(o.card_amount),
+                'amount_received': str(o.amount_received),
+                'change_returned': str(o.change_returned),
                 'created_by_name': _name(o),
             })
 

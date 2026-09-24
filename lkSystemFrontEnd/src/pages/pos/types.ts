@@ -16,6 +16,8 @@ export interface PrintableOrderData {
   paymentMethod: string;
   amountReceived: number;
   changeAmount: number;
+  cashAmount?: number;
+  cardAmount?: number;
   /** Display name of the cashier who closed the sale. Optional — line is hidden if absent. */
   cashierName?: string;
   /** Total discount applied (subtotal − discounted total). Optional — line is hidden when 0. */

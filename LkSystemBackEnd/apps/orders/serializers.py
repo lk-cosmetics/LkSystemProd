@@ -195,6 +195,7 @@ class OrderListSerializer(serializers.ModelSerializer):
     order_source_display = serializers.CharField(
         source='get_order_source_display', read_only=True,
     )
+    total_paid = serializers.SerializerMethodField()
 
     class Meta:
         model  = Order
@@ -217,6 +218,8 @@ class OrderListSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'status_changed_at', 'status_changed_by',
             'wc_status', 'source', 'order_source', 'order_source_display',
             'payment_status', 'payment_method',
+            'cash_amount', 'card_amount', 'amount_received',
+            'change_returned', 'total_paid',
             'return_type', 'packaged_at', 'packaged_by',
             'packaged_by_name',
             'not_answered_at', 'not_answered_attempts',
@@ -285,6 +288,15 @@ class OrderListSerializer(serializers.ModelSerializer):
         if obj.billing_phone:
             return obj.billing_phone
         return obj.client.phone if obj.client else None
+
+    @staticmethod
+    def get_total_paid(obj):
+        allocated = obj.cash_amount + obj.card_amount
+        # Historical paid orders predate the tender-breakdown fields. Keep
+        # their API representation meaningful without fabricating DB values.
+        if allocated == 0 and obj.payment_status == Order.PaymentStatus.PAID:
+            return obj.total
+        return allocated
 
     @staticmethod
     def get_line_count(obj):
@@ -556,10 +568,24 @@ class OrderReturnLookupSerializer(serializers.Serializer):
     query = serializers.CharField(min_length=1, max_length=255)
 
 
-class OrderPOSCheckoutSerializer(serializers.Serializer):
+class POSPaymentInputSerializer(serializers.Serializer):
+    payment_method = serializers.ChoiceField(
+        choices=['cash', 'card', 'split', 'bank_transfer'], default='cash',
+    )
+    payment_method_title = serializers.CharField(required=False, allow_blank=True, default='')
+    cash_amount = serializers.DecimalField(
+        max_digits=14, decimal_places=3, required=False, min_value=Decimal('0.000'),
+    )
+    card_amount = serializers.DecimalField(
+        max_digits=14, decimal_places=3, required=False, min_value=Decimal('0.000'),
+    )
+    amount_received = serializers.DecimalField(
+        max_digits=14, decimal_places=3, required=False, min_value=Decimal('0.000'),
+    )
+
+
+class OrderPOSCheckoutSerializer(POSPaymentInputSerializer):
     """Optional checkout details captured when validating a pickup order in POS."""
-    payment_method = serializers.CharField(required=False, allow_blank=True, default='cash')
-    payment_method_title = serializers.CharField(required=False, allow_blank=True, default='Cash')
     customer_note = serializers.CharField(required=False, allow_blank=True, default='')
 
 
@@ -567,7 +593,7 @@ class OrderPOSCheckoutSerializer(serializers.Serializer):
 # POS / Manual creation
 # ═════════════════════════════════════════════════════════════════════════════
 
-class POSOrderCreateSerializer(serializers.Serializer):
+class POSOrderCreateSerializer(POSPaymentInputSerializer):
     sales_channel        = serializers.PrimaryKeyRelatedField(queryset=SalesChannel.objects.all())
     ticket_id            = serializers.CharField(required=False, allow_blank=True, max_length=80)
     client_ticket_uuid   = serializers.CharField(required=False, allow_blank=True, max_length=64)
@@ -576,8 +602,6 @@ class POSOrderCreateSerializer(serializers.Serializer):
     )
     billing              = BillingSerializer(required=False)
     line_items           = OrderLineInputSerializer(many=True, min_length=1)
-    payment_method       = serializers.CharField(required=False, allow_blank=True, default='cash')
-    payment_method_title = serializers.CharField(required=False, allow_blank=True, default='Cash')
     customer_note        = serializers.CharField(required=False, allow_blank=True, default='')
     status               = serializers.ChoiceField(
         choices=['pending', 'processing', 'completed'], default='completed',
