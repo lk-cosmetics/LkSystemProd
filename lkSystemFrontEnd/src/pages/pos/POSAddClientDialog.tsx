@@ -167,7 +167,7 @@ export function POSAddClientDialog({
       <POSDialogContent size="default">
         <POSDialogHeader
           title="Nouveau client"
-          description="Créez une fiche complète sans ralentir l’encaissement. Le téléphone est vérifié automatiquement."
+          description="Coordonnées essentielles · vérification automatique du téléphone"
           aside={
             <span className="flex size-11 items-center justify-center rounded-md border bg-muted/40">
               <UserPlus className="size-5" />
@@ -175,10 +175,10 @@ export function POSAddClientDialog({
           }
         />
 
-        <POSDialogBody>
+        <POSDialogBody className="py-4 sm:py-4">
           <form
             id="pos-add-client-form"
-            className="space-y-5"
+            className="space-y-4"
             onSubmit={event => {
               event.preventDefault();
               void submit();
@@ -186,7 +186,7 @@ export function POSAddClientDialog({
           >
             <fieldset className="space-y-2">
               <legend className="text-sm font-semibold">Type de client</legend>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-2">
                 {(
                   [
                     ['PERSON', 'Particulier', UserRound],
@@ -198,7 +198,7 @@ export function POSAddClientDialog({
                     type="button"
                     onClick={() => update('client_type', value)}
                     className={cn(
-                      'flex h-12 items-center justify-center gap-2 rounded-md border text-sm font-semibold outline-none hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring',
+                      'flex h-11 items-center justify-center gap-2 rounded-md border text-sm font-semibold outline-none hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring',
                       form.client_type === value &&
                         'border-foreground bg-foreground text-background'
                     )}
@@ -210,8 +210,8 @@ export function POSAddClientDialog({
               </div>
             </fieldset>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
+            <div className="grid gap-x-4 gap-y-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
                 <Label htmlFor="pos-client-first-name">Prénom</Label>
                 <Input
                   id="pos-client-first-name"
@@ -219,20 +219,20 @@ export function POSAddClientDialog({
                   onChange={event => update('first_name', event.target.value)}
                   placeholder="Prénom"
                   autoFocus
-                  className="h-12 text-base"
+                  className="h-11 text-base"
                 />
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <Label htmlFor="pos-client-last-name">Nom</Label>
                 <Input
                   id="pos-client-last-name"
                   value={form.last_name}
                   onChange={event => update('last_name', event.target.value)}
                   placeholder="Nom"
-                  className="h-12 text-base"
+                  className="h-11 text-base"
                 />
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <Label htmlFor="pos-client-phone">
                   Téléphone <span className="text-destructive">*</span>
                 </Label>
@@ -242,13 +242,13 @@ export function POSAddClientDialog({
                   value={form.phone}
                   onChange={event => update('phone', event.target.value)}
                   placeholder="+216 XX XXX XXX"
-                  className="h-12 text-base"
+                  className="h-11 text-base"
                 />
                 <p className="text-xs text-muted-foreground">
                   +21624512995 et 24512995 sont reconnus comme le même numéro.
                 </p>
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <Label htmlFor="pos-client-email">
                   E-mail{' '}
                   <span className="font-normal text-muted-foreground">
@@ -261,10 +261,10 @@ export function POSAddClientDialog({
                   value={form.email}
                   onChange={event => update('email', event.target.value)}
                   placeholder="client@example.com"
-                  className="h-12 text-base"
+                  className="h-11 text-base"
                 />
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <Label htmlFor="pos-client-birth-date">Date de naissance</Label>
                 <Input
                   id="pos-client-birth-date"
@@ -273,10 +273,10 @@ export function POSAddClientDialog({
                   onChange={event =>
                     update('date_of_birth', event.target.value)
                   }
-                  className="h-12 text-base"
+                  className="h-11 text-base"
                 />
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <Label>Gouvernorat</Label>
                 <SearchSelect
                   value={form.state}
@@ -286,11 +286,11 @@ export function POSAddClientDialog({
                     value: governorate,
                   }))}
                   placeholder="Rechercher un gouvernorat…"
-                  className="h-12 text-base"
+                  className="h-11 text-base"
                 />
               </div>
               {form.client_type === 'COMPANY' ? (
-                <div className="space-y-2 sm:col-span-2">
+                <div className="space-y-1.5 sm:col-span-2">
                   <Label htmlFor="pos-client-tax-id">Matricule fiscal</Label>
                   <Input
                     id="pos-client-tax-id"
@@ -299,7 +299,7 @@ export function POSAddClientDialog({
                       update('matricule_fiscale', event.target.value)
                     }
                     placeholder="Identifiant fiscal de l’entreprise"
-                    className="h-12 text-base"
+                    className="h-11 text-base"
                   />
                 </div>
               ) : null}
