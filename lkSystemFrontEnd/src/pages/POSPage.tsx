@@ -425,6 +425,7 @@ export default function POSPage() {
   );
   const displayCartSnapshot = useRef<Map<number, number>>(new Map());
   const submitLockRef = useRef(false);
+  const resumeCheckoutAfterClientRef = useRef(false);
 
   /* ── Load reference data ───────────────────────────────────────────── */
   const fetchRef = useCallback(async () => {
@@ -1288,6 +1289,10 @@ export default function POSPage() {
     setSelectedClient(client);
     setClientSkipped(false);
     setCheckoutStep('payment');
+    if (resumeCheckoutAfterClientRef.current) {
+      resumeCheckoutAfterClientRef.current = false;
+      setCheckoutOpen(true);
+    }
   }, []);
 
   const handleSelectWaitingOrder = useCallback(
@@ -2310,7 +2315,17 @@ export default function POSPage() {
       setErrorMsg('Select a sales channel before adding a client.');
       return;
     }
+    resumeCheckoutAfterClientRef.current = checkoutOpen;
+    setCheckoutOpen(false);
     setAddClientOpen(true);
+  };
+
+  const handleAddClientOpenChange = (open: boolean) => {
+    setAddClientOpen(open);
+    if (!open && resumeCheckoutAfterClientRef.current) {
+      resumeCheckoutAfterClientRef.current = false;
+      setCheckoutOpen(true);
+    }
   };
   const pickupOrderLabel = activePickupOrder
     ? `Pickup checkout ${activePickupOrder.order_number}`
@@ -2571,7 +2586,7 @@ export default function POSPage() {
       {/* ── Add client dialog ──────────────────────────────────────── */}
       <POSAddClientDialog
         open={addClientOpen}
-        onOpenChange={setAddClientOpen}
+        onOpenChange={handleAddClientOpenChange}
         channel={selectedChannel}
         onClientCreated={handleClientCreated}
       />

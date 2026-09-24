@@ -7,7 +7,8 @@ export const toMillimes = (value: number): number =>
 
 export const fromMillimes = (value: number): number => value / MILLIMES;
 
-export const roundTND = (value: number): number => fromMillimes(toMillimes(value));
+export const roundTND = (value: number): number =>
+  fromMillimes(toMillimes(value));
 
 export interface POSPaymentBreakdown {
   method: POSPaymentMethod;
@@ -43,7 +44,14 @@ export function calculatePOSPayment(params: {
   }
 
   const paid = cash + card;
-  const remaining = Math.max(0, total - paid);
+  const allocationRemaining = Math.max(0, total - paid);
+  const cashShortfall = Math.max(0, cash - received);
+  const remaining =
+    params.method === 'cash'
+      ? Math.max(0, total - received)
+      : params.method === 'split'
+        ? Math.max(allocationRemaining, cashShortfall)
+        : 0;
   const change = params.method === 'card' ? 0 : Math.max(0, received - cash);
 
   let error: string | null = null;
@@ -54,9 +62,10 @@ export function calculatePOSPayment(params: {
   } else if (params.method === 'split' && (cash <= 0 || card <= 0)) {
     error = 'Saisissez une part en espèces et une part par carte.';
   } else if (params.method === 'split' && paid !== total) {
-    error = paid < total
-      ? 'Le paiement ne couvre pas encore le total.'
-      : 'La répartition dépasse le total.';
+    error =
+      paid < total
+        ? 'Le paiement ne couvre pas encore le total.'
+        : 'La répartition dépasse le total.';
   } else if (params.method === 'split' && received < cash) {
     error = 'Le montant espèces reçu est inférieur à la part espèces.';
   }

@@ -26,7 +26,7 @@ describe('POS payment calculations', () => {
     });
 
     expect(result.valid).toBe(false);
-    expect(result.remaining).toBe(0);
+    expect(result.remaining).toBe(25);
     expect(result.error).toContain('inférieur');
   });
 
@@ -56,5 +56,19 @@ describe('POS payment calculations', () => {
 
     expect(result.valid).toBe(false);
     expect(result.remaining).toBe(10);
+  });
+
+  it('calculates change when split-payment cash received exceeds the cash portion', () => {
+    const result = calculatePOSPayment({
+      method: 'split',
+      total: 347,
+      cashAmount: 100,
+      cardAmount: 247,
+      amountReceived: 120,
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.remaining).toBe(0);
+    expect(result.change).toBe(20);
   });
 });
