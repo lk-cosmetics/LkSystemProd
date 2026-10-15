@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ComponentType, ReactNode } from 'react';
 import {
   Search,
   Store,
@@ -45,10 +46,12 @@ interface POSProductGridProps {
   cartQuantities: Map<number, number>;
   onAddToCart: (product: ProductListItem) => void;
   onCameraScan: () => void;
-  /** Active catalog quick-filter chip: 'all' | 'pack' | `cat:<id>`. */
+  /** Active catalog quick-filter chip: 'all' | 'pack' | 'promo' | `cat:<id>`. */
   catalogFilter?: string;
   onCatalogFilterChange?: (key: string) => void;
   categoryOptions?: { id: number; name: string }[];
+  /** Whether anything in the catalogue is currently discounted. */
+  promotionsAvailable?: boolean;
   getPrice?: (product: ProductListItem) => number;
   getAvailableQuantity?: (product: ProductListItem) => number | null;
   isOfflineMode?: boolean;
@@ -80,6 +83,41 @@ interface POSProductGridProps {
 
 type ActiveTab = 'products' | 'waiting_pos' | 'promotions' | 'history';
 
+/**
+ * One catalog quick-filter chip.
+ *
+ * Extracted so every chip shares the exact same hit area (h-9, comfortable for
+ * a finger on a counter tablet), radius, selected treatment and focus ring —
+ * previously this markup was duplicated per chip and drifted easily.
+ */
+function FilterChip({
+  active,
+  onClick,
+  icon: Icon,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon?: ComponentType<{ className?: string }>;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-3.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${
+        active
+          ? 'border-foreground bg-foreground text-background'
+          : 'border-border bg-background text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+      }`}
+    >
+      {Icon ? <Icon className="size-3.5" /> : null}
+      {children}
+    </button>
+  );
+}
+
 export function POSProductGrid({
   channels,
   channelId,
@@ -93,6 +131,7 @@ export function POSProductGrid({
   catalogFilter = 'all',
   onCatalogFilterChange,
   categoryOptions = [],
+  promotionsAvailable = false,
   getPrice,
   getAvailableQuantity,
   isOfflineMode = false,
@@ -158,46 +197,53 @@ export function POSProductGrid({
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden">
       {/* Controls Row */}
-      <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
-        <div className="w-full sm:w-52 lg:w-48 xl:w-56">
-          <Label className="text-xs mb-1 block">Sales Channel</Label>
-          <Select value={channelId} onValueChange={onChannelChange}>
-            <SelectTrigger>
-              <SelectValue placeholder="Select channel..." />
-            </SelectTrigger>
-            <SelectContent>
-              {channels.map(ch => (
-                <SelectItem key={ch.id} value={String(ch.id)}>
-                  <div className="flex items-center gap-2">
-                    <Store className="size-3.5 text-muted-foreground" />
-                    {ch.name}
-                  </div>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="mt-1.5 h-8 w-full justify-center gap-1.5 text-xs"
-            onClick={openPublicVitrine}
-            disabled={!channelId}
-          >
-            <ExternalLink className="size-3.5" />
-            Vitrine
-          </Button>
+      <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-end">
+        <div className="w-full sm:w-64 lg:w-60 xl:w-72">
+          <Label className="mb-1 block text-xs">Canal de vente</Label>
+          {/* Vitrine sits directly beside the channel select because it opens
+              the storefront OF THAT CHANNEL. Grouping them makes the relation
+              explicit, and it reclaims the full row the stacked button used to
+              cost — that row now belongs to the product grid. */}
+          <div className="flex gap-1.5">
+            <Select value={channelId} onValueChange={onChannelChange}>
+              <SelectTrigger className="h-10 min-w-0 flex-1">
+                <SelectValue placeholder="Choisir un canal…" />
+              </SelectTrigger>
+              <SelectContent>
+                {channels.map(ch => (
+                  <SelectItem key={ch.id} value={String(ch.id)}>
+                    <div className="flex items-center gap-2">
+                      <Store className="size-3.5 text-muted-foreground" />
+                      {ch.name}
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10 shrink-0 gap-1.5 px-3"
+              onClick={openPublicVitrine}
+              disabled={!channelId}
+              aria-label="Ouvrir la vitrine de ce canal dans un nouvel onglet"
+              title="Ouvrir la vitrine de ce canal"
+            >
+              <ExternalLink className="size-4" />
+              <span className="hidden text-sm sm:inline">Vitrine</span>
+            </Button>
+          </div>
         </div>
 
         {activeTab === 'products' && (
-          <div className="flex-1">
-            <Label className="text-xs mb-1 block">Search Products</Label>
+          <div className="min-w-0 flex-1">
+            <Label className="mb-1 block text-xs">Rechercher un produit</Label>
             <div className="flex gap-1.5">
               <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+                <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
-                  placeholder="Search by name or barcode..."
-                  className="pl-9"
+                  placeholder="Nom du produit ou code-barres…"
+                  className="h-10 pl-9"
                   value={productSearch}
                   onChange={e => onSearchChange(e.target.value)}
                   disabled={!channelId}
@@ -206,11 +252,11 @@ export function POSProductGrid({
               <Button
                 variant="outline"
                 size="icon"
-                className="shrink-0 size-9"
+                className="size-10 shrink-0"
                 onClick={onCameraScan}
                 disabled={!channelId}
-                aria-label="Scan barcode with camera"
-                title="Scan with Camera"
+                aria-label="Scanner un code-barres avec la caméra"
+                title="Scanner avec la caméra"
               >
                 <Camera className="size-4" />
               </Button>
@@ -230,7 +276,7 @@ export function POSProductGrid({
           }`}
         >
           <ShoppingBag className="size-3.5" />
-          Products
+          Produits
         </button>
         <button
           onClick={() => setActiveTab('waiting_pos')}
@@ -241,7 +287,7 @@ export function POSProductGrid({
           }`}
         >
           <Clock3 className="size-3.5" />
-          Waiting POS
+          En attente
           <Badge variant="secondary" className="ml-0.5 h-5 px-1.5 text-[11px]">
             {waitingOrderCount}
           </Badge>
@@ -266,7 +312,7 @@ export function POSProductGrid({
           }`}
         >
           <History className="size-3.5" />
-          History
+          Historique
           <Badge variant="secondary" className="ml-0.5 h-5 px-1.5 text-[11px]">
             {historyOrderCount}
           </Badge>
@@ -280,11 +326,11 @@ export function POSProductGrid({
             <div className="space-y-3 px-4 pb-4">
             <div className="flex items-center justify-between rounded-md border bg-muted/30 px-3 py-2">
               <div>
-                <p className="text-sm font-medium">Orders waiting for this POS checkout</p>
+                <p className="text-sm font-medium">Commandes en attente d’encaissement</p>
                 <p className="text-xs text-muted-foreground">
                   {selectedChannel
-                    ? `Showing orders assigned to ${selectedChannel.name}.`
-                    : 'Select a sales channel to see assigned orders.'}
+                    ? `Commandes assignées à ${selectedChannel.name}.`
+                    : 'Sélectionnez un canal de vente pour voir les commandes.'}
                 </p>
               </div>
               <Button
@@ -302,24 +348,24 @@ export function POSProductGrid({
             {waitingOrdersLoading ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                 <Loader2 className="size-10 mb-3 opacity-40 animate-spin" />
-                <p className="text-sm">Loading waiting orders...</p>
+                <p className="text-sm">Chargement des commandes…</p>
               </div>
             ) : !channelId ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                 <Store className="size-10 mb-3 opacity-40" />
-                <p className="text-sm">Select a sales channel first</p>
+                <p className="text-sm">Sélectionnez d’abord un canal de vente</p>
               </div>
             ) : waitingOrders.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                 <Clock3 className="size-10 mb-3 opacity-40" />
-                <p className="text-sm">No orders waiting for POS</p>
+                <p className="text-sm">Aucune commande en attente</p>
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5">
                 {waitingOrders.map(order => {
                   const isSelected = selectedWaitingOrderId === order.id;
                   const customerName = order.client_name || 'Walk-in pickup';
-                  const customerPhone = order.client_phone || order.billing_phone || 'No phone';
+                  const customerPhone = order.client_phone || order.billing_phone || 'Téléphone non renseigné';
                   return (
                     <button
                       key={order.id}
@@ -359,7 +405,7 @@ export function POSProductGrid({
                           {order.line_count} item{order.line_count === 1 ? '' : 's'}
                         </span>
                         <span className="text-xs font-medium text-primary">
-                          {isSelected ? 'Loaded' : 'Load order'}
+                          {isSelected ? 'Chargée' : 'Charger'}
                         </span>
                       </div>
                     </button>
@@ -382,11 +428,11 @@ export function POSProductGrid({
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="text-sm font-medium">Current POS order history</p>
                     <Badge variant="secondary" className="h-5 rounded-full px-2 text-[11px]">
-                      Latest first
+                      Plus récentes d’abord
                     </Badge>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Search by ticket, client or phone. Scan a receipt QR to open it fast.
+                    Recherche par ticket, client ou téléphone. Scannez le QR d’un reçu pour l’ouvrir directement.
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -403,7 +449,7 @@ export function POSProductGrid({
                       disabled={historyOrdersLoading}
                     >
                       <X className="size-3.5" />
-                      Clear
+                      Effacer
                     </Button>
                   )}
                   <Button
@@ -426,7 +472,7 @@ export function POSProductGrid({
                     <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                     <Input
                       className="pl-9"
-                      placeholder="Ticket, client name or phone..."
+                      placeholder="Ticket, nom du client ou téléphone…"
                       value={historySearch}
                       onChange={event => onHistorySearchChange?.(event.target.value)}
                       disabled={!channelId}
@@ -466,17 +512,17 @@ export function POSProductGrid({
             {historyOrdersLoading ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                 <Loader2 className="size-10 mb-3 opacity-40 animate-spin" />
-                <p className="text-sm">Loading history...</p>
+                <p className="text-sm">Chargement de l’historique…</p>
               </div>
             ) : !channelId ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                 <Store className="size-10 mb-3 opacity-40" />
-                <p className="text-sm">Select a sales channel first</p>
+                <p className="text-sm">Sélectionnez d’abord un canal de vente</p>
               </div>
             ) : historyOrders.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                 <History className="size-10 mb-3 opacity-40" />
-                <p className="text-sm">No POS orders yet</p>
+                <p className="text-sm">Aucune vente enregistrée</p>
               </div>
             ) : (
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -538,7 +584,7 @@ export function POSProductGrid({
                               onClick={() => onReturnHistoryOrder(order)}
                             >
                               <RotateCcw className="size-3.5" />
-                              Return
+                              Retourner
                             </Button>
                           )}
                           <Button
@@ -565,57 +611,48 @@ export function POSProductGrid({
       ) : (
         <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
           {channelId && (
-            <div className="-mx-1 mb-1 flex shrink-0 items-center gap-1.5 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-              <button
-                type="button"
+            <div
+              role="group"
+              aria-label="Filtres du catalogue"
+              className="-mx-1 mb-1 flex shrink-0 items-center gap-1.5 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            >
+              <FilterChip
+                active={catalogFilter === 'all'}
                 onClick={() => onCatalogFilterChange?.('all')}
-                aria-pressed={catalogFilter === 'all'}
-                className={`inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-3.5 text-sm font-medium transition-colors ${
-                  catalogFilter === 'all'
-                    ? 'border-foreground bg-foreground text-background'
-                    : 'border-border bg-background text-muted-foreground hover:bg-muted/60 hover:text-foreground'
-                }`}
               >
                 Tous
-              </button>
-              <button
-                type="button"
+              </FilterChip>
+              {promotionsAvailable && (
+                <FilterChip
+                  active={catalogFilter === 'promo'}
+                  onClick={() => onCatalogFilterChange?.('promo')}
+                  icon={Tag}
+                >
+                  Promotions
+                </FilterChip>
+              )}
+              <FilterChip
+                active={catalogFilter === 'pack'}
                 onClick={() => onCatalogFilterChange?.('pack')}
-                aria-pressed={catalogFilter === 'pack'}
-                className={`inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-3.5 text-sm font-medium transition-colors ${
-                  catalogFilter === 'pack'
-                    ? 'border-foreground bg-foreground text-background'
-                    : 'border-border bg-background text-muted-foreground hover:bg-muted/60 hover:text-foreground'
-                }`}
+                icon={Boxes}
               >
-                <Boxes className="size-3.5" />
                 Packs
-              </button>
+              </FilterChip>
               {categoryOptions.length > 0 && (
                 <span
                   className="mx-1 h-5 w-px shrink-0 bg-border"
                   aria-hidden="true"
                 />
               )}
-              {categoryOptions.map(category => {
-                const key = `cat:${category.id}`;
-                const active = catalogFilter === key;
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => onCatalogFilterChange?.(key)}
-                    aria-pressed={active}
-                    className={`inline-flex h-9 shrink-0 items-center whitespace-nowrap rounded-full border px-3.5 text-sm font-medium transition-colors ${
-                      active
-                        ? 'border-foreground bg-foreground text-background'
-                        : 'border-border bg-background text-muted-foreground hover:bg-muted/60 hover:text-foreground'
-                    }`}
-                  >
-                    {category.name}
-                  </button>
-                );
-              })}
+              {categoryOptions.map(category => (
+                <FilterChip
+                  key={category.id}
+                  active={catalogFilter === `cat:${category.id}`}
+                  onClick={() => onCatalogFilterChange?.(`cat:${category.id}`)}
+                >
+                  {category.name}
+                </FilterChip>
+              ))}
             </div>
           )}
           <div className="min-h-0 w-full flex-1 overflow-hidden">
@@ -623,17 +660,20 @@ export function POSProductGrid({
             {!channelId ? (
             <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
               <Store className="size-10 mb-3 opacity-40" />
-              <p className="text-sm">Select a sales channel to browse products</p>
+              <p className="text-sm">Sélectionnez un canal de vente pour voir les produits</p>
             </div>
           ) : isLoading ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                 <Loader2 className="size-10 mb-3 opacity-40 animate-spin" />
-                <p className="text-sm">Loading products...</p>
+                <p className="text-sm">Chargement des produits…</p>
               </div>
             ) : products.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                 <Search className="size-10 mb-3 opacity-40" />
-                <p className="text-sm">No products found</p>
+                <p className="text-sm font-medium">Aucun produit trouvé</p>
+                <p className="mt-1 text-xs">
+                  Essayez un autre terme ou choisissez un autre filtre.
+                </p>
               </div>
             ) : (
               <div className="flex flex-col gap-4 px-2 pb-4 sm:px-3 lg:px-4">
@@ -665,7 +705,7 @@ export function POSProductGrid({
                         disabled={isFetchingNextPage}
                       >
                         {isFetchingNextPage && <Loader2 className="mr-2 size-4 animate-spin" />}
-                        Load More
+                        Charger plus
                       </Button>
                     </div>
                   </div>

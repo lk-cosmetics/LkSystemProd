@@ -126,7 +126,14 @@ function MoneyInput({
   );
 }
 
-function PaymentSummary({ payment }: { payment: POSPaymentBreakdown }) {
+function PaymentSummary({
+  payment,
+  pristine = false,
+}: {
+  payment: POSPaymentBreakdown;
+  /** True while the cashier has not entered an amount yet. */
+  pristine?: boolean;
+}) {
   const showCash = payment.method !== 'card';
   const showCard = payment.method !== 'cash';
 
@@ -176,7 +183,9 @@ function PaymentSummary({ payment }: { payment: POSPaymentBreakdown }) {
           <div>
             <p className="text-xs text-muted-foreground">Reste à encaisser</p>
             <p
-              className={`mt-1 text-lg font-bold tabular-nums ${payment.remaining > 0 ? 'text-destructive' : ''}`}
+              className={`mt-1 text-lg font-bold tabular-nums ${
+                payment.remaining > 0 && !pristine ? 'text-destructive' : ''
+              }`}
             >
               {fmtTND(payment.remaining)}
             </p>
@@ -228,6 +237,18 @@ export function POSCheckoutDialog({
     cardAmount,
     amountReceived,
   });
+
+  // A freshly opened payment step is legitimately "short" — nothing has been
+  // entered yet. Showing a red alert and a red balance at that moment reads as
+  // a malfunction rather than guidance, so hold both back until the cashier
+  // has actually typed an amount. `payment.valid` is untouched, so the Confirm
+  // button stays disabled and nothing unsafe can be submitted either way.
+  const paymentPristine =
+    paymentMethod === 'cash'
+      ? amountReceived <= 0
+      : paymentMethod === 'split'
+        ? amountReceived <= 0 && cashAmount <= 0
+        : false;
 
   const selectAndContinue = (client: Client) => {
     onSelectClient(client);
@@ -500,10 +521,10 @@ export function POSCheckoutDialog({
                   ) : null}
                 </div>
 
-                <PaymentSummary payment={payment} />
+                <PaymentSummary payment={payment} pristine={paymentPristine} />
               </div>
 
-              {payment.error ? (
+              {payment.error && !paymentPristine ? (
                 <div
                   role="alert"
                   className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm font-medium text-destructive"

@@ -43,5 +43,10 @@ export function getEffectivePrice(product: ProductListItem): number {
 /** Format an API decimal or local number as TND with 3 decimals. */
 export function fmtTND(amount: number | string | null | undefined): string {
   const value = Number(amount);
-  return (Number.isFinite(value) ? value : 0).toFixed(3);
+  const safe = Number.isFinite(value) ? value : 0;
+  // Guard against a signed zero rendering as "-0.000", which is what a
+  // cleared discount field produced. `(-0).toFixed(3)` is "-0.000", and so is
+  // any tiny negative that rounds to zero at 3 decimals (e.g. -0.0004), which
+  // floating-point subtraction of equal totals can easily produce.
+  return (Math.abs(safe) < 0.0005 ? 0 : safe).toFixed(3);
 }
