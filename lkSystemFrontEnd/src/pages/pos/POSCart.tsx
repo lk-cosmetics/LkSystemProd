@@ -257,7 +257,7 @@ export function POSCart({
                     variant="outline"
                     className="h-9 shrink-0 px-2 tabular-nums"
                   >
-                    -{fmtTND(manualDiscountAmount)}
+                    {manualDiscountAmount > 0 ? '−' : ''}{fmtTND(manualDiscountAmount)}
                   </Badge>
                 </div>
               </div>

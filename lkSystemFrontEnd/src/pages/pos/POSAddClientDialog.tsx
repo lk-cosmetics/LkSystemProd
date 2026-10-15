@@ -210,6 +210,23 @@ export function POSAddClientDialog({
               </div>
             </fieldset>
 
+            {/* Gouvernorat — placed high (just after the client type) for
+                fast access and so its dropdown opens into free space below
+                instead of being clipped by the scrollable dialog body. */}
+            <div className="space-y-1.5">
+              <Label>Gouvernorat</Label>
+              <SearchSelect
+                value={form.state}
+                onChange={value => update('state', value)}
+                options={TUNISIA_GOVERNORATES.map(governorate => ({
+                  label: governorate,
+                  value: governorate,
+                }))}
+                placeholder="Rechercher un gouvernorat…"
+                className="h-11 text-base"
+              />
+            </div>
+
             <div className="grid gap-x-4 gap-y-3 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label htmlFor="pos-client-first-name">Prénom</Label>
@@ -273,19 +290,6 @@ export function POSAddClientDialog({
                   onChange={event =>
                     update('date_of_birth', event.target.value)
                   }
-                  className="h-11 text-base"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Gouvernorat</Label>
-                <SearchSelect
-                  value={form.state}
-                  onChange={value => update('state', value)}
-                  options={TUNISIA_GOVERNORATES.map(governorate => ({
-                    label: governorate,
-                    value: governorate,
-                  }))}
-                  placeholder="Rechercher un gouvernorat…"
                   className="h-11 text-base"
                 />
               </div>

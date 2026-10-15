@@ -38,6 +38,7 @@ import { useIsMobile } from '@/hooks/use-mobile';
 import { useDebounce } from '@/hooks/useDebounce';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { useInfiniteProducts } from '@/hooks/queries/useProducts';
+import { useCategoriesBySalesChannel } from '@/hooks/queries/useCategories';
 import { usePermission } from '@/hooks/useAuth';
 
 import { salesChannelService } from '@/services/salesChannel.service';
@@ -340,6 +341,9 @@ export default function POSPage() {
   const [channelId, setChannelId] = useState(() => readSelectedChannelId());
   const [productSearch, setProductSearch] = useState('');
   const debouncedProductSearch = useDebounce(productSearch, 500);
+  // Catalog quick-filter chip: 'all' | 'pack' | `cat:<id>`. Mutually exclusive
+  // so a cashier taps one chip to narrow the grid and "Tous" to reset.
+  const [catalogFilter, setCatalogFilter] = useState<string>('all');
   const [paymentMethod, setPaymentMethod] = useState<POSPaymentMethod>('cash');
   const [manualDiscountType, setManualDiscountType] = useState<
     'fixed' | 'percentage'
@@ -776,6 +780,11 @@ export default function POSPage() {
     };
   }, [channelId, selectedChannel, isOnlineMode]);
 
+  const categoryFilterId = catalogFilter.startsWith('cat:')
+    ? Number(catalogFilter.slice(4))
+    : undefined;
+  const packOnly = catalogFilter === 'pack';
+
   const {
     data: productsData,
     fetchNextPage,
@@ -785,8 +794,46 @@ export default function POSPage() {
   } = useInfiniteProducts({
     ...productQueryParams,
     search: debouncedProductSearch || undefined,
+    // Keep the server query (the empty-cache fallback) in sync with the active
+    // chip. The primary path is the IndexedDB cache, filtered client-side below.
+    categories: categoryFilterId,
+    product_type: packOnly ? 'pack' : undefined,
     page_size: 20,
   });
+
+  // Category chips come from the channel's own categories, narrowed to those
+  // actually present on the cached catalogue so a tap never lands on an empty
+  // grid. The active chip resets whenever the channel changes.
+  const { data: channelCategories = [] } = useCategoriesBySalesChannel(
+    channelId ? Number(channelId) : 0
+  );
+
+  useEffect(() => {
+    setCatalogFilter('all');
+  }, [channelId]);
+
+  const presentCategoryIds = useMemo(() => {
+    const ids = new Set<number>();
+    for (const product of offlineProducts) {
+      for (const categoryId of product.categories ?? []) ids.add(categoryId);
+    }
+    return ids;
+  }, [offlineProducts]);
+
+  const categoryOptions = useMemo(() => {
+    const rows = channelCategories
+      .filter(
+        category =>
+          presentCategoryIds.size === 0 || presentCategoryIds.has(category.id)
+      )
+      .map(category => ({
+        id: category.id,
+        name: category.name,
+        order: category.display_order ?? 0,
+      }));
+    rows.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
+    return rows.map(({ id, name }) => ({ id, name }));
+  }, [channelCategories, presentCategoryIds]);
 
   const getCachedPromotionPrice = useCallback(
     (product: ProductListItem): number | null => {
@@ -844,9 +891,22 @@ export default function POSPage() {
     const isSellable = (p: ProductListItem) =>
       p.product_type === 'resell_product' || p.product_type === 'pack';
 
+    // Catalog quick-filter (Tous / Packs / a category), applied client-side on
+    // top of the cached catalogue so it behaves identically online and offline.
+    const matchesCatalogFilter = (p: ProductListItem) => {
+      if (catalogFilter === 'pack') return p.is_pack || p.product_type === 'pack';
+      if (categoryFilterId !== undefined) {
+        return (p.categories ?? []).includes(categoryFilterId);
+      }
+      return true;
+    };
+
+    const isVisible = (p: ProductListItem) =>
+      isSellable(p) && matchesCatalogFilter(p);
+
     if (offlineProducts.length > 0) {
       const query = normalizeSearch(productSearch);
-      const base = offlineProducts.filter(isSellable);
+      const base = offlineProducts.filter(isVisible);
       const rows = query
         ? base.filter(
             product =>
@@ -859,10 +919,12 @@ export default function POSPage() {
 
     if (!productsData?.pages) return [];
     return sortPromotionsFirst(
-      productsData.pages.flatMap(page => page?.results ?? []).filter(isSellable)
+      productsData.pages.flatMap(page => page?.results ?? []).filter(isVisible)
     );
   }, [
     channelId,
+    catalogFilter,
+    categoryFilterId,
     discountedPrices,
     getCachedPromotionPrice,
     offlineProducts,
@@ -2471,6 +2533,9 @@ export default function POSPage() {
                 cartQuantities={cartQuantities}
                 onAddToCart={addToCart}
                 onCameraScan={() => setCameraOpen(true)}
+                catalogFilter={catalogFilter}
+                onCatalogFilterChange={setCatalogFilter}
+                categoryOptions={categoryOptions}
                 isLoading={offlineProducts.length === 0 && isProductsLoading}
                 isFetchingNextPage={
                   offlineProducts.length === 0 && isFetchingNextPage
