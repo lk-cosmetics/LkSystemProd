@@ -73,6 +73,7 @@
     offset?: number;
     search?: string;
     brand?: number;
+    categories?: number;
     status?: 'publish' | 'draft' | 'pending' | 'private';
     product_type?: ProductType;
     ordering?: string;

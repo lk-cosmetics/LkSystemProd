@@ -6,6 +6,7 @@ import {
   Camera,
   Tag,
   ShoppingBag,
+  Boxes,
   Clock3,
   Phone,
   User,
@@ -44,6 +45,10 @@ interface POSProductGridProps {
   cartQuantities: Map<number, number>;
   onAddToCart: (product: ProductListItem) => void;
   onCameraScan: () => void;
+  /** Active catalog quick-filter chip: 'all' | 'pack' | `cat:<id>`. */
+  catalogFilter?: string;
+  onCatalogFilterChange?: (key: string) => void;
+  categoryOptions?: { id: number; name: string }[];
   getPrice?: (product: ProductListItem) => number;
   getAvailableQuantity?: (product: ProductListItem) => number | null;
   isOfflineMode?: boolean;
@@ -85,6 +90,9 @@ export function POSProductGrid({
   cartQuantities,
   onAddToCart,
   onCameraScan,
+  catalogFilter = 'all',
+  onCatalogFilterChange,
+  categoryOptions = [],
   getPrice,
   getAvailableQuantity,
   isOfflineMode = false,
@@ -555,8 +563,63 @@ export function POSProductGrid({
           </ScrollArea>
         </div>
       ) : (
-        <div className="flex-1 min-h-0 w-full overflow-hidden">
-          <ScrollArea className="h-full w-full">
+        <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
+          {channelId && (
+            <div className="-mx-1 mb-1 flex shrink-0 items-center gap-1.5 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              <button
+                type="button"
+                onClick={() => onCatalogFilterChange?.('all')}
+                aria-pressed={catalogFilter === 'all'}
+                className={`inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-3.5 text-sm font-medium transition-colors ${
+                  catalogFilter === 'all'
+                    ? 'border-foreground bg-foreground text-background'
+                    : 'border-border bg-background text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+                }`}
+              >
+                Tous
+              </button>
+              <button
+                type="button"
+                onClick={() => onCatalogFilterChange?.('pack')}
+                aria-pressed={catalogFilter === 'pack'}
+                className={`inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-3.5 text-sm font-medium transition-colors ${
+                  catalogFilter === 'pack'
+                    ? 'border-foreground bg-foreground text-background'
+                    : 'border-border bg-background text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+                }`}
+              >
+                <Boxes className="size-3.5" />
+                Packs
+              </button>
+              {categoryOptions.length > 0 && (
+                <span
+                  className="mx-1 h-5 w-px shrink-0 bg-border"
+                  aria-hidden="true"
+                />
+              )}
+              {categoryOptions.map(category => {
+                const key = `cat:${category.id}`;
+                const active = catalogFilter === key;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => onCatalogFilterChange?.(key)}
+                    aria-pressed={active}
+                    className={`inline-flex h-9 shrink-0 items-center whitespace-nowrap rounded-full border px-3.5 text-sm font-medium transition-colors ${
+                      active
+                        ? 'border-foreground bg-foreground text-background'
+                        : 'border-border bg-background text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+                    }`}
+                  >
+                    {category.name}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <div className="min-h-0 w-full flex-1 overflow-hidden">
+            <ScrollArea className="h-full w-full">
             {!channelId ? (
             <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
               <Store className="size-10 mb-3 opacity-40" />
@@ -609,7 +672,8 @@ export function POSProductGrid({
                 )}
               </div>
             )}
-          </ScrollArea>
+            </ScrollArea>
+          </div>
         </div>
       )}
     </div>
