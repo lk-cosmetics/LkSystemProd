@@ -97,7 +97,12 @@ import {
 import POSCaisseTab from './pos/POSCaisseTab';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Wallet } from 'lucide-react';
-import { fmtTND, type CartLine, type PrintableOrderData } from './pos/types';
+import {
+  fmtTND,
+  type CartLine,
+  type PrintableOrderData,
+  type POSCatalogTypeFilter,
+} from './pos/types';
 
 import './pos/pos-print.css';
 
@@ -346,7 +351,11 @@ export default function POSPage() {
   const debouncedProductSearch = useDebounce(productSearch, 500);
   // Catalog quick-filter chip: 'all' | 'pack' | `cat:<id>`. Mutually exclusive
   // so a cashier taps one chip to narrow the grid and "Tous" to reset.
-  const [catalogFilter, setCatalogFilter] = useState<string>('all');
+  // Two INDEPENDENT axes, mirroring the public vitrine: a category and a
+  // product type. The previous single key made them mutually exclusive, so
+  // "packs within Cheveux" was impossible to express.
+  const [typeFilter, setTypeFilter] = useState<POSCatalogTypeFilter>('all');
+  const [categoryFilter, setCategoryFilter] = useState<number | 'all'>('all');
   const [paymentMethod, setPaymentMethod] = useState<POSPaymentMethod>('cash');
   const [manualDiscountType, setManualDiscountType] = useState<
     'fixed' | 'percentage'
@@ -793,10 +802,8 @@ export default function POSPage() {
     };
   }, [channelId, selectedChannel, isOnlineMode]);
 
-  const categoryFilterId = catalogFilter.startsWith('cat:')
-    ? Number(catalogFilter.slice(4))
-    : undefined;
-  const packOnly = catalogFilter === 'pack';
+  const categoryFilterId =
+    categoryFilter === 'all' ? undefined : categoryFilter;
 
   const {
     data: productsData,
@@ -810,7 +817,12 @@ export default function POSPage() {
     // Keep the server query (the empty-cache fallback) in sync with the active
     // chip. The primary path is the IndexedDB cache, filtered client-side below.
     categories: categoryFilterId,
-    product_type: packOnly ? 'pack' : undefined,
+    product_type:
+      typeFilter === 'pack'
+        ? 'pack'
+        : typeFilter === 'resell_product'
+          ? 'resell_product'
+          : undefined,
     page_size: 20,
   });
 
@@ -822,7 +834,8 @@ export default function POSPage() {
   );
 
   useEffect(() => {
-    setCatalogFilter('all');
+    setTypeFilter('all');
+    setCategoryFilter('all');
   }, [channelId]);
 
   const presentCategoryIds = useMemo(() => {
@@ -910,8 +923,16 @@ export default function POSPage() {
     );
   }, [offlineProducts, productsData, hasActivePromotion]);
 
-  const channelProducts = useMemo(() => {
-    if (!channelId) return [];
+  // One pass produces both the visible rows and the per-type counts. The
+  // counts are deliberately computed on the CATEGORY-filtered set (before the
+  // type axis is applied), so each segment answers "how many would this
+  // reveal, here?" — the same thing the public vitrine shows.
+  const catalogue = useMemo(() => {
+    const empty = {
+      products: [] as ProductListItem[],
+      typeCounts: { all: 0, resell_product: 0, pack: 0, promo: 0 },
+    };
+    if (!channelId) return empty;
 
     const sortPromotionsFirst = (rows: ProductListItem[]) =>
       [...rows].sort((a, b) => {
@@ -926,47 +947,60 @@ export default function POSPage() {
     // canonical ``pack`` type, so both must be admitted here.
     const isSellable = (p: ProductListItem) =>
       p.product_type === 'resell_product' || p.product_type === 'pack';
+    const isPack = (p: ProductListItem) =>
+      p.is_pack || p.product_type === 'pack';
+    const matchesCategory = (p: ProductListItem) =>
+      categoryFilterId === undefined ||
+      (p.categories ?? []).includes(categoryFilterId);
 
-    // Catalog quick-filter (Tous / Packs / a category), applied client-side on
-    // top of the cached catalogue so it behaves identically online and offline.
-    const matchesCatalogFilter = (p: ProductListItem) => {
-      if (catalogFilter === 'pack') return p.is_pack || p.product_type === 'pack';
-      if (catalogFilter === 'promo') return hasActivePromotion(p);
-      if (categoryFilterId !== undefined) {
-        return (p.categories ?? []).includes(categoryFilterId);
-      }
+    let base: ProductListItem[];
+    if (offlineProducts.length > 0) {
+      // Cached catalogue: search is applied client-side so the behaviour is
+      // identical online and offline.
+      const query = normalizeSearch(productSearch);
+      base = offlineProducts.filter(
+        p =>
+          isSellable(p) &&
+          matchesCategory(p) &&
+          (!query ||
+            p.name.toLowerCase().includes(query) ||
+            (p.barcode || '').toLowerCase().includes(query))
+      );
+    } else if (productsData?.pages) {
+      // Server-paged fallback: the query itself already applied the search.
+      base = productsData.pages
+        .flatMap(page => page?.results ?? [])
+        .filter(p => isSellable(p) && matchesCategory(p));
+    } else {
+      return empty;
+    }
+
+    const typeCounts = {
+      all: base.length,
+      resell_product: base.filter(p => !isPack(p)).length,
+      pack: base.filter(isPack).length,
+      promo: base.filter(hasActivePromotion).length,
+    };
+
+    const matchesType = (p: ProductListItem) => {
+      if (typeFilter === 'pack') return isPack(p);
+      if (typeFilter === 'resell_product') return !isPack(p);
+      if (typeFilter === 'promo') return hasActivePromotion(p);
       return true;
     };
 
-    const isVisible = (p: ProductListItem) =>
-      isSellable(p) && matchesCatalogFilter(p);
-
-    if (offlineProducts.length > 0) {
-      const query = normalizeSearch(productSearch);
-      const base = offlineProducts.filter(isVisible);
-      const rows = query
-        ? base.filter(
-            product =>
-              product.name.toLowerCase().includes(query) ||
-              (product.barcode || '').toLowerCase().includes(query)
-          )
-        : base;
-      return sortPromotionsFirst(rows);
-    }
-
-    if (!productsData?.pages) return [];
-    return sortPromotionsFirst(
-      productsData.pages.flatMap(page => page?.results ?? []).filter(isVisible)
-    );
+    return { products: sortPromotionsFirst(base.filter(matchesType)), typeCounts };
   }, [
     channelId,
-    catalogFilter,
+    typeFilter,
     categoryFilterId,
     hasActivePromotion,
     offlineProducts,
     productSearch,
     productsData?.pages,
   ]);
+
+  const channelProducts = catalogue.products;
 
   const offlineLastSyncLabel = useMemo(() => {
     if (!offlineLastSync) return 'Aucun cache local';
@@ -2600,8 +2634,11 @@ export default function POSPage() {
                 cartQuantities={cartQuantities}
                 onAddToCart={addToCart}
                 onCameraScan={() => setCameraOpen(true)}
-                catalogFilter={catalogFilter}
-                onCatalogFilterChange={setCatalogFilter}
+                typeFilter={typeFilter}
+                onTypeFilterChange={setTypeFilter}
+                typeCounts={catalogue.typeCounts}
+                categoryFilter={categoryFilter}
+                onCategoryFilterChange={setCategoryFilter}
                 categoryOptions={categoryOptions}
                 promotionsAvailable={promotionsAvailable}
                 isLoading={offlineProducts.length === 0 && isProductsLoading}

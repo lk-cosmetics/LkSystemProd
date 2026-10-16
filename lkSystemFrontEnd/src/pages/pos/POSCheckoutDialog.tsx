@@ -202,6 +202,19 @@ function PaymentSummary({
   );
 }
 
+/**
+ * Horizontal headroom for focus/selection rings inside the dialog body.
+ *
+ * These sections clip horizontally, and their content box sits flush against
+ * that clip edge. Rings are drawn OUTSIDE the border box (a box-shadow spread:
+ * 1px for a selected card, 3px for the app's focus style), so on the leftmost
+ * control the ring was sliced off and the border looked cut.
+ *
+ * Widening the clip box by 4px and padding the content back by the same 4px
+ * leaves room for the ring while moving no layout at all.
+ */
+const RING_GUTTER = '-mx-1 px-1';
+
 export function POSCheckoutDialog({
   open,
   onOpenChange,
@@ -319,7 +332,7 @@ export function POSCheckoutDialog({
         <POSDialogBody>
           {step === 'customer' ? (
             <section
-              className="space-y-4"
+              className={`space-y-4 ${RING_GUTTER}`}
               aria-labelledby="checkout-customer-title"
             >
               <div>
@@ -347,7 +360,7 @@ export function POSCheckoutDialog({
             </section>
           ) : (
             <section
-              className="space-y-4"
+              className={`space-y-4 ${RING_GUTTER}`}
               aria-labelledby="checkout-payment-title"
             >
               <div className="flex flex-col gap-3 border-b pb-4 sm:flex-row sm:items-end sm:justify-between">

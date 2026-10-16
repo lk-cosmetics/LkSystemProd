@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ComponentType, ReactNode } from 'react';
+import type {
+  POSCatalogTypeCounts,
+  POSCatalogTypeFilter,
+} from './types';
 import {
   Search,
   Store,
@@ -46,11 +50,16 @@ interface POSProductGridProps {
   cartQuantities: Map<number, number>;
   onAddToCart: (product: ProductListItem) => void;
   onCameraScan: () => void;
-  /** Active catalog quick-filter chip: 'all' | 'pack' | 'promo' | `cat:<id>`. */
-  catalogFilter?: string;
-  onCatalogFilterChange?: (key: string) => void;
+  /** Product-type axis, independent of the category. */
+  typeFilter?: POSCatalogTypeFilter;
+  onTypeFilterChange?: (value: POSCatalogTypeFilter) => void;
+  /** How many products each segment would reveal in the current category. */
+  typeCounts?: POSCatalogTypeCounts;
+  /** Category axis, independent of the product type. */
+  categoryFilter?: number | 'all';
+  onCategoryFilterChange?: (value: number | 'all') => void;
   categoryOptions?: { id: number; name: string }[];
-  /** Whether anything in the catalogue is currently discounted. */
+  /** Whether anything in the channel is currently discounted. */
   promotionsAvailable?: boolean;
   getPrice?: (product: ProductListItem) => number;
   getAvailableQuantity?: (product: ProductListItem) => number | null;
@@ -118,6 +127,52 @@ function FilterChip({
   );
 }
 
+/**
+ * One product-type segment, carrying the count of what it would reveal.
+ *
+ * Mirrors the public vitrine's Tous / Produits / Packs control: a segment that
+ * would show nothing is disabled rather than hidden, so the row does not
+ * reflow under the cashier's finger as they move between categories.
+ */
+function TypeSegment({
+  active,
+  count,
+  onClick,
+  icon: Icon,
+  children,
+}: {
+  active: boolean;
+  count: number;
+  onClick: () => void;
+  icon?: ComponentType<{ className?: string }>;
+  children: ReactNode;
+}) {
+  const empty = count === 0 && !active;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={empty}
+      aria-pressed={active}
+      className={`inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+        active
+          ? 'border-foreground bg-foreground text-background'
+          : empty
+            ? 'cursor-not-allowed border-border bg-muted/30 text-muted-foreground/50'
+            : 'border-border bg-background text-foreground hover:bg-muted/60'
+      }`}
+    >
+      {Icon ? <Icon className="size-3.5" /> : null}
+      {children}
+      <span
+        className={`text-xs tabular-nums ${active ? 'opacity-70' : 'opacity-60'}`}
+      >
+        {count}
+      </span>
+    </button>
+  );
+}
+
 export function POSProductGrid({
   channels,
   channelId,
@@ -128,8 +183,11 @@ export function POSProductGrid({
   cartQuantities,
   onAddToCart,
   onCameraScan,
-  catalogFilter = 'all',
-  onCatalogFilterChange,
+  typeFilter = 'all',
+  onTypeFilterChange,
+  typeCounts = { all: 0, resell_product: 0, pack: 0, promo: 0 },
+  categoryFilter = 'all',
+  onCategoryFilterChange,
   categoryOptions = [],
   promotionsAvailable = false,
   getPrice,
@@ -611,48 +669,76 @@ export function POSProductGrid({
       ) : (
         <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
           {channelId && (
-            <div
-              role="group"
-              aria-label="Filtres du catalogue"
-              className="-mx-1 mb-1 flex shrink-0 items-center gap-1.5 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-            >
-              <FilterChip
-                active={catalogFilter === 'all'}
-                onClick={() => onCatalogFilterChange?.('all')}
-              >
-                Tous
-              </FilterChip>
-              {promotionsAvailable && (
-                <FilterChip
-                  active={catalogFilter === 'promo'}
-                  onClick={() => onCatalogFilterChange?.('promo')}
-                  icon={Tag}
-                >
-                  Promotions
-                </FilterChip>
-              )}
-              <FilterChip
-                active={catalogFilter === 'pack'}
-                onClick={() => onCatalogFilterChange?.('pack')}
-                icon={Boxes}
-              >
-                Packs
-              </FilterChip>
+            <div className="mb-1 shrink-0 space-y-1.5">
+              {/* Category axis. Horizontal scroll with a 4px gutter so the
+                  focus ring on the first/last chip is not sliced off by the
+                  scroll container. */}
               {categoryOptions.length > 0 && (
-                <span
-                  className="mx-1 h-5 w-px shrink-0 bg-border"
-                  aria-hidden="true"
-                />
-              )}
-              {categoryOptions.map(category => (
-                <FilterChip
-                  key={category.id}
-                  active={catalogFilter === `cat:${category.id}`}
-                  onClick={() => onCatalogFilterChange?.(`cat:${category.id}`)}
+                <div
+                  role="group"
+                  aria-label="Filtrer par catégorie"
+                  className="-mx-1 flex items-center gap-1.5 overflow-x-auto px-1 pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
                 >
-                  {category.name}
-                </FilterChip>
-              ))}
+                  <FilterChip
+                    active={categoryFilter === 'all'}
+                    onClick={() => onCategoryFilterChange?.('all')}
+                  >
+                    Toutes
+                  </FilterChip>
+                  {categoryOptions.map(category => (
+                    <FilterChip
+                      key={category.id}
+                      active={categoryFilter === category.id}
+                      onClick={() => onCategoryFilterChange?.(category.id)}
+                    >
+                      {category.name}
+                    </FilterChip>
+                  ))}
+                </div>
+              )}
+
+              {/* Product-type axis: a segmented control carrying counts, so the
+                  cashier can see what each segment holds before tapping it.
+                  Independent of the category above. */}
+              <div
+                role="group"
+                aria-label="Filtrer par type"
+                className="-mx-1 flex items-center gap-1.5 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+              >
+                <TypeSegment
+                  active={typeFilter === 'all'}
+                  count={typeCounts.all}
+                  onClick={() => onTypeFilterChange?.('all')}
+                >
+                  Tous
+                </TypeSegment>
+                <TypeSegment
+                  active={typeFilter === 'resell_product'}
+                  count={typeCounts.resell_product}
+                  onClick={() => onTypeFilterChange?.('resell_product')}
+                  icon={ShoppingBag}
+                >
+                  Produits
+                </TypeSegment>
+                <TypeSegment
+                  active={typeFilter === 'pack'}
+                  count={typeCounts.pack}
+                  onClick={() => onTypeFilterChange?.('pack')}
+                  icon={Boxes}
+                >
+                  Packs
+                </TypeSegment>
+                {promotionsAvailable && (
+                  <TypeSegment
+                    active={typeFilter === 'promo'}
+                    count={typeCounts.promo}
+                    onClick={() => onTypeFilterChange?.('promo')}
+                    icon={Tag}
+                  >
+                    Promotions
+                  </TypeSegment>
+                )}
+              </div>
             </div>
           )}
           <div className="min-h-0 w-full flex-1 overflow-hidden">
