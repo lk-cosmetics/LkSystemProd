@@ -5,6 +5,23 @@ import type {
   Client,
 } from '@/types';
 
+/* ── Catalogue filters ─────────────────────────────────────────────────── */
+
+/**
+ * Product-type axis of the POS catalogue filter, mirroring the public vitrine.
+ * Independent of the selected category, so "packs within Cheveux" is
+ * expressible.
+ */
+export type POSCatalogTypeFilter = 'all' | 'resell_product' | 'pack' | 'promo';
+
+/** How many products each type segment would reveal in the current category. */
+export interface POSCatalogTypeCounts {
+  all: number;
+  resell_product: number;
+  pack: number;
+  promo: number;
+}
+
 /* ── Cart ──────────────────────────────────────────────────────────────── */
 
 export interface CartLine {
