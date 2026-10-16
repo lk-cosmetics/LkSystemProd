@@ -72,7 +72,7 @@ export const POSCartItem = memo(function POSCartItem({
             size="icon-xs"
             className="size-6 shrink-0 text-muted-foreground/60 transition-colors hover:text-destructive group-hover:text-destructive"
             onClick={() => onRemove(line.product.id)}
-            aria-label={`Remove ${line.product.name}`}
+            aria-label={`Retirer ${line.product.name} du panier`}
           >
             <Trash2 className="size-3.5" />
           </Button>
@@ -91,7 +91,7 @@ export const POSCartItem = memo(function POSCartItem({
               size="icon-xs"
               className="size-7 rounded-full"
               onClick={() => onQty(line.product.id, -1)}
-              aria-label={`Decrease ${line.product.name}`}
+              aria-label={`Diminuer la quantité de ${line.product.name}`}
             >
               <Minus className="size-3" />
             </Button>
@@ -103,7 +103,7 @@ export const POSCartItem = memo(function POSCartItem({
               size="icon-xs"
               className="size-7 rounded-full"
               onClick={() => onQty(line.product.id, 1)}
-              aria-label={`Increase ${line.product.name}`}
+              aria-label={`Augmenter la quantité de ${line.product.name}`}
             >
               <Plus className="size-3" />
             </Button>
@@ -111,7 +111,7 @@ export const POSCartItem = memo(function POSCartItem({
         )}
 
         <div className="min-w-0 text-right">
-          <p className="text-[10px] text-muted-foreground">Line total</p>
+          <p className="text-[10px] text-muted-foreground">Total ligne</p>
           <p
             className={`text-sm font-bold tabular-nums leading-tight ${hasDiscount ? 'text-rose-600' : ''}`}
           >

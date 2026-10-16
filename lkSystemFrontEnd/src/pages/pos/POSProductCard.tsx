@@ -46,7 +46,7 @@ export const POSProductCard = memo(function POSProductCard({
       type="button"
       disabled={isDisabled}
       tabIndex={isDisabled ? -1 : 0}
-      aria-label={`Add ${product.name} — ${fmtTND(displayPrice)} TND`}
+      aria-label={`Ajouter ${product.name} au panier — ${fmtTND(displayPrice)} TND`}
       aria-disabled={isDisabled}
       className="group grid h-full min-w-0 grid-rows-[auto_7.75rem] appearance-none overflow-hidden bg-transparent p-0 text-left transition-opacity duration-150 active:scale-[0.985] focus:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 data-[disabled=true]:cursor-not-allowed data-[disabled=true]:opacity-55 select-none"
       data-disabled={isDisabled}

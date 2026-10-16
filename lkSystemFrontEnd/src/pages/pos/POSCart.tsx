@@ -95,7 +95,7 @@ export function POSCart({
       <div className="flex shrink-0 items-center justify-between">
         <div className="flex items-center gap-2">
           <ShoppingCart className="size-4" />
-          <span className="font-semibold text-sm">Cart</span>
+          <span className="font-semibold text-sm">Panier</span>
           {cartItemCount > 0 && (
             <Badge variant="secondary" className="text-xs px-1.5 py-0">
               {cartItemCount}
@@ -110,7 +110,7 @@ export function POSCart({
             onClick={onReleaseLockedOrder}
           >
             <X className="size-3" />
-            Release
+            Libérer
           </Button>
         )}
         {hasItems && !readOnlyCart && (
@@ -121,7 +121,7 @@ export function POSCart({
             onClick={onClearCart}
           >
             <Trash2 className="size-3" />
-            Clear
+            Vider
           </Button>
         )}
       </div>
@@ -182,8 +182,8 @@ export function POSCart({
         {!hasItems ? (
           <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
             <ShoppingCart className="size-8 mb-2 opacity-30" />
-            <p className="text-sm">Cart is empty</p>
-            <p className="text-xs mt-1">Tap a product to add it</p>
+            <p className="text-sm font-medium">Panier vide</p>
+            <p className="text-xs mt-1">Touchez un produit pour l’ajouter</p>
           </div>
         ) : (
           <div className="divide-y rounded-md border bg-background px-2">
@@ -210,7 +210,7 @@ export function POSCart({
             {!readOnlyCart && (
               <div className="rounded-md border bg-muted/20 p-2">
                 <div className="mb-2 flex items-center justify-between gap-2">
-                  <Label className="text-xs">Discount</Label>
+                  <Label className="text-xs">Remise</Label>
                   <div className="flex rounded-md border bg-background p-0.5">
                     <Button
                       type="button"
@@ -248,8 +248,8 @@ export function POSCart({
                     onChange={e => onManualDiscountValueChange(e.target.value)}
                     placeholder={
                       manualDiscountType === 'percentage'
-                        ? 'Discount %'
-                        : 'Discount amount'
+                        ? 'Remise en %'
+                        : 'Montant de la remise'
                     }
                     className="h-9 text-sm"
                   />
@@ -257,7 +257,8 @@ export function POSCart({
                     variant="outline"
                     className="h-9 shrink-0 px-2 tabular-nums"
                   >
-                    {manualDiscountAmount > 0 ? '−' : ''}{fmtTND(manualDiscountAmount)}
+                    {hasManualDiscount ? '−' : ''}
+                    {fmtTND(manualDiscountAmount)}
                   </Badge>
                 </div>
               </div>
@@ -268,7 +269,7 @@ export function POSCart({
               {/* Subtotal row — only when a discount applies */}
               {hasDiscount && (
                 <div className="flex justify-between items-baseline text-sm text-muted-foreground">
-                  <span>Subtotal</span>
+                  <span>Sous-total</span>
                   <span className="tabular-nums line-through">
                     {fmtTND(cartOriginalTotal)} TND
                   </span>
@@ -292,7 +293,7 @@ export function POSCart({
                 <div className="flex justify-between items-center">
                   <span className="flex items-center gap-1 text-sm text-green-600 font-medium">
                     <Tag className="size-3.5" />
-                    Manual discount
+                    Remise manuelle
                   </span>
                   <span className="text-sm font-semibold text-green-600 tabular-nums">
                     −{fmtTND(manualDiscountAmount)} TND
@@ -322,12 +323,12 @@ export function POSCart({
                 {submitting ? (
                   <>
                     <Loader2 className="size-4 animate-spin" />
-                    {submittingLabel ?? 'Applying promotions & processing...'}
+                    {submittingLabel ?? 'Application des promotions…'}
                   </>
                 ) : (
                   <>
                     <Receipt className="size-4" />
-                    {submitLabel ?? 'Checkout'} — {fmtTND(cartTotal)} TND
+                    {submitLabel ?? 'Encaisser'} — {fmtTND(cartTotal)} TND
                   </>
                 )}
               </Button>

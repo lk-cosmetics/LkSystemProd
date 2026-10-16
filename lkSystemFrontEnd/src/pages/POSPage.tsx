@@ -22,6 +22,8 @@ import {
   Wifi,
   WifiOff,
   RefreshCw,
+  CheckCircle2,
+  CloudUpload,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -327,6 +329,7 @@ export default function POSPage() {
   const [promotionsLoading, setPromotionsLoading] = useState(false);
   const [offlineLastSync, setOfflineLastSync] = useState<string | null>(null);
   const [pendingOfflineCount, setPendingOfflineCount] = useState(0);
+  const [failedOfflineCount, setFailedOfflineCount] = useState(0);
   const [syncingOffline, setSyncingOffline] = useState(false);
   const [posTab, setPosTab] = useState<'caisse' | 'depenses'>('caisse');
   const [caisseRefreshSignal, setCaisseRefreshSignal] = useState(0);
@@ -591,7 +594,14 @@ export default function POSPage() {
   const selectedChannel = channels.find(c => c.id === Number(channelId));
 
   const refreshPendingOfflineCount = useCallback(async () => {
-    setPendingOfflineCount(await offlinePOSService.getPendingCount());
+    // Split the queue: a ticket that FAILED needs the cashier's attention,
+    // while one merely PENDING will drain on its own. Reporting them as one
+    // number hid real sync failures behind a reassuring "en attente".
+    const tickets = await offlinePOSService.getPendingTickets();
+    setPendingOfflineCount(tickets.length);
+    setFailedOfflineCount(
+      tickets.filter(ticket => ticket.status === 'FAILED').length
+    );
   }, []);
 
   const loadCachedPOSProducts = useCallback(async (salesChannelId: number) => {
@@ -710,6 +720,7 @@ export default function POSPage() {
     const tickets = await offlinePOSService.getPendingTickets();
     if (tickets.length === 0) {
       setPendingOfflineCount(0);
+      setFailedOfflineCount(0);
       return;
     }
 
@@ -729,7 +740,9 @@ export default function POSPage() {
             'Offline ticket sync failed.'
           );
           await offlinePOSService.markTicketFailed(ticket, message);
-          setErrorMsg(`Ticket ${ticket.ticket_id} could not sync: ${message}`);
+          setErrorMsg(
+            `Le ticket ${ticket.ticket_id} n’a pas pu être synchronisé : ${message}`
+          );
           console.warn(
             '[POS] Offline ticket sync failed:',
             ticket.ticket_id,
@@ -870,17 +883,40 @@ export default function POSPage() {
     [offlinePromotions]
   );
 
+  // Single source of truth for "is this product discounted right now?". Used
+  // both to sort promotions to the front and to back the Promotions filter
+  // chip, so the chip can never disagree with the PROMO badge on the card.
+  const hasActivePromotion = useCallback(
+    (product: ProductListItem): boolean => {
+      const discounted =
+        discountedPrices[product.id] ?? getCachedPromotionPrice(product);
+      return (
+        typeof discounted === 'number' &&
+        discounted < Number(product.sales_price)
+      );
+    },
+    [discountedPrices, getCachedPromotionPrice]
+  );
+
+  // Only offer the Promotions chip when something is actually discounted —
+  // computed on the UNFILTERED catalogue, otherwise selecting the chip when it
+  // matches nothing would hide the chip and strand the cashier on an empty grid.
+  const promotionsAvailable = useMemo(() => {
+    if (offlineProducts.length > 0) {
+      return offlineProducts.some(hasActivePromotion);
+    }
+    return (productsData?.pages ?? []).some(page =>
+      (page?.results ?? []).some(hasActivePromotion)
+    );
+  }, [offlineProducts, productsData, hasActivePromotion]);
+
   const channelProducts = useMemo(() => {
     if (!channelId) return [];
 
     const sortPromotionsFirst = (rows: ProductListItem[]) =>
       [...rows].sort((a, b) => {
-        const aDiscount = discountedPrices[a.id] ?? getCachedPromotionPrice(a);
-        const bDiscount = discountedPrices[b.id] ?? getCachedPromotionPrice(b);
-        const aHasPromo =
-          typeof aDiscount === 'number' && aDiscount < Number(a.sales_price);
-        const bHasPromo =
-          typeof bDiscount === 'number' && bDiscount < Number(b.sales_price);
+        const aHasPromo = hasActivePromotion(a);
+        const bHasPromo = hasActivePromotion(b);
         if (aHasPromo !== bHasPromo) return aHasPromo ? -1 : 1;
         return a.name.localeCompare(b.name);
       });
@@ -895,6 +931,7 @@ export default function POSPage() {
     // top of the cached catalogue so it behaves identically online and offline.
     const matchesCatalogFilter = (p: ProductListItem) => {
       if (catalogFilter === 'pack') return p.is_pack || p.product_type === 'pack';
+      if (catalogFilter === 'promo') return hasActivePromotion(p);
       if (categoryFilterId !== undefined) {
         return (p.categories ?? []).includes(categoryFilterId);
       }
@@ -925,18 +962,17 @@ export default function POSPage() {
     channelId,
     catalogFilter,
     categoryFilterId,
-    discountedPrices,
-    getCachedPromotionPrice,
+    hasActivePromotion,
     offlineProducts,
     productSearch,
     productsData?.pages,
   ]);
 
   const offlineLastSyncLabel = useMemo(() => {
-    if (!offlineLastSync) return 'No local cache yet';
+    if (!offlineLastSync) return 'Aucun cache local';
     const date = new Date(offlineLastSync);
-    if (Number.isNaN(date.getTime())) return 'Local cache ready';
-    return `Last sync ${date.toLocaleString()}`;
+    if (Number.isNaN(date.getTime())) return 'Cache local prêt';
+    return `Dernière synchro ${date.toLocaleString('fr-FR')}`;
   }, [offlineLastSync]);
 
   const cartProductIds = useMemo(
@@ -1422,7 +1458,7 @@ export default function POSPage() {
           .filter((line): line is CartLine => Boolean(line));
 
         if (nextCart.length === 0) {
-          setErrorMsg('This POS order has no editable product lines.');
+          setErrorMsg('Cette commande ne contient aucune ligne modifiable.');
           return;
         }
 
@@ -1465,7 +1501,7 @@ export default function POSPage() {
     async (order: OrderListItem | OrderDetail) => {
       if (!order?.id || returningOrderId) return;
       if (order.returned_at || order.status === 'returned') {
-        setErrorMsg('This POS ticket has already been returned.');
+        setErrorMsg('Ce ticket a déjà fait l’objet d’un retour.');
         return;
       }
 
@@ -2374,7 +2410,7 @@ export default function POSPage() {
   const canAddClient = !!channelId && !!selectedChannel;
   const handleCheckoutAddClient = () => {
     if (!canAddClient) {
-      setErrorMsg('Select a sales channel before adding a client.');
+      setErrorMsg('Sélectionnez un canal de vente avant d’ajouter un client.');
       return;
     }
     resumeCheckoutAfterClientRef.current = checkoutOpen;
@@ -2430,14 +2466,14 @@ export default function POSPage() {
       ? returningOrderId === activeHistoryOrder.id
       : false,
     submitLabel: activePickupOrder
-      ? 'Checkout Pickup'
+      ? 'Encaisser le retrait'
       : activeHistoryOrder
-        ? 'Update & Print Ticket'
-        : 'Checkout',
+        ? 'Mettre à jour et imprimer'
+        : 'Encaisser',
     submittingLabel: activePickupOrder
-      ? 'Validating pickup checkout...'
+      ? 'Validation du retrait…'
       : activeHistoryOrder
-        ? 'Updating ticket...'
+        ? 'Mise à jour du ticket…'
         : undefined,
     compact: isMobile,
   };
@@ -2447,7 +2483,7 @@ export default function POSPage() {
     return (
       <div className="flex items-center justify-center h-64 text-muted-foreground gap-2">
         <Loader2 className="size-5 animate-spin" />
-        Loading POS...
+        Chargement du point de vente…
       </div>
     );
   }
@@ -2460,6 +2496,10 @@ export default function POSPage() {
         <div className="flex min-h-0 flex-1 flex-col p-2 sm:p-3 lg:p-4">
           <div className="mb-2 flex shrink-0 flex-col gap-2 rounded-md border bg-card/80 px-3 py-2 shadow-sm sm:flex-row sm:items-center sm:justify-between">
             <div className="flex flex-wrap items-center gap-2">
+              {/* Connectivity and synchronisation are two different facts and
+                  get two different badges: a cashier can be back online while
+                  tickets are still queued, and must not read "en ligne" as
+                  "everything is saved to the server". */}
               <Badge
                 variant={isOnlineMode ? 'default' : 'destructive'}
                 className="gap-1.5"
@@ -2469,17 +2509,44 @@ export default function POSPage() {
                 ) : (
                   <WifiOff className="size-3.5" />
                 )}
-                {isOnlineMode ? 'Mode en ligne' : 'Mode offline'}
+                {isOnlineMode ? 'En ligne' : 'Hors ligne'}
               </Badge>
-              <Badge variant="secondary" className="gap-1.5">
-                <ShoppingCart className="size-3.5" />
-                {pendingOfflineCount} ticket
-                {pendingOfflineCount === 1 ? '' : 's'} en attente
-              </Badge>
+
+              {syncingOffline ? (
+                <Badge variant="outline" className="gap-1.5">
+                  <Loader2 className="size-3.5 animate-spin" />
+                  Synchronisation en cours…
+                </Badge>
+              ) : failedOfflineCount > 0 ? (
+                <Badge variant="destructive" className="gap-1.5">
+                  <AlertTriangle className="size-3.5" />
+                  {failedOfflineCount} échec
+                  {failedOfflineCount === 1 ? '' : 's'} de synchronisation
+                </Badge>
+              ) : pendingOfflineCount > 0 ? (
+                <Badge
+                  variant="secondary"
+                  className="gap-1.5 border-amber-300 bg-amber-50 text-amber-900"
+                >
+                  <CloudUpload className="size-3.5" />
+                  {pendingOfflineCount} ticket
+                  {pendingOfflineCount === 1 ? '' : 's'} en attente de
+                  synchronisation
+                </Badge>
+              ) : (
+                <Badge
+                  variant="outline"
+                  className="gap-1.5 border-green-300 text-green-700"
+                >
+                  <CheckCircle2 className="size-3.5" />
+                  Synchronisé
+                </Badge>
+              )}
+
               {promotionsLoading ? (
                 <Badge variant="outline" className="gap-1.5 animate-pulse">
                   <Loader2 className="size-3.5 animate-spin" />
-                  Loading promotions…
+                  Chargement des promotions…
                 </Badge>
               ) : null}
               <span className="text-xs text-muted-foreground">
@@ -2499,7 +2566,7 @@ export default function POSPage() {
               <RefreshCw
                 className={`size-3.5 ${syncingOffline ? 'animate-spin' : ''}`}
               />
-              Sync
+              Synchroniser
             </Button>
           </div>
 
@@ -2536,6 +2603,7 @@ export default function POSPage() {
                 catalogFilter={catalogFilter}
                 onCatalogFilterChange={setCatalogFilter}
                 categoryOptions={categoryOptions}
+                promotionsAvailable={promotionsAvailable}
                 isLoading={offlineProducts.length === 0 && isProductsLoading}
                 isFetchingNextPage={
                   offlineProducts.length === 0 && isFetchingNextPage
